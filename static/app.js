@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260706l";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260706m";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -395,7 +395,9 @@ function seasonRequestSheet(tmdbId, st, done) {
             <span class="rq-state req">Requested</span></div>`;
         });
         toast(`Requested ${sel.length} season${sel.length > 1 ? "s" : ""}`);
-        a.textContent = "Requested ✓"; setTimeout(() => { sh.close(); done(); }, 900);
+        a.textContent = "Requested ✓";
+        setTimeout(() => { sh.close(); done(); }, 900);
+        setTimeout(done, 3500);   // re-confirm from Overseerr in case the first refetch was too early
       } catch { a.disabled = false; a.textContent = "Request selected"; }
     }
   });
@@ -1611,15 +1613,6 @@ const listSortLabel = () => (LIST_SORTS.find(s => s[0] === LISTSORT) || LIST_SOR
 const listSortFn = () => (LIST_SORTS.find(s => s[0] === LISTSORT) || LIST_SORTS[0])[2];
 
 // per-item progress: amber bar (in progress) · purple (complete + ended) · red (stopped watching)
-function listProg(it) {
-  if (it.type === "movie") return it.watched ? `<div class="lp mv-done">${I.check}<span>Watched</span></div>` : "";
-  if (it.total == null || it.total === 0) return "";
-  const total = it.total, watched = Math.min(it.watched || 0, total);
-  const pct = Math.round(100 * watched / total), complete = watched >= total;
-  const cls = it.archived ? "stopped" : (complete && it.ended) ? "done" : "";
-  const lbl = it.archived ? "Stopped" : complete ? (it.ended ? "Complete" : "Caught up") : `${watched} / ${total}`;
-  return `<div class="lp ${cls}"><span class="lp-bar"><i style="width:${pct}%"></i></span><span class="lp-lbl">${lbl}</span></div>`;
-}
 function listSortSheet(onPick) {
   const s = sheet(`<div class="sh-t">Sort by</div>
     <div class="sortopts">${LIST_SORTS.map(([k, lab]) =>
@@ -1642,16 +1635,39 @@ routes.list = async (id, quiet) => {
   const visNote = { private: "Only you can see this list.",
     public: "Household members can see this on your profile.",
     collab: "Household members can see it and add or remove titles." };
-  const itemCard = it => `<div class="pcard" data-type="${it.type}" data-id="${it.id}">
-      <div class="pshot"><a href="#/${it.type}/${it.id}"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt=""></a>
-        <span class="badge">${it.type === "show" ? "TV" : "FILM"}</span>
-        ${it.ended ? `<span class="ended-tag">Ended</span>` : ""}
-        ${canEdit ? `<div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>` : ""}
+  // list items use the Watch-Next card look: poster + scrim + bottom info overlay w/ progress
+  const itemCard = it => {
+    const isShow = it.type === "show", total = it.total || 0;
+    const watched = Math.min(it.watched || 0, total || (it.watched || 0));
+    const complete = total > 0 && watched >= total;
+    const pcls = it.archived ? "stopped" : (complete && it.ended) ? "done" : "";
+    let line = "", bar = "";
+    if (!isShow) {
+      line = it.watched ? `${I.check} Watched` : (it.year ? "" + it.year : "");
+    } else if (it.archived) {
+      const pct = total ? Math.round(100 * watched / total) : 0;
+      line = "Stopped watching";
+      bar = `<div class="pbar"><div class="pbar-track"><div class="pbar-fill stopped" style="--p:${pct}%"></div></div><div class="pbar-num stopped">${pct}%</div></div>`;
+    } else if (total) {
+      const pct = Math.round(100 * watched / total);
+      line = complete ? (it.ended ? "Series complete" : "All caught up") : `${watched} / ${total} watched`;
+      bar = `<div class="pbar"><div class="pbar-track"><div class="pbar-fill ${pcls}" style="--p:${pct}%"></div></div><div class="pbar-num ${pcls}">${pct}%</div></div>`;
+    } else {
+      line = it.year ? "" + it.year : "";
+    }
+    return `<div class="bcard listcard" data-type="${it.type}" data-id="${it.id}">
+      <img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt="">
+      <div class="scrim"></div>
+      <a class="fill" href="#/${it.type}/${it.id}" aria-label="${esc(it.title)}"></a>
+      ${it.ended ? `<span class="ended-tag">${I.flag} Ended</span>` : `<span class="badge">${isShow ? "TV" : "FILM"}</span>`}
+      ${canEdit ? `<button class="lc-rm rmlist" title="Remove from list">${I.x}</button>` : ""}
+      <div class="info">
+        <div class="t">${esc(it.title)}</div>
+        ${line ? `<div class="ep">${line}</div>` : ""}
+        ${bar}
       </div>
-      <div class="t">${esc(it.title)}</div>
-      ${listProg(it)}
-      <div class="y">${it.year || ""}</div>
     </div>`;
+  };
   const gridHTML = () => [...l.items].sort(listSortFn()).map(itemCard).join("");
   view.innerHTML = `<div class="page-head">
       ${crumb}
@@ -1677,8 +1693,9 @@ routes.list = async (id, quiet) => {
       : `<div class="empty">${canEdit ? "This list is empty. Tap + to add titles, or add from any show or movie page." : "This list is empty."}</div>`}`;
   const wireItems = () => {
     if (!canEdit) return;
-    $$(".rmlist", view).forEach(b => b.onclick = async () => {
-      const c = b.closest(".pcard");
+    $$(".rmlist", view).forEach(b => b.onclick = async e => {
+      e.preventDefault(); e.stopPropagation();
+      const c = b.closest(".bcard");
       await api(`/list/${id}/item`, { body: { item_type: c.dataset.type, item_id: +c.dataset.id, remove: true } });
       c.style.opacity = ".3"; c.querySelector(".rmlist").disabled = true;
       delete CACHE["/lists"];

@@ -1467,19 +1467,19 @@ body.recap-open{overflow:hidden}
 @media(prefers-reduced-motion:reduce){
   .rsx-slide.on{animation:none}.rs-hint{animation:none}.recap-show{transition:none}.rsx-seg.cur i{transition:none}}
 
-/* ── list items: watch progress + ended tag + sort ── */
-.pcard .ended-tag{top:auto;bottom:7px;left:7px;right:auto}
-.lp{margin-top:6px;display:flex;flex-direction:column;gap:3px}
-.lp-bar{height:5px;border-radius:99px;background:rgba(0,0,0,.4);overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
-.lp-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--amber-dim),var(--amber));transition:width .5s}
-.lp-lbl{font-size:10.5px;color:var(--mut);font-variant-numeric:tabular-nums;letter-spacing:.02em}
-.lp.done .lp-bar i{background:linear-gradient(90deg,#6d5fbf,#a99cf0)}
-.lp.done .lp-lbl{color:#b7abf2;font-weight:650}
-.lp.stopped .lp-bar{background:rgba(176,64,79,.22)}
-.lp.stopped .lp-bar i{background:linear-gradient(90deg,#8a3340,var(--velvet))}
-.lp.stopped .lp-lbl{color:#e2939f}
-.lp.mv-done{flex-direction:row;align-items:center;gap:4px;color:var(--amber-2);font-size:11px;font-weight:650}
-.lp.mv-done svg{width:13px;height:13px}
+/* ── list items styled like the Watch-Next card (poster + info overlay + progress) ── */
+.bcard.listcard .info{padding:9px 10px 10px}
+.bcard.listcard .t{font-size:13px;-webkit-line-clamp:2}
+.bcard.listcard .ep{color:var(--ink-2);font-size:11px;font-weight:600;margin-top:2px;display:flex;align-items:center;gap:3px}
+.bcard.listcard .ep svg{width:12px;height:12px;color:var(--amber-2)}
+.bcard.listcard .pbar{margin-top:7px}
+.bcard .pbar-num.done{color:#b7abf2}
+.bcard .pbar-num.stopped{color:#e2939f}
+.bcard.listcard .lc-rm{position:absolute;right:8px;top:8px;z-index:4;width:30px;height:30px;border-radius:50%;
+  background:rgba(15,13,10,.72);border:1px solid rgba(255,255,255,.14);color:var(--ink-2);
+  display:grid;place-items:center;backdrop-filter:blur(4px);transition:color .12s,border-color .12s}
+.bcard.listcard .lc-rm svg{width:15px;height:15px}
+.bcard.listcard .lc-rm:hover{color:#e6919e;border-color:var(--velvet)}
 /* same colour language on the show-detail progress bar (beat .pbar-track.big .pbar-fill) */
 .pbar-track.big .pbar-fill.done,.pbar-fill.done{background:linear-gradient(90deg,#6d5fbf,#a99cf0 70%,#c3b8ff)}
 .pbar-track.big .pbar-fill.stopped,.pbar-fill.stopped{background:linear-gradient(90deg,#8a3340,var(--velvet))}
