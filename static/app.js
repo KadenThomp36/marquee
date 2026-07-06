@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260706i";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260706j";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -31,6 +31,7 @@ const I = {
   bell: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M6 9a6 6 0 0 1 12 0c0 5 1.8 6.5 2.5 7.3.4.5.1 1.2-.6 1.2H4.1c-.7 0-1-.7-.6-1.2C4.2 15.5 6 14 6 9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9.5 20a2.5 2.5 0 0 0 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   lock: `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="5" y="10.5" width="14" height="9.5" rx="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="15" r="1.5" fill="currentColor"/></svg>`,
   globe: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 12h17M12 3.4c2.4 2.3 3.7 5.4 3.7 8.6S14.4 18.3 12 20.6c-2.4-2.3-3.7-5.4-3.7-8.6S9.6 5.7 12 3.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
+  users: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 5.5a3.2 3.2 0 0 1 0 6.2M17.5 14.6c1.9.5 3.4 2.2 3.4 4.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
 };
 const isEnded = st => st === "Ended" || st === "Canceled";
 
@@ -228,8 +229,8 @@ async function addToListMenu(itemType, itemId, title) {
   const { lists } = await api(`/item/${itemType}/${itemId}/lists`);
   const render = ls => ls.map(l => `
     <button class="list-opt ${l.has ? "on" : ""}" data-id="${l.id}">
-      <span class="lo-ic">${l.has ? I.bookmarkfill : I.bookmark}</span>
-      <span class="lo-name">${esc(l.name)}${l.is_default ? "" : ""}</span>
+      <span class="lo-ic">${l.collab ? I.users : l.has ? I.bookmarkfill : I.bookmark}</span>
+      <span class="lo-name">${esc(l.name)}${l.collab ? `<i class="lo-shared">shared by ${esc(l.owner || "a member")}</i>` : ""}</span>
       ${l.has ? `<span class="lo-check">${I.check}</span>` : ""}</button>`).join("");
   const s = sheet(`<div class="sh-t">Add “${esc(title)}” to…</div>
     <div id="listopts">${render(lists)}</div>
@@ -1064,6 +1065,7 @@ routes.show = async id => {
               <span id="reqslot"></span>
             </div>
             <div class="act-row">
+              <button class="chip-btn fav-chip" id="favchip" aria-pressed="false">${I.star}<span id="favchiplbl">Favorite</span></button>
               <button class="chip-btn" id="addlist">${I.listadd}<span>List</span></button>
               <button class="chip-btn" id="shareshow">${I.share}<span>Share</span></button>
               ${ME.is_admin ? `<button class="chip-btn" id="epedit">${I.edit}<span>Episodes</span></button>` : ""}
@@ -1078,7 +1080,7 @@ routes.show = async id => {
     ${info.overview ? `<p class="overview clamp" id="ov">${esc(info.overview)}</p>` : ""}
     <div id="upnext-host"></div>
     <div id="watch-now"></div>
-    ${castStrip(info.cast)}
+    ${info.cast?.length ? `<div class="section"><h2>Cast</h2><div class="rule"></div></div>${castStrip(info.cast)}` : ""}
     <div id="show-ratings"></div>
     <div class="reveal">
     ${s.seasons.map(se => {
@@ -1181,6 +1183,7 @@ routes.show = async id => {
     .then(el => { const c = $("#show-reviews"); if (c) c.appendChild(el); });
   mountRequest($("#reqslot"), "show", +id);
   if ($("#shareshow")) $("#shareshow").onclick = () => share(s.title, `show/${id}`);
+  wireFavChip("show", +id);
   if ($("#addlist")) $("#addlist").onclick = () => addToListMenu("show", +id, s.title);
 
   const seasonsByNum = Object.fromEntries(s.seasons.map(se => [se.season, se]));
@@ -1493,7 +1496,8 @@ function listCard(l) {
     <div class="lc-covers">${(l.posters.length
       ? l.posters.slice(0, 4).map(p => `<img loading="lazy" src="${p}" alt="">`).join("")
       : `<div class="lc-empty">${I.bookmark}</div>`)}
-      ${l.visibility === "public" ? `<span class="lc-vis">${I.globe}Public</span>` : ""}</div>
+      ${l.visibility === "public" ? `<span class="lc-vis">${I.globe}Public</span>`
+        : l.visibility === "collab" ? `<span class="lc-vis collab">${I.users}Collab</span>` : ""}</div>
     <div class="lc-body"><div class="lc-name">${l.is_default ? I.bookmarkfill : ""} ${esc(l.name)}</div>
       <div class="lc-count">${l.count} ${l.count === 1 ? "title" : "titles"}</div></div>
   </a>`;
@@ -1514,6 +1518,11 @@ function renderLists(d) {
         <button type="button" class="vis-opt" data-vis="public">
           <span class="vis-ic">${I.globe}</span>
           <span class="vis-txt"><b>Public</b><i>Household members can see it on your profile</i></span>
+          <span class="vis-dot"></span>
+        </button>
+        <button type="button" class="vis-opt" data-vis="collab">
+          <span class="vis-ic">${I.users}</span>
+          <span class="vis-txt"><b>Collaborative</b><i>Everyone in the household can add &amp; remove titles</i></span>
           <span class="vis-dot"></span>
         </button>
       </div>
@@ -1545,56 +1554,101 @@ routes.lists = () => {
   c.refresh(() => seg()[0] === "lists", d => renderLists(d, !c.stale));
 };
 
+// search-and-add sheet for putting titles onto a list (used by owners + collaborators)
+function listAddSheet(listId, onDone) {
+  const s = sheet(`<div class="sh-t">Add titles</div>
+    <div class="fav-search"><input id="lq" placeholder="Search shows & movies…" autocapitalize="none" autocomplete="off"></div>
+    <div id="lres" class="fav-results"><div class="fav-hint">Type to search TMDB.</div></div>
+    <button class="btn ghost" data-v="done">Done</button>`, { cls: "favpicker" });
+  const q = $("#lq", s.el), res = $("#lres", s.el);
+  let t = null, last = "", added = false;
+  q.oninput = () => {
+    clearTimeout(t); const v = q.value.trim();
+    if (v.length < 2) { res.innerHTML = `<div class="fav-hint">Keep typing…</div>`; return; }
+    t = setTimeout(async () => {
+      if (v === last) return; last = v;
+      res.innerHTML = skRows(3);
+      let data; try { data = await api("/search?q=" + encodeURIComponent(v)); } catch { return; }
+      if ($("#lq", s.el)?.value.trim() !== v) return;
+      const items = (data.results || []).filter(r => r.poster);
+      res.innerHTML = items.length ? items.map(r => `
+        <button class="fav-opt" data-t="${r.type}" data-id="${r.id}">
+          <img loading="lazy" src="${POSTER(r.poster)}" alt="">
+          <span class="fo-mid"><b>${esc(r.title)}</b><span class="fo-sub">${r.type === "show" ? "TV" : "Movie"}${r.year ? " · " + r.year : ""}</span></span>
+          <span class="fo-add">${I.plus}</span></button>`).join("")
+        : `<div class="fav-hint">No matches.</div>`;
+    }, 260);
+  };
+  res.addEventListener("click", async e => {
+    const opt = e.target.closest(".fav-opt"); if (!opt) return;
+    opt.classList.add("busy");
+    try {
+      await api(`/list/${listId}/item`, { body: { item_type: opt.dataset.t, item_id: +opt.dataset.id } });
+      sparks(opt); toast("Added"); added = true; delete CACHE["/lists"];
+      opt.querySelector(".fo-add").innerHTML = I.check;
+    } catch { opt.classList.remove("busy"); }
+  });
+  s.el.addEventListener("click", e => {
+    if (e.target.closest('[data-v="done"]')) { s.close(); if (added) onDone && onDone(); }
+  });
+  setTimeout(() => q.focus(), 80);
+}
+
 routes.list = async id => {
   view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
   const l = await api(`/list/${id}`);
-  const owner = l.is_owner, vis = l.visibility || "private", pub = vis === "public";
+  const owner = l.is_owner, canEdit = l.can_edit ?? owner, vis = l.visibility || "private";
   const crumb = owner
     ? `<a class="crumb" href="#/lists">${I.chevS} Lists</a>`
     : `<a class="crumb" href="#/u/${encodeURIComponent(l.owner.username)}">${I.chevS} ${esc(l.owner.display_name)}</a>`;
+  const VIS = [["private", "Private", I.lock], ["public", "Public", I.globe], ["collab", "Collab", I.users]];
+  const visNote = { private: "Only you can see this list.",
+    public: "Household members can see this on your profile.",
+    collab: "Household members can see it and add or remove titles." };
   view.innerHTML = `<div class="page-head">
       ${crumb}
       <div class="ph-actions">
+        ${canEdit ? `<button class="iconbtn" id="addtitles" title="Add titles">${I.plus}</button>` : ""}
         <button class="iconbtn" id="sharelist" title="Share">${I.share}</button>
         ${owner && !l.is_default ? `<button class="iconbtn" id="dellist" title="Delete list">${I.trash}</button>` : ""}
       </div>
     </div>
     <h1>${l.is_default ? I.bookmarkfill : ""} ${esc(l.name)} <span class="cnt">· ${l.items.length}</span></h1>
     ${owner
-      ? `<button class="vis-toggle ${pub ? "on" : ""}" id="vistoggle" aria-pressed="${pub}">
-           <span class="vt-ic">${pub ? I.globe : I.lock}</span>
-           <span class="vt-body"><b>${pub ? "Public list" : "Private list"}</b>
-             <i>${pub ? "Household members can see this on your profile" : "Only you can see this — tap to make it public"}</i></span>
-           <span class="vt-sw"></span>
-         </button>`
+      ? `<div class="vis-seg" id="visseg" role="group" aria-label="List visibility">
+           ${VIS.map(([v, lab, ic]) => `<button class="vs-opt ${vis === v ? "on" : ""}" data-vis="${v}">${ic}<span>${lab}</span></button>`).join("")}
+         </div>
+         <div class="vis-note">${visNote[vis]}</div>`
       : `<div class="list-owner">${avatarHTML(l.owner, "sm")}
            <span class="lo-txt">Shared by <b>@${esc(l.owner.username)}</b></span>
-           <span class="vis-pill">${I.globe} Public</span></div>`}
+           <span class="vis-pill ${vis}">${vis === "collab" ? `${I.users} Collaborative` : `${I.globe} Public`}</span></div>
+         ${vis === "collab" ? `<div class="vis-note">You can add &amp; remove titles on this shared list.</div>` : ""}`}
     ${l.items.length ? `<div class="pgrid reveal">${l.items.map(it => `
       <div class="pcard" data-type="${it.type}" data-id="${it.id}">
         <div class="pshot"><a href="#/${it.type}/${it.id}"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt=""></a>
           <span class="badge">${it.type === "show" ? "TV" : "FILM"}</span>
-          ${owner ? `<div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>` : ""}
+          ${canEdit ? `<div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>` : ""}
         </div>
         <div class="t">${esc(it.title)}</div><div class="y">${it.year || ""}</div>
       </div>`).join("")}</div>`
-      : `<div class="empty">${owner ? "This list is empty. Add titles from any show or movie page." : "This list is empty."}</div>`}`;
+      : `<div class="empty">${canEdit ? "This list is empty. Tap + to add titles, or add from any show or movie page." : "This list is empty."}</div>`}`;
   $("#sharelist").onclick = () => share(l.name, `list/${id}`);
+  if ($("#addtitles")) $("#addtitles").onclick = () => listAddSheet(id, () => routes.list(id));
   if ($("#dellist")) $("#dellist").onclick = async () => {
     if (confirm(`Delete the list “${l.name}”?`)) {
       await api(`/list/${id}`, { method: "DELETE" }); delete CACHE["/lists"]; location.hash = "#/lists";
     }
   };
-  if ($("#vistoggle")) $("#vistoggle").onclick = async () => {
-    const next = pub ? "private" : "public";
+  if ($("#visseg")) $$(".vs-opt", view).forEach(b => b.onclick = async () => {
+    const next = b.dataset.vis; if (next === vis) return;
     try {
       await api(`/list/${id}/visibility`, { body: { visibility: next } });
       delete CACHE["/lists"];
-      toast(next === "public" ? "List is now public" : "List is now private");
+      toast(next === "collab" ? "Now collaborative" : next === "public" ? "Now public" : "Now private");
       routes.list(id);
     } catch {}
-  };
-  if (owner) $$(".rmlist", view).forEach(b => b.onclick = async () => {
+  });
+  if (canEdit) $$(".rmlist", view).forEach(b => b.onclick = async () => {
     const c = b.closest(".pcard");
     await api(`/list/${id}/item`, { body: { item_type: c.dataset.type, item_id: +c.dataset.id, remove: true } });
     c.style.opacity = ".3"; c.querySelector(".rmlist").disabled = true;
@@ -1613,7 +1667,7 @@ window.renderProfileLists = async (username, isMe) => {
   try { data = await api(`/user/${encodeURIComponent(username)}/lists`); }
   catch { return ""; }
   const lists = data.lists || [];
-  const label = isMe ? "My lists" : "Public lists";
+  const label = isMe ? "My lists" : "Shared lists";
   if (!lists.length) {
     return isMe
       ? `<section class="prof-lists"><div class="section"><h2>${label}</h2><div class="rule"></div></div>
@@ -1654,6 +1708,7 @@ routes.movie = async id => {
               <span id="reqslot"></span>
             </div>
             <div class="act-row">
+              <button class="chip-btn fav-chip" id="favchip" aria-pressed="false">${I.star}<span id="favchiplbl">Favorite</span></button>
               <button class="chip-btn" id="maddlist">${I.listadd}<span>List</span></button>
               <button class="chip-btn" id="mshare">${I.share}<span>Share</span></button>
               ${i.imdb_id ? `<a class="chip-btn imdb" href="https://www.imdb.com/title/${i.imdb_id}/" target="_blank" rel="noopener"><b>IMDb</b></a>` : ""}
@@ -1665,7 +1720,7 @@ routes.movie = async id => {
     <div class="dbody">
     ${i.overview ? `<p class="overview clamp" id="ov">${esc(i.overview)}</p>` : ""}
     <div id="watch-now"></div>
-    ${castStrip(i.cast)}
+    ${i.cast?.length ? `<div class="section"><h2>Cast</h2><div class="rule"></div></div>${castStrip(i.cast)}` : ""}
     <div id="movie-reviews"></div>
     </div>`;
   if ($("#ov")) $("#ov").onclick = () => $("#ov").classList.toggle("clamp");
@@ -1681,6 +1736,7 @@ routes.movie = async id => {
   };
   $("#maddlist").onclick = () => addToListMenu("movie", +id, m.title);
   $("#mshare").onclick = () => share(m.title, `movie/${id}`);
+  wireFavChip("movie", +id);
   mountRequest($("#reqslot"), "movie", +id);
   watchNow("movie", +id, "watch-now");
   $("#movie-reviews").appendChild(await reviewsBlock("movie", +id, { watched: m.state === "watched" }));
@@ -1864,17 +1920,45 @@ window.toggleFavorite = async (itemType, itemId) => {
   return set.has(key);
 };
 
-function recapTeaser(me, username) {
-  const yr = new Date().getFullYear();
-  const href = me ? `#/recap` : `#/u/${encodeURIComponent(username)}/recap`;
-  return `<a class="recap-teaser reveal" href="${href}">
-    <div class="rt-glow"></div>
-    <div class="rt-body">
-      <div class="rt-kicker">Year in Review</div>
-      <div class="rt-title">${me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s"} ${yr}, wrapped</div>
-      <div class="rt-sub">A shareable recap of everything watched this year</div>
-    </div>
-    <div class="rt-go">${I.chevR}</div></a>`;
+// well-integrated favorite chip for show / movie detail pages (id="favchip" in the action row)
+async function wireFavChip(type, id) {
+  const chip = $("#favchip"); if (!chip) return;
+  const key = type + ":" + id;
+  const paint = on => {
+    chip.classList.toggle("on", on);
+    chip.setAttribute("aria-pressed", on);
+    const lbl = $("#favchiplbl"); if (lbl) lbl.textContent = on ? "Favorited" : "Favorite";
+  };
+  paint((await ensureFavSet()).has(key));
+  chip.onclick = async () => { await toggleFavorite(type, id); paint((FAVSET || new Set()).has(key)); };
+}
+
+function recapTeaser(me, p) {
+  const years = p.recap_years || [];
+  const first = me ? "Your" : esc((p.username || "").split(" ")[0] || "Their") + "’s";
+  if (years.length) {
+    const y = years[0];
+    const href = me ? `#/recap/${y}` : `#/u/${encodeURIComponent(p.username)}/recap/${y}`;
+    return `<a class="recap-teaser reveal" href="${href}">
+      <div class="rt-glow"></div>
+      <div class="rt-body">
+        <div class="rt-kicker">Year in Review</div>
+        <div class="rt-title">${first} ${y}, wrapped</div>
+        <div class="rt-sub">A slideshow of everything watched in ${y}</div>
+      </div>
+      <div class="rt-go">${I.chevR}</div></a>`;
+  }
+  if (me && p.recap_soon) {
+    return `<div class="recap-teaser locked reveal">
+      <div class="rt-glow"></div>
+      <div class="rt-body">
+        <div class="rt-kicker">Year in Review</div>
+        <div class="rt-title">${p.recap_year || new Date().getFullYear()} is still being written</div>
+        <div class="rt-sub">Your Wrapped slideshow unlocks in December ${I.lock}</div>
+      </div>
+      <div class="rt-go">${I.lock}</div></div>`;
+  }
+  return "";
 }
 
 async function loadMembers(host) {
@@ -1927,7 +2011,7 @@ routes.profile = async (username) => {
       <div class="section reveal"><h2>Favorites</h2><div class="rule"></div></div>
       <div class="fav-shelf reveal"><div class="fav-strip" id="favstrip">${favStripHTML(p.favorites || [], me)}</div></div>
 
-      ${recapTeaser(me, p.username)}
+      ${recapTeaser(me, p)}
 
       <div id="profile-lists"></div>
 
@@ -2460,108 +2544,182 @@ function advancedSection(a) {
 /* stats now live on the profile — keep old #/stats links working */
 routes.stats = () => { history.replaceState(null, "", "#/profile"); parseHash(); };
 
-/* ---------- year in review (the flagship, shareable recap) ---------- */
+/* ---------- year in review (flagship recap — a Wrapped-style slideshow) ---------- */
+// The recap only unlocks in December (current year) — see the backend. The route is the
+// "history spot": a landing that plays the slideshow; the first-view December auto-popup
+// is handled by checkRecapPopup() on boot.
 routes.recap = async (username, year) => {
   const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
   const yr = parseInt(year, 10) || new Date().getFullYear();
   const path = me ? `/recap/${yr}` : `/profile/${encodeURIComponent(username)}/recap/${yr}`;
   const who = me ? "profile" : "u/" + encodeURIComponent(username);
   view.innerHTML = `<div class="recap-load">${skRows(2)}</div>`;
-  let d; try { d = await api(path); } catch { return; }
+  let d; try { d = await api(path); } catch { location.hash = "#/" + who; return; }
   if (seg()[0] !== "recap" && seg()[0] !== "u") return;
-  renderRecap(d, me, username, who);
+  renderRecapLanding(d, me, username, who, yr);
 };
 
-function renderRecap(d, me, username, who) {
-  const yr = d.year;
-  const yrs = [yr, yr - 1, yr - 2];
-  const monthsFull = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
-  if (!d.has_data) {
+function yrSwitch(years, cur, me, who) {
+  years = (years && years.length) ? years : [cur];
+  return `<div class="rc-switch">${years.map(y =>
+    `<a class="rc-yr ${y === cur ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}">${y}</a>`).join("")}</div>`;
+}
+
+function renderRecapLanding(d, me, username, who, yr) {
+  const first = me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s";
+  if (d.locked) {
     view.innerHTML = `<div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
-      <div class="recap"><div class="recap-hd"><div class="rc-year">${yr}</div>
-        <div class="rc-kicker">Year in Review</div></div>
-      <div class="empty" style="padding:40px 16px">Nothing tracked in ${yr} yet. Watch a few things and check back.</div>
-      <div class="rc-switch">${yrs.map(y => `<a class="rc-yr ${y === yr ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}">${y}</a>`).join("")}</div></div>`;
+      <div class="recap-gate">
+        <div class="rg-lock">${I.lock}</div>
+        <div class="rg-year">${yr}</div>
+        <div class="rg-t">Not yet — check back in December</div>
+        <div class="rg-s">A Year in Review only makes sense once the year's actually a wrap, so ${yr}'s unlocks this December.</div>
+        ${d.years && d.years.length ? `<div class="rg-alt">Look back at a finished year:</div>${yrSwitch(d.years, -1, me, who)}` : ""}
+      </div>`;
     return;
   }
-  const topShow = d.top_shows[0];
-  const posters = d.top_shows.filter(s => s.poster).slice(0, 5);
-  const share = `<button class="btn rc-share" id="rcshare">${I.share} Share</button>`;
-  view.innerHTML = `
-    <div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
-    <div class="recap" id="recap">
-      <div class="recap-hero reveal">
-        <div class="rc-grain"></div>
-        <div class="rc-kicker">Year in Review</div>
-        <div class="rc-year">${yr}</div>
-        <div class="rc-sub">${me ? "Your" : esc((username || "").split(" ")[0]) + "’s"} year at the movies &amp; on the couch</div>
-      </div>
-
-      <div class="rc-bignums reveal">
-        <div class="rc-big"><div class="rc-bv">${fmtHours(d.minutes)}</div><div class="rc-bl">watched</div></div>
-        <div class="rc-big"><div class="rc-bv">${d.episodes.toLocaleString()}</div><div class="rc-bl">episodes</div></div>
-        <div class="rc-big"><div class="rc-bv">${d.movies.toLocaleString()}</div><div class="rc-bl">movies</div></div>
-        <div class="rc-big"><div class="rc-bv">${d.new_shows}</div><div class="rc-bl">new shows</div></div>
-      </div>
-
-      ${topShow ? `<div class="rc-card rc-headline reveal">
-        <div class="rc-cap">Show of the year</div>
-        <div class="rc-hl">
-          ${topShow.poster ? `<img class="rc-poster" src="${POSTER(topShow.poster)}" alt="">` : ""}
-          <div class="rc-hl-txt"><div class="rc-hl-t">${esc(topShow.title)}</div>
-            <div class="rc-hl-s">${topShow.eps} episodes · ${fmtHours(topShow.mins)}</div></div>
-        </div>
-        ${posters.length > 1 ? `<div class="rc-poster-row">${posters.slice(1).map(s =>
-          `<img src="${POSTER(s.poster)}" alt="${esc(s.title)}" title="${esc(s.title)}">`).join("")}</div>` : ""}
-      </div>` : ""}
-
-      <div class="rc-grid reveal">
-        <div class="rc-card rc-months">
-          <div class="rc-cap">The shape of your year</div>
-          ${(() => {
-            const mx = Math.max(...d.months, 1);
-            return `<div class="rc-bars">${d.months.map((v, i) => `
-              <div class="rc-bcol"><i style="height:${Math.max(3, Math.round(100 * v / mx))}%"></i>
-                <span>${monthsFull[i]}</span></div>`).join("")}</div>`;
-          })()}
-          ${d.busiest_month ? `<div class="rc-foot">Busiest in <b>${d.busiest_month}</b> · ${d.busiest_month_count} watches</div>` : ""}
-        </div>
-        ${d.genres.length ? `<div class="rc-card">
-          <div class="rc-cap">Your top genres</div>
-          ${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div>` : ""}
-      </div>
-
-      ${d.top_movies.length ? `<div class="rc-card reveal">
-        <div class="rc-cap">Films you loved</div>
-        <div class="rc-movie-row">${d.top_movies.map(m => `
-          <div class="rc-movie"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>
-          ${m.rating ? `<b class="rc-rate">${m.rating}/10</b>` : ""}</div>`).join("")}</div></div>` : ""}
-
-      <div class="rc-grid reveal">
-        ${d.binge ? `<div class="rc-card rc-mini"><div class="rc-cap">Biggest binge</div>
-          <div class="rc-mv">${d.binge.count}<small> eps</small></div>
-          <div class="rc-ms">${fmtDate(d.binge.date)}${d.binge.top ? " · mostly " + esc(d.binge.top) : ""}</div></div>` : ""}
-        ${d.first_watch ? `<div class="rc-card rc-mini"><div class="rc-cap">Kicked off with</div>
-          <div class="rc-mt">${esc(d.first_watch.title)}</div>
-          <div class="rc-ms">${fmtDate(d.first_watch.watched_at)}</div></div>` : ""}
-        ${d.last_watch ? `<div class="rc-card rc-mini"><div class="rc-cap">Most recently</div>
-          <div class="rc-mt">${esc(d.last_watch.title)}</div>
-          <div class="rc-ms">${fmtDate(d.last_watch.watched_at)}</div></div>` : ""}
-      </div>
-
-      <div class="rc-actions reveal">${share}
-        <div class="rc-switch">${yrs.map(y => `<a class="rc-yr ${y === yr ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}">${y}</a>`).join("")}</div></div>
+  view.innerHTML = `<div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
+    <div class="recap-land">
+      <div class="rl-glow"></div>
+      <div class="rl-kick">Year in Review</div>
+      <div class="rl-year">${d.year}</div>
+      <div class="rl-sub">${first} year at the movies &amp; on the couch</div>
+      ${d.has_data ? `
+        <div class="rl-teasenums">
+          <span><b>${fmtHours(d.minutes)}</b>watched</span>
+          <span><b>${(d.episodes || 0).toLocaleString()}</b>episodes</span>
+          <span><b>${d.movies || 0}</b>films</span></div>
+        <button class="btn pri rl-play" id="rcplay">${I.recap} Play the slideshow</button>`
+        : `<div class="empty" style="padding:22px 0">Nothing tracked in ${d.year}.</div>`}
+      ${yrSwitch(d.years, d.year, me, who)}
     </div>`;
+  if ($("#rcplay")) $("#rcplay").onclick = () => openRecap(d, { me, username });
+}
 
-  const btn = $("#rcshare");
-  if (btn) btn.onclick = async () => {
-    const url = location.href;
-    const text = `${me ? "My" : esc((username || "").split(" ")[0]) + "’s"} ${yr} on Marquee — ${fmtHours(d.minutes)} watched, ${d.episodes} episodes, ${d.movies} movies.`;
-    try {
-      if (navigator.share) await navigator.share({ title: `Marquee ${yr}`, text, url });
-      else { await navigator.clipboard.writeText(url); toast("Link copied"); }
-    } catch { /* user dismissed share */ }
+// build the ordered slide markup for a recap (empty sections are skipped)
+function recapSlides(d, me, username) {
+  const whoCap = me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s";
+  const mS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+  const topShow = (d.top_shows || [])[0];
+  const runners = (d.top_shows || []).filter(s => s.poster).slice(1, 5);
+  const S = [];
+  S.push(`<div class="rs intro"><div class="rs-kick">Year in Review</div>
+    <div class="rs-year">${d.year}</div>
+    <div class="rs-lead">${whoCap} year on the couch — let's rewind it.</div>
+    <div class="rs-hint">tap to begin ›</div></div>`);
+  S.push(`<div class="rs"><div class="rs-cap">By the numbers</div>
+    <div class="rs-nums">
+      <div><b>${fmtHours(d.minutes)}</b><span>watched</span></div>
+      <div><b>${(d.episodes || 0).toLocaleString()}</b><span>episodes</span></div>
+      <div><b>${(d.movies || 0).toLocaleString()}</b><span>movies</span></div>
+      <div><b>${d.new_shows || 0}</b><span>new shows</span></div></div></div>`);
+  if (topShow) S.push(`<div class="rs show"><div class="rs-cap">Show of the year</div>
+    ${topShow.poster ? `<img class="rs-poster" src="${POSTER(topShow.poster)}" alt="">` : ""}
+    <div class="rs-title">${esc(topShow.title)}</div>
+    <div class="rs-sub">${topShow.eps} episodes · ${fmtHours(topShow.mins)}</div>
+    ${runners.length ? `<div class="rs-runners">${runners.map(s =>
+      `<img src="${POSTER(s.poster)}" alt="${esc(s.title)}" title="${esc(s.title)}">`).join("")}</div>` : ""}</div>`);
+  if ((d.months || []).some(v => v)) {
+    const mx = Math.max(...d.months, 1);
+    S.push(`<div class="rs"><div class="rs-cap">The shape of your year</div>
+      <div class="rs-bars">${d.months.map((v, i) =>
+        `<div class="rs-bcol"><i style="height:${Math.max(3, Math.round(100 * v / mx))}%"></i><span>${mS[i]}</span></div>`).join("")}</div>
+      ${d.busiest_month ? `<div class="rs-foot">Busiest in <b>${d.busiest_month}</b> · ${d.busiest_month_count} watches</div>` : ""}</div>`);
+  }
+  if ((d.genres || []).length) S.push(`<div class="rs"><div class="rs-cap">Your top genres</div>
+    <div class="rs-rank">${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div></div>`);
+  if ((d.top_movies || []).length) S.push(`<div class="rs"><div class="rs-cap">Films you loved</div>
+    <div class="rs-films">${d.top_movies.slice(0, 5).map(m =>
+      `<div class="rs-film"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>${m.rating ? `<b>${m.rating}/10</b>` : ""}</div>`).join("")}</div></div>`);
+  const rec = [];
+  if (d.binge) rec.push(`<div class="rs-rec"><span>Biggest binge</span><b>${d.binge.count} eps</b><i>${fmtDate(d.binge.date)}${d.binge.top ? " · mostly " + esc(d.binge.top) : ""}</i></div>`);
+  if (d.first_watch) rec.push(`<div class="rs-rec"><span>Kicked off with</span><b>${esc(d.first_watch.title)}</b><i>${fmtDate(d.first_watch.watched_at)}</i></div>`);
+  if (d.last_watch) rec.push(`<div class="rs-rec"><span>Most recently</span><b>${esc(d.last_watch.title)}</b><i>${fmtDate(d.last_watch.watched_at)}</i></div>`);
+  if (rec.length) S.push(`<div class="rs"><div class="rs-cap">For the record</div><div class="rs-recs">${rec.join("")}</div></div>`);
+  S.push(`<div class="rs outro"><div class="rs-year sm">${d.year}</div>
+    <div class="rs-otitle">That's a wrap.</div>
+    <div class="rs-osub">${fmtHours(d.minutes)} · ${(d.episodes || 0).toLocaleString()} episodes · ${d.movies || 0} films</div>
+    <button class="btn pri rc-share" id="rcshare">${I.share} Share your ${d.year}</button></div>`);
+  return S;
+}
+
+async function shareRecap(d, me, username) {
+  const text = `${me ? "My" : esc((username || "").split(" ")[0]) + "’s"} ${d.year} on Marquee — ${fmtHours(d.minutes)} watched, ${d.episodes} episodes, ${d.movies} movies.`;
+  const url = location.origin + "/#/recap/" + d.year;
+  try {
+    if (navigator.share) await navigator.share({ title: `Marquee ${d.year}`, text, url });
+    else { await navigator.clipboard.writeText(text + " " + url); toast("Copied to clipboard"); }
+  } catch { /* dismissed */ }
+}
+
+// full-screen story-style slideshow. Tap right/left, swipe, arrow keys; progress segments up top.
+function openRecap(d, opts = {}) {
+  const { me = true, username = "" } = opts;
+  const slides = recapSlides(d, me, username);
+  const n = slides.length;
+  const ov = document.createElement("div");
+  ov.className = "recap-show";
+  ov.innerHTML = `
+    <div class="rsx-top">
+      <div class="rsx-bars">${slides.map((_, i) => `<span class="rsx-seg" data-i="${i}"><i></i></span>`).join("")}</div>
+      <button class="rsx-close" aria-label="Close recap">${I.x}</button></div>
+    <div class="rsx-stage">${slides.map((s, i) => `<div class="rsx-slide" data-i="${i}">${s}</div>`).join("")}</div>`;
+  document.body.appendChild(ov);
+  document.body.classList.add("recap-open");
+  requestAnimationFrame(() => ov.classList.add("in"));
+  let idx = -1;
+  const show = i => {
+    idx = Math.max(0, Math.min(n - 1, i));
+    $$(".rsx-slide", ov).forEach(s => s.classList.toggle("on", +s.dataset.i === idx));
+    $$(".rsx-seg", ov).forEach(s => {
+      const j = +s.dataset.i; s.classList.toggle("done", j < idx); s.classList.toggle("cur", j === idx);
+    });
+    const sb = $("#rcshare", ov);
+    if (sb) sb.onclick = () => shareRecap(d, me, username);
   };
+  const onKey = e => {
+    if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); next(); }
+    else if (e.key === "ArrowLeft") prev();
+    else if (e.key === "Escape") close();
+  };
+  const close = () => {
+    document.removeEventListener("keydown", onKey);
+    ov.classList.remove("in");
+    setTimeout(() => ov.remove(), 220);
+    document.body.classList.remove("recap-open");
+    opts.onClose && opts.onClose();
+  };
+  const next = () => { if (idx >= n - 1) close(); else show(idx + 1); };
+  const prev = () => show(idx - 1);
+  $(".rsx-close", ov).onclick = close;
+  $$(".rsx-seg", ov).forEach(s => s.onclick = () => show(+s.dataset.i));
+  const stage = $(".rsx-stage", ov);
+  let sx = 0, moved = false;
+  stage.addEventListener("touchstart", e => { sx = e.touches[0].clientX; moved = false; }, { passive: true });
+  stage.addEventListener("touchmove", e => { if (Math.abs(e.touches[0].clientX - sx) > 10) moved = true; }, { passive: true });
+  stage.addEventListener("touchend", e => { const dx = e.changedTouches[0].clientX - sx; if (Math.abs(dx) > 45) (dx < 0 ? next() : prev()); });
+  stage.addEventListener("click", e => {   // tap right → next, left third → prev; let buttons/links work
+    if (moved) { moved = false; return; }
+    if (e.target.closest("a,button")) return;
+    const r = stage.getBoundingClientRect();
+    (e.clientX - r.left < r.width * 0.32) ? prev() : next();
+  });
+  document.addEventListener("keydown", onKey);
+  show(0);
+  return { close };
+}
+
+// on boot: if the current year's recap just unlocked (December) and hasn't been seen,
+// auto-present it once, then mark it seen so it never pops again.
+async function checkRecapPopup() {
+  try {
+    const r = await api("/recap");
+    if (!r || !r.autoshow) return;
+    const d = await api("/recap/" + r.autoshow);
+    if (!d || !d.has_data) return;
+    openRecap(d, { me: true, username: ME.username });
+    api("/recap/" + r.autoshow + "/seen", { method: "POST", body: {} }).catch(() => {});
+  } catch { /* never block boot on the recap */ }
 }
 
 
@@ -2755,6 +2913,7 @@ async function boot() {
   parseHash();
   refreshBell();
   setInterval(refreshBell, 60000);
+  setTimeout(checkRecapPopup, 1400);   // December: auto-present this year's recap once
   setTimeout(() => ["/dashboard", "/upcoming", "/movies", "/lists", "/stats"].forEach(p =>
     api(p).then(d => { CACHE[p] = d; }).catch(() => {})), 600);
 }

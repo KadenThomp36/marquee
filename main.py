@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260706i"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260706j"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS favorites(
   user_id INTEGER, item_type TEXT, item_id INTEGER, position INTEGER, created_at TEXT,
   PRIMARY KEY(user_id, item_type, item_id));
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, position);
+CREATE TABLE IF NOT EXISTS recap_seen(
+  user_id INTEGER, year INTEGER, seen_at TEXT, PRIMARY KEY(user_id, year));
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 CREATE TABLE IF NOT EXISTS watch_providers(
   item_type TEXT, item_id INTEGER, region TEXT DEFAULT 'US',
@@ -416,11 +418,22 @@ def get_favorites(con, uid):
 
 
 def profile_payload(con, u, viewer_id):
+    is_me = u["id"] == viewer_id
+    cy = datetime.now().year
+    recap_soon = False
+    if is_me and not recap_year_unlocked(cy):
+        recap_soon = bool(
+            con.execute("SELECT 1 FROM watches WHERE user_id=? AND substr(watched_at,1,4)=? LIMIT 1",
+                        (u["id"], str(cy))).fetchone()
+            or con.execute("SELECT 1 FROM movie_states WHERE user_id=? AND state='watched' "
+                           "AND substr(watched_at,1,4)=? LIMIT 1", (u["id"], str(cy))).fetchone())
     return {**user_public(u), "is_admin": bool(u["is_admin"]),
             "member_since": (u["created_at"] if "created_at" in u.keys() else None),
-            "is_me": u["id"] == viewer_id,
+            "is_me": is_me,
             "headline": headline_counts(con, u["id"]),
-            "favorites": get_favorites(con, u["id"])}
+            "favorites": get_favorites(con, u["id"]),
+            "recap_years": available_recap_years(con, u["id"]),
+            "recap_soon": recap_soon, "recap_year": cy}
 
 
 def resolve_member(con, username):
@@ -568,13 +581,22 @@ def list_visibility(row):
     return (row["visibility"] if "visibility" in row.keys() else None) or "private"
 
 
+def norm_vis(v):
+    """Clamp a requested visibility to a known value. 'collab' = jointly-editable."""
+    return v if v in ("private", "public", "collab") else "private"
+
+
+# lists that other household members are allowed to *see*
+SHARED_VIS = ("public", "collab")
+
+
 def list_cards(con, uid, public_only=False):
     """Assemble the list-card summaries (name, count, up-to-4 cover posters, visibility)
     for one user's lists. public_only hides that user's private lists (for other viewers)."""
     q = ("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n
             FROM lists l WHERE l.user_id=?""")
     if public_only:
-        q += " AND l.visibility='public'"
+        q += " AND l.visibility IN ('public','collab')"
     q += " ORDER BY l.is_default DESC, l.created_at"
     out = []
     for r in con.execute(q, (uid,)).fetchall():
@@ -620,7 +642,7 @@ async def create_list(request: Request, user=Depends(current_user)):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "name required")
-    visibility = "public" if body.get("visibility") == "public" else "private"
+    visibility = norm_vis(body.get("visibility"))
     with db() as con:
         cur = con.execute("INSERT INTO lists(user_id,name,visibility,created_at) VALUES(?,?,?,?)",
                           (user["id"], name, visibility, datetime.utcnow().isoformat()))
@@ -630,7 +652,7 @@ async def create_list(request: Request, user=Depends(current_user)):
 @app.post("/api/list/{list_id}/visibility")
 async def set_list_visibility(list_id: int, request: Request, user=Depends(current_user)):
     body = await request.json()
-    visibility = "public" if body.get("visibility") == "public" else "private"
+    visibility = norm_vis(body.get("visibility"))
     with db() as con:
         if not con.execute("SELECT 1 FROM lists WHERE id=? AND user_id=?",
                            (list_id, user["id"])).fetchone():
@@ -661,15 +683,17 @@ def get_list(list_id: int, user=Depends(current_user)):
             raise HTTPException(404)
         visibility = list_visibility(l)
         is_owner = l["user_id"] == user["id"]
-        # owner sees any of their lists; anyone else may only see public ones (404 hides the rest)
-        if not is_owner and visibility != "public":
+        # owner sees any of their lists; others may see shared (public/collab) ones (404 hides the rest)
+        if not is_owner and visibility not in SHARED_VIS:
             raise HTTPException(404)
         owner = con.execute("SELECT * FROM users WHERE id=?", (l["user_id"],)).fetchone()
         items = con.execute("SELECT * FROM list_items WHERE list_id=? ORDER BY added_at DESC",
                             (list_id,)).fetchall()
         out = [x for x in (list_item_row(con, it) for it in items) if x]
+    # collab lists: any signed-in member can add/remove; only the owner can rename/delete/reshare
+    can_edit = is_owner or visibility == "collab"
     return {"id": l["id"], "name": l["name"], "is_default": bool(l["is_default"]),
-            "visibility": visibility, "is_owner": is_owner,
+            "visibility": visibility, "is_owner": is_owner, "can_edit": can_edit,
             "owner": user_public(owner), "items": out}
 
 
@@ -678,9 +702,12 @@ async def list_item_toggle(list_id: int, request: Request, user=Depends(current_
     body = await request.json()
     it_type, it_id = body["item_type"], int(body["item_id"])
     with db() as con:
-        if not con.execute("SELECT 1 FROM lists WHERE id=? AND user_id=?",
-                           (list_id, user["id"])).fetchone():
+        l = con.execute("SELECT user_id, visibility FROM lists WHERE id=?", (list_id,)).fetchone()
+        if not l:
             raise HTTPException(404)
+        # owner always; on a collab list any signed-in member may add/remove
+        if l["user_id"] != user["id"] and list_visibility(l) != "collab":
+            raise HTTPException(403, "not allowed to edit this list")
         if body.get("remove"):
             con.execute("DELETE FROM list_items WHERE list_id=? AND item_type=? AND item_id=?",
                         (list_id, it_type, it_id))
@@ -699,12 +726,19 @@ def item_lists(item_type: str, item_id: int, user=Depends(current_user)):
     """Which of my lists contain this item (for the add-to-list menu)."""
     with db() as con:
         ensure_default_list(con, user["id"])
-        rows = con.execute("""SELECT l.id, l.name, l.is_default,
-            (SELECT 1 FROM list_items li WHERE li.list_id=l.id AND li.item_type=? AND li.item_id=?) has
-            FROM lists l WHERE l.user_id=? ORDER BY l.is_default DESC, l.created_at""",
-            (item_type, item_id, user["id"])).fetchall()
-    return {"lists": [{"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
-                       "has": bool(r["has"])} for r in rows]}
+        rows = con.execute("""SELECT l.id, l.name, l.is_default, l.user_id, l.visibility,
+            (SELECT 1 FROM list_items li WHERE li.list_id=l.id AND li.item_type=? AND li.item_id=?) has,
+            (SELECT display_name FROM users u WHERE u.id=l.user_id) owner
+            FROM lists l WHERE l.user_id=? OR l.visibility='collab'
+            ORDER BY (l.user_id!=?), l.is_default DESC, l.created_at""",
+            (item_type, item_id, user["id"], user["id"])).fetchall()
+    out = []
+    for r in rows:
+        mine = r["user_id"] == user["id"]
+        out.append({"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
+                    "has": bool(r["has"]), "collab": not mine,
+                    "owner": None if mine else r["owner"]})
+    return {"lists": out}
 
 
 # ---------------------------------------------------------------- external community reviews
@@ -1992,6 +2026,35 @@ def discover(user=Depends(current_user)):
 
 # ---------------------------------------------------------------- stats
 
+# A watched_at shared by this many episodes is a batch mark (TV Time import /
+# "mark whole season"), not real-time viewing — exclude it from binge/biggest-day
+# stats so an import doesn't masquerade as a 1,300-episode "day".
+BULK_MARK = 5
+
+
+def biggest_binge(con, uid, lo=None, hi=None):
+    """Biggest genuine single-day binge (date, episode count, top show), ignoring
+    bulk import/season-mark timestamps. Returns None if there's no real viewing."""
+    bulk = "w.watched_at NOT IN (SELECT watched_at FROM watches WHERE user_id=? GROUP BY watched_at HAVING COUNT(*)>=?)"
+    where, args = "w.user_id=?", [uid]
+    if lo:
+        where += " AND w.watched_at>=?"; args.append(lo)
+    if hi:
+        where += " AND w.watched_at<=?"; args.append(hi)
+    row = con.execute(
+        f"""SELECT substr(w.watched_at,1,10) d, COUNT(*) c FROM watches w
+            WHERE {where} AND {bulk} GROUP BY d ORDER BY c DESC LIMIT 1""",
+        (*args, uid, BULK_MARK)).fetchone()
+    if not row:
+        return None
+    top = con.execute(
+        f"""SELECT s.title FROM watches w JOIN shows s ON s.id=w.show_id
+            WHERE w.user_id=? AND substr(w.watched_at,1,10)=? AND {bulk}
+            GROUP BY s.id ORDER BY COUNT(*) DESC LIMIT 1""",
+        (uid, row["d"], uid, BULK_MARK)).fetchone()
+    return {"date": row["d"], "count": row["c"], "top": top["title"] if top else None}
+
+
 def compute_stats(uid):
     with db() as con:
         eps_total = con.execute("SELECT COUNT(*) c FROM watches WHERE user_id=?", (uid,)).fetchone()["c"]
@@ -2063,14 +2126,7 @@ def compute_stats(uid):
             while probe.isoformat() in ds:
                 current_streak += 1
                 probe -= timedelta(days=1)
-        big = con.execute("""SELECT substr(watched_at,1,10) d, COUNT(*) c FROM watches
-            WHERE user_id=? GROUP BY d ORDER BY c DESC LIMIT 1""", (uid,)).fetchone()
-        big_day = None
-        if big:
-            bt = con.execute("""SELECT s.title, COUNT(*) c FROM watches w JOIN shows s ON s.id=w.show_id
-                WHERE w.user_id=? AND substr(w.watched_at,1,10)=? GROUP BY s.id
-                ORDER BY c DESC LIMIT 1""", (uid, big["d"])).fetchone()
-            big_day = {"date": big["d"], "count": big["c"], "top": bt["title"] if bt else None}
+        big_day = biggest_binge(con, uid)
         first = con.execute("""SELECT w.watched_at, s.title FROM watches w JOIN shows s ON s.id=w.show_id
             WHERE w.user_id=? ORDER BY w.watched_at LIMIT 1""", (uid,)).fetchone()
 
@@ -2282,15 +2338,7 @@ def compute_recap(con, uid, year):
     for r in monthly:
         if r["mo"]:
             months[int(r["mo"]) - 1] += r["c"]
-    big = con.execute("""SELECT substr(watched_at,1,10) d, COUNT(*) c FROM watches
-        WHERE user_id=? AND watched_at>=? AND watched_at<=? GROUP BY d ORDER BY c DESC LIMIT 1""",
-        (uid, lo, hi)).fetchone()
-    binge = None
-    if big:
-        bt = con.execute("""SELECT s.title FROM watches w JOIN shows s ON s.id=w.show_id
-            WHERE w.user_id=? AND substr(w.watched_at,1,10)=? GROUP BY s.id
-            ORDER BY COUNT(*) DESC LIMIT 1""", (uid, big["d"])).fetchone()
-        binge = {"date": big["d"], "count": big["c"], "top": bt["title"] if bt else None}
+    binge = biggest_binge(con, uid, lo, hi)
     first = con.execute("""SELECT w.watched_at, s.title FROM watches w JOIN shows s ON s.id=w.show_id
         WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=? ORDER BY w.watched_at LIMIT 1""",
         (uid, lo, hi)).fetchone()
@@ -2321,17 +2369,68 @@ def compute_recap(con, uid, year):
     }
 
 
+def recap_year_unlocked(year):
+    """A year's recap unlocks only once that year is over — any past year, or the current
+    year once it's December. (Keeps '2026 wrapped' from showing up in July.)"""
+    now = datetime.now()
+    return year < now.year or (year == now.year and now.month == 12)
+
+
+def available_recap_years(con, uid):
+    """Years this user actually watched something in that are also unlocked, newest first."""
+    years = set()
+    for tbl, cond in (("watches", ""), ("movie_states", " AND state='watched'")):
+        for r in con.execute(f"SELECT DISTINCT substr(watched_at,1,4) y FROM {tbl} "
+                             f"WHERE user_id=? AND watched_at IS NOT NULL{cond}", (uid,)):
+            if r["y"] and r["y"].isdigit():
+                years.add(int(r["y"]))
+    return sorted((y for y in years if recap_year_unlocked(y)), reverse=True)
+
+
+def recap_current_pending(con, uid):
+    """The current year's recap IF unlocked (December), has data, and not yet seen — the
+    one-time slideshow to auto-present. Otherwise None."""
+    cy = datetime.now().year
+    if not recap_year_unlocked(cy) or cy not in available_recap_years(con, uid):
+        return None
+    seen = con.execute("SELECT 1 FROM recap_seen WHERE user_id=? AND year=?", (uid, cy)).fetchone()
+    return None if seen else cy
+
+
+@app.get("/api/recap")
+def recap_index(user=Depends(current_user)):
+    with db() as con:
+        return {"years": available_recap_years(con, user["id"]),
+                "autoshow": recap_current_pending(con, user["id"])}
+
+
 @app.get("/api/recap/{year}")
 def recap(year: int, user=Depends(current_user)):
+    if not recap_year_unlocked(year):
+        return {"year": year, "locked": True, "has_data": False}
     with db() as con:
-        return compute_recap(con, user["id"], year)
+        d = compute_recap(con, user["id"], year)
+        d["years"] = available_recap_years(con, user["id"])
+        return d
+
+
+@app.post("/api/recap/{year}/seen")
+def recap_seen_mark(year: int, user=Depends(current_user)):
+    with db() as con:
+        con.execute("INSERT OR IGNORE INTO recap_seen(user_id,year,seen_at) VALUES(?,?,?)",
+                    (user["id"], year, datetime.utcnow().isoformat()))
+    return {"ok": True}
 
 
 @app.get("/api/profile/{username}/recap/{year}")
 def recap_public(username: str, year: int, user=Depends(current_user)):
+    if not recap_year_unlocked(year):
+        return {"year": year, "locked": True, "has_data": False}
     with db() as con:
         u = resolve_member(con, username)
-        return compute_recap(con, u["id"], year)
+        d = compute_recap(con, u["id"], year)
+        d["years"] = available_recap_years(con, u["id"])
+        return d
 
 
 # ---------------------------------------------------------------- history
