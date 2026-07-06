@@ -728,7 +728,7 @@ def item_lists(item_type: str, item_id: int, user=Depends(current_user)):
         ensure_default_list(con, user["id"])
         rows = con.execute("""SELECT l.id, l.name, l.is_default, l.user_id, l.visibility,
             (SELECT 1 FROM list_items li WHERE li.list_id=l.id AND li.item_type=? AND li.item_id=?) has,
-            (SELECT display_name FROM users u WHERE u.id=l.user_id) owner
+            (SELECT COALESCE(display_name, username) FROM users u WHERE u.id=l.user_id) owner
             FROM lists l WHERE l.user_id=? OR l.visibility='collab'
             ORDER BY (l.user_id!=?), l.is_default DESC, l.created_at""",
             (item_type, item_id, user["id"], user["id"])).fetchall()
