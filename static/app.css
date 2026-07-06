@@ -1480,9 +1480,9 @@ body.recap-open{overflow:hidden}
 .lp.stopped .lp-lbl{color:#e2939f}
 .lp.mv-done{flex-direction:row;align-items:center;gap:4px;color:var(--amber-2);font-size:11px;font-weight:650}
 .lp.mv-done svg{width:13px;height:13px}
-/* same colour language on the show-detail progress bar */
-.pbar-fill.done{background:linear-gradient(90deg,#6d5fbf,#a99cf0 70%,#c3b8ff)}
-.pbar-fill.stopped{background:linear-gradient(90deg,#8a3340,var(--velvet))}
+/* same colour language on the show-detail progress bar (beat .pbar-track.big .pbar-fill) */
+.pbar-track.big .pbar-fill.done,.pbar-fill.done{background:linear-gradient(90deg,#6d5fbf,#a99cf0 70%,#c3b8ff)}
+.pbar-track.big .pbar-fill.stopped,.pbar-fill.stopped{background:linear-gradient(90deg,#8a3340,var(--velvet))}
 /* list sort control + sheet */
 .list-tools{display:flex;justify-content:flex-end;margin:4px 0 12px}
 .ls-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border:1px solid var(--line);
