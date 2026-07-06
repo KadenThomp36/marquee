@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260706j"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260706k"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -565,15 +565,39 @@ def serve_avatar(fn: str):
 
 # ---------------------------------------------------------------- lists
 
-def list_item_row(con, it):
+def list_item_row(con, it, uid=None):
+    """One list item. When uid is given, include the viewer's watch progress + dates so
+    the list can show progress bars, an 'ended' badge, and offer watch-based sorting."""
     if it["item_type"] == "show":
-        s = con.execute("SELECT id,title,poster,year FROM shows WHERE id=?", (it["item_id"],)).fetchone()
-    else:
-        s = con.execute("SELECT id,title,poster,year FROM movies WHERE id=?", (it["item_id"],)).fetchone()
+        s = con.execute("SELECT id,title,poster,year,status FROM shows WHERE id=?", (it["item_id"],)).fetchone()
+        if not s:
+            return None
+        row = {"type": "show", "id": s["id"], "title": s["title"], "poster": s["poster"],
+               "year": s["year"], "added_at": it["added_at"],
+               "ended": (s["status"] or "").lower() in ("ended", "canceled", "cancelled")}
+        if uid is not None:
+            row["total"] = con.execute(
+                "SELECT COUNT(*) c FROM episodes WHERE show_id=? AND season>0", (s["id"],)).fetchone()["c"]
+            w = con.execute("""SELECT COUNT(*) c, MIN(watched_at) f, MAX(watched_at) l
+                FROM watches WHERE user_id=? AND show_id=?""", (uid, s["id"])).fetchone()
+            f = con.execute("SELECT archived FROM follows WHERE user_id=? AND show_id=?",
+                            (uid, s["id"])).fetchone()
+            row.update({"watched": w["c"], "first_watched": w["f"], "last_watched": w["l"],
+                        "archived": bool(f and f["archived"])})
+        return row
+    s = con.execute("SELECT id,title,poster,year FROM movies WHERE id=?", (it["item_id"],)).fetchone()
     if not s:
         return None
-    return {"type": it["item_type"], "id": s["id"], "title": s["title"],
-            "poster": s["poster"], "year": s["year"], "added_at": it["added_at"]}
+    row = {"type": "movie", "id": s["id"], "title": s["title"], "poster": s["poster"],
+           "year": s["year"], "added_at": it["added_at"]}
+    if uid is not None:
+        st = con.execute("SELECT state, watched_at FROM movie_states WHERE user_id=? AND movie_id=?",
+                         (uid, s["id"])).fetchone()
+        seen = bool(st and st["state"] == "watched")
+        row.update({"total": 1, "watched": 1 if seen else 0,
+                    "first_watched": st["watched_at"] if seen else None,
+                    "last_watched": st["watched_at"] if seen else None})
+    return row
 
 
 def list_visibility(row):
@@ -689,7 +713,7 @@ def get_list(list_id: int, user=Depends(current_user)):
         owner = con.execute("SELECT * FROM users WHERE id=?", (l["user_id"],)).fetchone()
         items = con.execute("SELECT * FROM list_items WHERE list_id=? ORDER BY added_at DESC",
                             (list_id,)).fetchall()
-        out = [x for x in (list_item_row(con, it) for it in items) if x]
+        out = [x for x in (list_item_row(con, it, user["id"]) for it in items) if x]
     # collab lists: any signed-in member can add/remove; only the owner can rename/delete/reshare
     can_edit = is_owner or visibility == "collab"
     return {"id": l["id"], "name": l["name"], "is_default": bool(l["is_default"]),
@@ -2909,6 +2933,7 @@ def overseerr_cfg(con):
 
 
 OVERSEERR_STATUS = {1: "none", 2: "pending", 3: "processing", 4: "partial", 5: "available"}
+SEASON_PRIO = {"none": 0, "pending": 1, "processing": 2, "partial": 3, "downloading": 4, "available": 5}
 _ov_user_cache = {"at": 0, "map": {}}
 
 
@@ -2975,6 +3000,18 @@ def request_status(item_type: str, tmdb_id: int, user=Depends(current_user)):
         if kind == "tv":
             season_status = {s["seasonNumber"]: OVERSEERR_STATUS.get(s.get("status", 1), "none")
                              for s in (info.get("seasons") or [])}
+            # A just-approved season isn't reflected in mediaInfo.seasons yet, so fold in the
+            # request state — otherwise a requested season reads "none", looks un-requested,
+            # and the user re-requests it (Overseerr request enum: 1=pending, 2=approved).
+            REQ_SEASON = {1: "pending", 2: "processing"}
+            for rq in (info.get("requests") or []):
+                rst = REQ_SEASON.get(rq.get("status"))
+                if not rst:
+                    continue
+                for s in (rq.get("seasons") or []):
+                    sn = s.get("seasonNumber")
+                    if sn is not None and SEASON_PRIO.get(rst, 0) > SEASON_PRIO.get(season_status.get(sn, "none"), 0):
+                        season_status[sn] = rst
             # per-season download progress, keyed off the Sonarr episode.seasonNumber
             dl_by_season = {}
             for x in active:

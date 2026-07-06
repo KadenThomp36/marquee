@@ -1466,3 +1466,32 @@ body.recap-open{overflow:hidden}
 .recap-show .rc-share{position:relative;z-index:4;margin-top:10px}
 @media(prefers-reduced-motion:reduce){
   .rsx-slide.on{animation:none}.rs-hint{animation:none}.recap-show{transition:none}.rsx-seg.cur i{transition:none}}
+
+/* ── list items: watch progress + ended tag + sort ── */
+.pcard .ended-tag{top:auto;bottom:7px;left:7px;right:auto}
+.lp{margin-top:6px;display:flex;flex-direction:column;gap:3px}
+.lp-bar{height:5px;border-radius:99px;background:rgba(0,0,0,.4);overflow:hidden;box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+.lp-bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--amber-dim),var(--amber));transition:width .5s}
+.lp-lbl{font-size:10.5px;color:var(--mut);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.lp.done .lp-bar i{background:linear-gradient(90deg,#6d5fbf,#a99cf0)}
+.lp.done .lp-lbl{color:#b7abf2;font-weight:650}
+.lp.stopped .lp-bar{background:rgba(176,64,79,.22)}
+.lp.stopped .lp-bar i{background:linear-gradient(90deg,#8a3340,var(--velvet))}
+.lp.stopped .lp-lbl{color:#e2939f}
+.lp.mv-done{flex-direction:row;align-items:center;gap:4px;color:var(--amber-2);font-size:11px;font-weight:650}
+.lp.mv-done svg{width:13px;height:13px}
+/* same colour language on the show-detail progress bar */
+.pbar-fill.done{background:linear-gradient(90deg,#6d5fbf,#a99cf0 70%,#c3b8ff)}
+.pbar-fill.stopped{background:linear-gradient(90deg,#8a3340,var(--velvet))}
+/* list sort control + sheet */
+.list-tools{display:flex;justify-content:flex-end;margin:4px 0 12px}
+.ls-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border:1px solid var(--line);
+  border-radius:99px;color:var(--ink-2);font-size:12.5px;font-weight:600;transition:border-color .12s,color .12s}
+.ls-btn:hover{border-color:var(--line-2);color:var(--ink)}
+.ls-btn svg{width:15px;height:15px}
+.sortopts{display:flex;flex-direction:column;gap:2px;margin-top:6px}
+.sortopt{display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;
+  padding:13px 12px;border-radius:10px;color:var(--ink-2);font-size:14.5px;font-weight:600}
+.sortopt:hover{background:var(--panel-2)}
+.sortopt.on{color:var(--amber-2)}
+.sortopt svg{width:17px;height:17px;color:var(--amber)}

@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260706j";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260706k";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -32,6 +32,7 @@ const I = {
   lock: `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="5" y="10.5" width="14" height="9.5" rx="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="15" r="1.5" fill="currentColor"/></svg>`,
   globe: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 12h17M12 3.4c2.4 2.3 3.7 5.4 3.7 8.6S14.4 18.3 12 20.6c-2.4-2.3-3.7-5.4-3.7-8.6S9.6 5.7 12 3.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   users: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 5.5a3.2 3.2 0 0 1 0 6.2M17.5 14.6c1.9.5 3.4 2.2 3.4 4.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  sort: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M7 5v14M7 19l-3.2-3.2M7 5l3.2 3.2M17 19V5M17 5l3.2 3.2M17 19l-3.2-3.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
 const isEnded = st => st === "Ended" || st === "Canceled";
 
@@ -1031,6 +1032,8 @@ routes.show = async id => {
       ? "–" + (s.status === "Returning Series" ? "" : info.last_air.slice(0, 4)) : "") : s.year || "";
   const ended = isEnded(s.status);
   const endYear = info.last_air ? info.last_air.slice(0, 4) : "";
+  // progress-bar colour: red if the user stopped watching, purple if a finished series is 100% done
+  const pbarCls = s.archived ? "stopped" : (watchable.length > 0 && watched >= watchable.length && ended) ? "done" : "";
   const chips = [
     ended ? `<span class="chip ended">${I.flag} Ended${endYear ? " · " + endYear : ""}</span>` : "",
     info.content_rating && `<span class="chip">${esc(info.content_rating)}</span>`,
@@ -1054,7 +1057,7 @@ routes.show = async id => {
         </div>
         <div class="hextra">
           <div class="showprog">
-            <div class="pbar-track big"><div class="pbar-fill" style="--p:${watchable.length ? Math.round(100 * watched / watchable.length) : 0}%"></div></div>
+            <div class="pbar-track big"><div class="pbar-fill ${pbarCls}" style="--p:${watchable.length ? Math.round(100 * watched / watchable.length) : 0}%"></div></div>
             <div class="showprog-lbl"><b id="progline">${watched}</b> / ${watchable.length} watched
               ${watchable.length - watched > 0 ? `<span class="dim">· ${watchable.length - watched} to go</span>` : `<span class="done-tag">${I.check} complete</span>`}</div>
           </div>
@@ -1586,6 +1589,7 @@ function listAddSheet(listId, onDone) {
       await api(`/list/${listId}/item`, { body: { item_type: opt.dataset.t, item_id: +opt.dataset.id } });
       sparks(opt); toast("Added"); added = true; delete CACHE["/lists"];
       opt.querySelector(".fo-add").innerHTML = I.check;
+      onDone && onDone();   // live-update the list behind the sheet so items appear immediately
     } catch { opt.classList.remove("busy"); }
   });
   s.el.addEventListener("click", e => {
@@ -1594,8 +1598,41 @@ function listAddSheet(listId, onDone) {
   setTimeout(() => q.focus(), 80);
 }
 
-routes.list = async id => {
-  view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
+// list sorting (client-side; keys survive across list navigations)
+let LISTSORT = "added";
+const LIST_SORTS = [
+  ["added", "Recently added", (a, b) => (b.added_at || "").localeCompare(a.added_at || "")],
+  ["watched", "Recently watched", (a, b) => (b.last_watched || "").localeCompare(a.last_watched || "")],
+  ["first", "First watched", (a, b) => (a.first_watched || "~").localeCompare(b.first_watched || "~")],
+  ["released", "Newest release", (a, b) => (b.year || 0) - (a.year || 0)],
+  ["title", "Title A–Z", (a, b) => (a.title || "").localeCompare(b.title || "")],
+];
+const listSortLabel = () => (LIST_SORTS.find(s => s[0] === LISTSORT) || LIST_SORTS[0])[1];
+const listSortFn = () => (LIST_SORTS.find(s => s[0] === LISTSORT) || LIST_SORTS[0])[2];
+
+// per-item progress: amber bar (in progress) · purple (complete + ended) · red (stopped watching)
+function listProg(it) {
+  if (it.type === "movie") return it.watched ? `<div class="lp mv-done">${I.check}<span>Watched</span></div>` : "";
+  if (it.total == null || it.total === 0) return "";
+  const total = it.total, watched = Math.min(it.watched || 0, total);
+  const pct = Math.round(100 * watched / total), complete = watched >= total;
+  const cls = it.archived ? "stopped" : (complete && it.ended) ? "done" : "";
+  const lbl = it.archived ? "Stopped" : complete ? (it.ended ? "Complete" : "Caught up") : `${watched} / ${total}`;
+  return `<div class="lp ${cls}"><span class="lp-bar"><i style="width:${pct}%"></i></span><span class="lp-lbl">${lbl}</span></div>`;
+}
+function listSortSheet(onPick) {
+  const s = sheet(`<div class="sh-t">Sort by</div>
+    <div class="sortopts">${LIST_SORTS.map(([k, lab]) =>
+      `<button class="sortopt ${k === LISTSORT ? "on" : ""}" data-k="${k}"><span>${lab}</span>${k === LISTSORT ? I.check : ""}</button>`).join("")}</div>`,
+    { cls: "editor" });
+  s.el.addEventListener("click", e => {
+    const o = e.target.closest(".sortopt"); if (!o) return;
+    LISTSORT = o.dataset.k; s.close(); onPick();
+  });
+}
+
+routes.list = async (id, quiet) => {
+  if (!quiet) view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
   const l = await api(`/list/${id}`);
   const owner = l.is_owner, canEdit = l.can_edit ?? owner, vis = l.visibility || "private";
   const crumb = owner
@@ -1605,6 +1642,17 @@ routes.list = async id => {
   const visNote = { private: "Only you can see this list.",
     public: "Household members can see this on your profile.",
     collab: "Household members can see it and add or remove titles." };
+  const itemCard = it => `<div class="pcard" data-type="${it.type}" data-id="${it.id}">
+      <div class="pshot"><a href="#/${it.type}/${it.id}"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt=""></a>
+        <span class="badge">${it.type === "show" ? "TV" : "FILM"}</span>
+        ${it.ended ? `<span class="ended-tag">Ended</span>` : ""}
+        ${canEdit ? `<div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>` : ""}
+      </div>
+      <div class="t">${esc(it.title)}</div>
+      ${listProg(it)}
+      <div class="y">${it.year || ""}</div>
+    </div>`;
+  const gridHTML = () => [...l.items].sort(listSortFn()).map(itemCard).join("");
   view.innerHTML = `<div class="page-head">
       ${crumb}
       <div class="ph-actions">
@@ -1623,17 +1671,26 @@ routes.list = async id => {
            <span class="lo-txt">Shared by <b>@${esc(l.owner.username)}</b></span>
            <span class="vis-pill ${vis}">${vis === "collab" ? `${I.users} Collaborative` : `${I.globe} Public`}</span></div>
          ${vis === "collab" ? `<div class="vis-note">You can add &amp; remove titles on this shared list.</div>` : ""}`}
-    ${l.items.length ? `<div class="pgrid reveal">${l.items.map(it => `
-      <div class="pcard" data-type="${it.type}" data-id="${it.id}">
-        <div class="pshot"><a href="#/${it.type}/${it.id}"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt=""></a>
-          <span class="badge">${it.type === "show" ? "TV" : "FILM"}</span>
-          ${canEdit ? `<div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>` : ""}
-        </div>
-        <div class="t">${esc(it.title)}</div><div class="y">${it.year || ""}</div>
-      </div>`).join("")}</div>`
+    ${l.items.length ? `
+      ${l.items.length > 1 ? `<div class="list-tools"><button class="ls-btn" id="lsort">${I.sort}<span id="lsortlbl">${listSortLabel()}</span></button></div>` : ""}
+      <div class="pgrid reveal" id="listgrid">${gridHTML()}</div>`
       : `<div class="empty">${canEdit ? "This list is empty. Tap + to add titles, or add from any show or movie page." : "This list is empty."}</div>`}`;
+  const wireItems = () => {
+    if (!canEdit) return;
+    $$(".rmlist", view).forEach(b => b.onclick = async () => {
+      const c = b.closest(".pcard");
+      await api(`/list/${id}/item`, { body: { item_type: c.dataset.type, item_id: +c.dataset.id, remove: true } });
+      c.style.opacity = ".3"; c.querySelector(".rmlist").disabled = true;
+      delete CACHE["/lists"];
+      setTimeout(() => routes.list(id, true), 220);
+    });
+  };
   $("#sharelist").onclick = () => share(l.name, `list/${id}`);
-  if ($("#addtitles")) $("#addtitles").onclick = () => listAddSheet(id, () => routes.list(id));
+  if ($("#addtitles")) $("#addtitles").onclick = () => listAddSheet(id, () => routes.list(id, true));
+  if ($("#lsort")) $("#lsort").onclick = () => listSortSheet(() => {
+    const g = $("#listgrid"); if (g) g.innerHTML = gridHTML(); wireItems();
+    const lbl = $("#lsortlbl"); if (lbl) lbl.textContent = listSortLabel();
+  });
   if ($("#dellist")) $("#dellist").onclick = async () => {
     if (confirm(`Delete the list “${l.name}”?`)) {
       await api(`/list/${id}`, { method: "DELETE" }); delete CACHE["/lists"]; location.hash = "#/lists";
@@ -1648,13 +1705,7 @@ routes.list = async id => {
       routes.list(id);
     } catch {}
   });
-  if (canEdit) $$(".rmlist", view).forEach(b => b.onclick = async () => {
-    const c = b.closest(".pcard");
-    await api(`/list/${id}/item`, { body: { item_type: c.dataset.type, item_id: +c.dataset.id, remove: true } });
-    c.style.opacity = ".3"; c.querySelector(".rmlist").disabled = true;
-    delete CACHE["/lists"];
-    setTimeout(() => routes.list(id), 250);
-  });
+  wireItems();
 };
 
 /* ---------- profile lists integration ----------
