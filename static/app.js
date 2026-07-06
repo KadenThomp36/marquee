@@ -29,6 +29,8 @@ const I = {
   flag: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M5 21V4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M5 4.5h13l-2.4 4 2.4 4H5z" fill="currentColor" opacity=".55"/></svg>`,
   reply: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M10 8V4.5L3.5 11 10 17.5V14c5 0 8 1.6 10 5 0-6-3.5-11-10-11z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   bell: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M6 9a6 6 0 0 1 12 0c0 5 1.8 6.5 2.5 7.3.4.5.1 1.2-.6 1.2H4.1c-.7 0-1-.7-.6-1.2C4.2 15.5 6 14 6 9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9.5 20a2.5 2.5 0 0 0 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+  lock: `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="5" y="10.5" width="14" height="9.5" rx="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="15" r="1.5" fill="currentColor"/></svg>`,
+  globe: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 12h17M12 3.4c2.4 2.3 3.7 5.4 3.7 8.6S14.4 18.3 12 20.6c-2.4-2.3-3.7-5.4-3.7-8.6S9.6 5.7 12 3.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
 };
 const isEnded = st => st === "Ended" || st === "Canceled";
 
@@ -1405,29 +1407,51 @@ routes.movies = (tab = "watched") => {
 };
 
 /* ---------- lists ---------- */
+// one list summary card (reused on /lists and, via renderProfileLists, on profiles)
+function listCard(l) {
+  return `<a class="listcard" href="#/list/${l.id}">
+    <div class="lc-covers">${(l.posters.length
+      ? l.posters.slice(0, 4).map(p => `<img loading="lazy" src="${p}" alt="">`).join("")
+      : `<div class="lc-empty">${I.bookmark}</div>`)}
+      ${l.visibility === "public" ? `<span class="lc-vis">${I.globe}Public</span>` : ""}</div>
+    <div class="lc-body"><div class="lc-name">${l.is_default ? I.bookmarkfill : ""} ${esc(l.name)}</div>
+      <div class="lc-count">${l.count} ${l.count === 1 ? "title" : "titles"}</div></div>
+  </a>`;
+}
 function renderLists(d) {
   view.innerHTML = `<div class="page-head"><h1>Lists</h1>
     <button class="btn pri" id="newlist">${I.plus} New list</button></div>
-    <div class="list-grid reveal">${d.lists.map(l => `
-      <a class="listcard" href="#/list/${l.id}">
-        <div class="lc-covers">${(l.posters.length
-          ? l.posters.slice(0, 4).map(p => `<img loading="lazy" src="${p}" alt="">`).join("")
-          : `<div class="lc-empty">${I.bookmark}</div>`)}</div>
-        <div class="lc-body"><div class="lc-name">${l.is_default ? I.bookmarkfill : ""} ${esc(l.name)}</div>
-          <div class="lc-count">${l.count} ${l.count === 1 ? "title" : "titles"}</div></div>
-      </a>`).join("")}</div>`;
+    <div class="list-grid reveal">${d.lists.map(listCard).join("")}</div>`;
   $("#newlist").onclick = async () => {
     const s = sheet(`<div class="sh-t">New list</div>
       <input id="ln" placeholder="e.g. Weekend binges" maxlength="60" autofocus>
-      <button class="btn pri" data-v="save">Create</button>
-      <button class="btn ghost" data-v="cancel">Cancel</button>`, { cls: "editor" });
+      <div class="vis-choice" id="vc">
+        <button type="button" class="vis-opt on" data-vis="private">
+          <span class="vis-ic">${I.lock}</span>
+          <span class="vis-txt"><b>Private</b><i>Only you can see this list</i></span>
+          <span class="vis-dot"></span>
+        </button>
+        <button type="button" class="vis-opt" data-vis="public">
+          <span class="vis-ic">${I.globe}</span>
+          <span class="vis-txt"><b>Public</b><i>Household members can see it on your profile</i></span>
+          <span class="vis-dot"></span>
+        </button>
+      </div>
+      <button class="btn pri" data-v="save">Create list</button>
+      <button class="btn ghost" data-v="cancel">Cancel</button>`, { cls: "editor listnew" });
     setTimeout(() => $("#ln", s.el)?.focus(), 60);
     s.el.addEventListener("click", async e => {
+      const opt = e.target.closest(".vis-opt");
+      if (opt) {
+        $$(".vis-opt", s.el).forEach(o => o.classList.toggle("on", o === opt));
+        return;
+      }
       if (e.target.closest('[data-v="cancel"]')) return s.close();
       if (e.target.closest('[data-v="save"]')) {
         const name = $("#ln", s.el).value.trim();
         if (!name) return;
-        await api("/lists", { body: { name } });
+        const visibility = $(".vis-opt.on", s.el)?.dataset.vis || "private";
+        await api("/lists", { body: { name, visibility } });
         delete CACHE["/lists"]; s.close(); routes.lists();
       }
     });
@@ -1444,36 +1468,82 @@ routes.lists = () => {
 routes.list = async id => {
   view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
   const l = await api(`/list/${id}`);
+  const owner = l.is_owner, vis = l.visibility || "private", pub = vis === "public";
+  const crumb = owner
+    ? `<a class="crumb" href="#/lists">${I.chevS} Lists</a>`
+    : `<a class="crumb" href="#/u/${encodeURIComponent(l.owner.username)}">${I.chevS} ${esc(l.owner.display_name)}</a>`;
   view.innerHTML = `<div class="page-head">
-      <a class="crumb" href="#/lists">${I.chevS} Lists</a>
+      ${crumb}
       <div class="ph-actions">
         <button class="iconbtn" id="sharelist" title="Share">${I.share}</button>
-        ${l.is_default ? "" : `<button class="iconbtn" id="dellist" title="Delete list">${I.trash}</button>`}
+        ${owner && !l.is_default ? `<button class="iconbtn" id="dellist" title="Delete list">${I.trash}</button>` : ""}
       </div>
     </div>
     <h1>${l.is_default ? I.bookmarkfill : ""} ${esc(l.name)} <span class="cnt">· ${l.items.length}</span></h1>
+    ${owner
+      ? `<button class="vis-toggle ${pub ? "on" : ""}" id="vistoggle" aria-pressed="${pub}">
+           <span class="vt-ic">${pub ? I.globe : I.lock}</span>
+           <span class="vt-body"><b>${pub ? "Public list" : "Private list"}</b>
+             <i>${pub ? "Household members can see this on your profile" : "Only you can see this — tap to make it public"}</i></span>
+           <span class="vt-sw"></span>
+         </button>`
+      : `<div class="list-owner">${avatarHTML(l.owner, "sm")}
+           <span class="lo-txt">Shared by <b>@${esc(l.owner.username)}</b></span>
+           <span class="vis-pill">${I.globe} Public</span></div>`}
     ${l.items.length ? `<div class="pgrid reveal">${l.items.map(it => `
       <div class="pcard" data-type="${it.type}" data-id="${it.id}">
         <div class="pshot"><a href="#/${it.type}/${it.id}"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt=""></a>
           <span class="badge">${it.type === "show" ? "TV" : "FILM"}</span>
-          <div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>
+          ${owner ? `<div class="act"><button class="rmlist" title="Remove from list" data-a="rm">${I.x}</button></div>` : ""}
         </div>
         <div class="t">${esc(it.title)}</div><div class="y">${it.year || ""}</div>
       </div>`).join("")}</div>`
-      : `<div class="empty">This list is empty. Add titles from any show or movie page.</div>`}`;
+      : `<div class="empty">${owner ? "This list is empty. Add titles from any show or movie page." : "This list is empty."}</div>`}`;
   $("#sharelist").onclick = () => share(l.name, `list/${id}`);
   if ($("#dellist")) $("#dellist").onclick = async () => {
     if (confirm(`Delete the list “${l.name}”?`)) {
       await api(`/list/${id}`, { method: "DELETE" }); delete CACHE["/lists"]; location.hash = "#/lists";
     }
   };
-  $$(".rmlist", view).forEach(b => b.onclick = async () => {
+  if ($("#vistoggle")) $("#vistoggle").onclick = async () => {
+    const next = pub ? "private" : "public";
+    try {
+      await api(`/list/${id}/visibility`, { body: { visibility: next } });
+      delete CACHE["/lists"];
+      toast(next === "public" ? "List is now public" : "List is now private");
+      routes.list(id);
+    } catch {}
+  };
+  if (owner) $$(".rmlist", view).forEach(b => b.onclick = async () => {
     const c = b.closest(".pcard");
     await api(`/list/${id}/item`, { body: { item_type: c.dataset.type, item_id: +c.dataset.id, remove: true } });
     c.style.opacity = ".3"; c.querySelector(".rmlist").disabled = true;
     delete CACHE["/lists"];
     setTimeout(() => routes.list(id), 250);
   });
+};
+
+/* ---------- profile lists integration ----------
+   Contract for the profile agent: window.renderProfileLists(username, isMe) -> Promise<htmlString>.
+   Renders that user's lists (own → all; others → public only) as a self-contained section
+   the profile page can drop into a #profile-lists slot. Cards are <a href> links, so no
+   handler wiring is needed by the host. Returns "" when there's nothing to show. */
+window.renderProfileLists = async (username, isMe) => {
+  let data;
+  try { data = await api(`/user/${encodeURIComponent(username)}/lists`); }
+  catch { return ""; }
+  const lists = data.lists || [];
+  const label = isMe ? "My lists" : "Public lists";
+  if (!lists.length) {
+    return isMe
+      ? `<section class="prof-lists"><div class="section"><h2>${label}</h2><div class="rule"></div></div>
+           <div class="empty">You haven't made any lists yet. <a class="tlink" href="#/lists">Create one</a></div></section>`
+      : "";
+  }
+  return `<section class="prof-lists">
+    <div class="section"><h2>${label}</h2><div class="rule"></div>
+      <span class="cnt">${lists.length}</span></div>
+    <div class="list-grid">${lists.map(listCard).join("")}</div></section>`;
 };
 
 /* ---------- movie detail ---------- */
