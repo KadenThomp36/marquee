@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c1811"/><stop offset="1" stop-color="#0e0c09"/>
+    </linearGradient>
+    <linearGradient id="am" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd98a"/><stop offset="1" stop-color="#f0b544"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <!-- safe-zone (80%) marquee: keep art within center 410px -->
+  <rect x="136" y="176" width="240" height="160" rx="20" fill="none" stroke="url(#am)" stroke-width="13"/>
+  <g fill="#ffd98a">
+    <circle cx="164" cy="176" r="7"/><circle cx="200" cy="176" r="7"/><circle cx="236" cy="176" r="7"/>
+    <circle cx="276" cy="176" r="7"/><circle cx="312" cy="176" r="7"/><circle cx="348" cy="176" r="7"/>
+    <circle cx="164" cy="336" r="7"/><circle cx="200" cy="336" r="7"/><circle cx="236" cy="336" r="7"/>
+    <circle cx="276" cy="336" r="7"/><circle cx="312" cy="336" r="7"/><circle cx="348" cy="336" r="7"/>
+  </g>
+  <text x="256" y="304" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif"
+        font-size="140" font-weight="700" fill="url(#am)">M</text>
+</svg>
