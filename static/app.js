@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260706h";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260706i";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -538,8 +538,12 @@ function parseHash() {
   else if (p[0] === "movie") routes.movie(p[1]);
   else if (p[0] === "person") routes.person(p[1]);
   else if (p[0] === "list") routes.list(p[1]);
+  else if (p[0] === "u" && p[2] === "recap") routes.recap(p[1], p[3]);
+  else if (p[0] === "u") routes.profile(p[1]);
+  else if (p[0] === "recap") routes.recap(null, p[1]);
   else (routes[p[0]] || routes.home)(p[1]);
-  const active = { list: "lists", movie: "movies", show: "home" }[p[0]] || p[0] || "home";
+  const active = { list: "lists", movie: "movies", show: "home", u: "profile",
+    recap: "profile", stats: "profile" }[p[0]] || p[0] || "home";
   $$("#nav a, #tabbar a, .gear, .bell").forEach(a =>
     a.classList.toggle("on", a.dataset.r === active));
 }
@@ -1573,38 +1577,246 @@ routes.person = async id => {
 };
 
 /* ---------- profile hub ---------- */
-routes.profile = async () => {
-  const p = await api("/profile");
-  view.innerHTML = `
-    <div class="profhero reveal">
-      <div class="prof-av" id="avwrap">${avatarHTML(p, "xl")}
-        <button class="av-edit" id="avedit" title="Change photo">${I.camera}</button>
-        <input type="file" id="avfile" accept="image/png,image/jpeg,image/webp" hidden></div>
-      <div class="prof-name">${esc(p.display_name)}</div>
-      <div class="prof-sub">@${esc(p.username)}${p.is_admin ? " · admin" : ""}</div>
-      <button class="btn" id="editprof">${I.edit} Edit profile</button>
-    </div>
-    <div class="hublinks reveal">
-      <a class="hublink" href="#/lists">${I.bookmark}<span>My Lists</span>${I.chevR}</a>
-      <a class="hublink" href="#/history">${I.ticket}<span>History</span>${I.chevR}</a>
-      <a class="hublink" href="#/stats">${statsIcon()}<span>Stats</span>${I.chevR}</a>
-      <a class="hublink" href="#/settings">${gearIcon()}<span>Settings & Plex</span>${I.chevR}</a>
-    </div>
-    <button class="btn signout" id="signout">Sign out</button>`;
-  $("#avedit").onclick = () => $("#avfile").click();
-  $("#avfile").onchange = async () => {
-    const f = $("#avfile").files[0]; if (!f) return;
-    $("#avfile").value = "";
-    const blob = await cropImage(f);
-    if (!blob) return;
-    const fd = new FormData(); fd.append("file", new File([blob], "avatar.jpg", { type: "image/jpeg" }));
-    const r = await api("/profile/avatar", { method: "POST", body: fd });
-    ME.avatar = r.avatar; p.avatar = r.avatar;
-    $("#avwrap").querySelector(".avatar").outerHTML = avatarHTML({ ...p, avatar: r.avatar }, "xl");
-    paintAvatars(); toast("Photo updated");
+/* ---------- profile hub (identity · favorites · stats · recap · other members) ---------- */
+const STAR_O = `<svg viewBox="0 0 24 24" fill="none"><path d="M12 3.6l2.5 5.2 5.7.7-4.2 4 1.1 5.7L12 16.4l-5.1 2.8 1.1-5.7-4.2-4 5.7-.7z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
+const PIN_ICON = `<svg viewBox="0 0 24 24" fill="none"><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 14v7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>`;
+const backIcon = `<svg viewBox="0 0 24 24" fill="none"><path d="M15 5.5 8 12l7 6.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+let FAVSET = null;
+async function ensureFavSet() {
+  if (FAVSET) return FAVSET;
+  try { FAVSET = new Set((await api("/favorites")).favorites.map(f => f.type + ":" + f.id)); }
+  catch { FAVSET = new Set(); }
+  return FAVSET;
+}
+function syncFavSet(favs) { FAVSET = new Set(favs.map(f => f.type + ":" + f.id)); }
+
+const headPill = (v, l) => `<div class="hp"><div class="hp-v">${v}</div><div class="hp-l">${l}</div></div>`;
+function headPills(h) {
+  return `<div class="headrow">
+    ${headPill((h.shows || 0).toLocaleString(), "shows")}
+    ${headPill((h.episodes || 0).toLocaleString(), "episodes")}
+    ${headPill((h.movies || 0).toLocaleString(), "movies")}
+    ${headPill((h.hours || 0).toLocaleString(), "hours")}</div>`;
+}
+
+function favCardHTML(f, me) {
+  return `<div class="favcard" data-fk="${f.type}:${f.id}"${me ? ' draggable="true"' : ""}>
+    <a class="favcard-link" href="#/${f.type}/${f.id}" aria-label="${esc(f.title)}">
+      <span class="favposter"><img loading="lazy" src="${POSTER(f.poster)}" alt=""></span>
+      <span class="fav-t">${esc(f.title)}</span>
+      <span class="fav-y">${f.year || ""}</span></a>
+    ${me ? `<div class="fav-edit">
+      <button class="fav-pin" title="Pin to front" aria-label="Pin to front">${PIN_ICON}</button>
+      <button class="fav-x" title="Remove favorite" aria-label="Remove favorite">${I.x}</button></div>` : ""}
+  </div>`;
+}
+function favStripHTML(favs, me) {
+  if (!favs.length && !me)
+    return `<div class="fav-empty">No favorites picked yet.</div>`;
+  return favs.map(f => favCardHTML(f, me)).join("") +
+    (me ? `<button class="favadd" id="favadd"><span class="favadd-plus">${I.plus}</span><span>Add favorite</span></button>` : "");
+}
+
+function wireFavorites(host, me) {
+  if (!me) return;
+  const strip = $("#favstrip", host);
+  const repaint = favs => { syncFavSet(favs); strip.innerHTML = favStripHTML(favs, me); wireFavAdd(); };
+  const wireFavAdd = () => { const a = $("#favadd", strip); if (a) a.onclick = () => favPicker(repaint); };
+  wireFavAdd();
+  strip.addEventListener("click", async e => {
+    const card = e.target.closest(".favcard"); if (!card) return;
+    const [t, id] = card.dataset.fk.split(":");
+    if (e.target.closest(".fav-x")) {
+      e.preventDefault();
+      try { repaint((await api(`/favorites/${t}/${id}`, { method: "DELETE" })).favorites); } catch {}
+    } else if (e.target.closest(".fav-pin")) {
+      e.preventDefault();
+      const order = [[t, id], ...[...strip.querySelectorAll(".favcard")]
+        .filter(c => c !== card).map(c => c.dataset.fk.split(":"))];
+      try { repaint((await api("/favorites/reorder", { body: { order } })).favorites); } catch {}
+    }
+  });
+  /* drag-to-reorder (desktop) */
+  let dragging = null;
+  strip.addEventListener("dragstart", e => { dragging = e.target.closest(".favcard"); if (dragging) dragging.classList.add("drag"); });
+  strip.addEventListener("dragend", async () => {
+    if (!dragging) return;
+    dragging.classList.remove("drag");
+    const order = [...strip.querySelectorAll(".favcard")].map(c => c.dataset.fk.split(":"));
+    dragging = null;
+    try { syncFavSet((await api("/favorites/reorder", { body: { order } })).favorites); } catch {}
+  });
+  strip.addEventListener("dragover", e => {
+    if (!dragging) return; e.preventDefault();
+    const after = [...strip.querySelectorAll(".favcard:not(.drag)")].find(c => {
+      const r = c.getBoundingClientRect(); return e.clientX < r.left + r.width / 2;
+    });
+    if (after) strip.insertBefore(dragging, after);
+    else strip.insertBefore(dragging, $("#favadd", strip));
+  });
+}
+
+function favPicker(onDone) {
+  const s = sheet(`<div class="sh-t">Add a favorite</div>
+    <div class="fav-search"><span class="fs-ic">${I.eye && ""}</span>
+      <input id="fq" placeholder="Search shows & movies…" autocapitalize="none" autocomplete="off"></div>
+    <div id="fres" class="fav-results"><div class="fav-hint">Type to search TMDB.</div></div>`, { cls: "favpicker" });
+  const q = $("#fq", s.el), res = $("#fres", s.el);
+  let t = null, last = "";
+  q.oninput = () => {
+    clearTimeout(t); const v = q.value.trim();
+    if (v.length < 2) { res.innerHTML = `<div class="fav-hint">Keep typing…</div>`; return; }
+    t = setTimeout(async () => {
+      if (v === last) return; last = v;
+      res.innerHTML = skRows(3);
+      let data; try { data = await api("/search?q=" + encodeURIComponent(v)); } catch { return; }
+      if ($("#fq", s.el)?.value.trim() !== v) return;
+      const items = (data.results || []).filter(r => r.poster);
+      res.innerHTML = items.length ? items.map(r => `
+        <button class="fav-opt" data-t="${r.type}" data-id="${r.id}">
+          <img loading="lazy" src="${POSTER(r.poster)}" alt="">
+          <span class="fo-mid"><b>${esc(r.title)}</b><span class="fo-sub">${r.type === "show" ? "TV" : "Movie"}${r.year ? " · " + r.year : ""}</span></span>
+          <span class="fo-add">${I.plus}</span></button>`).join("")
+        : `<div class="fav-hint">No matches.</div>`;
+    }, 260);
   };
-  $("#editprof").onclick = () => editProfile(p);
-  $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
+  res.addEventListener("click", async e => {
+    const opt = e.target.closest(".fav-opt"); if (!opt) return;
+    opt.classList.add("busy");
+    try {
+      const r = await api("/favorites", { body: { item_type: opt.dataset.t, item_id: +opt.dataset.id } });
+      toast("Added to favorites"); s.close();
+      delete CACHE["/profile"]; onDone && onDone(r.favorites);
+    } catch { opt.classList.remove("busy"); }
+  });
+  setTimeout(() => q.focus(), 80);
+}
+
+/* expose for future detail-page use (not wired into detail pages here — integration contract) */
+window.favoriteBtn = (itemType, itemId, isFav) =>
+  `<button class="favbtn ${isFav ? "on" : ""}" data-fav="${itemType}:${itemId}" aria-pressed="${!!isFav}"
+     title="${isFav ? "In favorites" : "Add to favorites"}">${isFav ? I.star : STAR_O}</button>`;
+window.toggleFavorite = async (itemType, itemId) => {
+  const key = itemType + ":" + itemId, set = await ensureFavSet(), on = set.has(key);
+  try {
+    if (on) { await api(`/favorites/${itemType}/${itemId}`, { method: "DELETE" }); set.delete(key); toast("Removed from favorites"); }
+    else { await api("/favorites", { body: { item_type: itemType, item_id: itemId } }); set.add(key); toast("Added to favorites"); }
+  } catch { return; }
+  delete CACHE["/profile"];
+  $$(`[data-fav="${key}"]`).forEach(b => {
+    const nowOn = set.has(key);
+    b.classList.toggle("on", nowOn); b.setAttribute("aria-pressed", nowOn);
+    b.innerHTML = nowOn ? I.star : STAR_O;
+  });
+  return set.has(key);
+};
+
+function recapTeaser(me, username) {
+  const yr = new Date().getFullYear();
+  const href = me ? `#/recap` : `#/u/${encodeURIComponent(username)}/recap`;
+  return `<a class="recap-teaser reveal" href="${href}">
+    <div class="rt-glow"></div>
+    <div class="rt-body">
+      <div class="rt-kicker">Year in Review</div>
+      <div class="rt-title">${me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s"} ${yr}, wrapped</div>
+      <div class="rt-sub">A shareable recap of everything watched this year</div>
+    </div>
+    <div class="rt-go">${I.chevR}</div></a>`;
+}
+
+async function loadMembers(host) {
+  const slot = $("#members-strip", host); if (!slot) return;
+  let data; try { data = await api("/members"); } catch { return; }
+  const others = data.members;
+  if (others.length <= 1) { slot.remove(); return; }
+  slot.innerHTML = `<div class="section"><h2>Household</h2><div class="rule"></div>
+      <span class="cnt">${others.length}</span></div>
+    <div class="member-strip">${others.map(m => `
+      <a class="member ${m.is_me ? "me" : ""}" href="#/${m.is_me ? "profile" : "u/" + encodeURIComponent(m.username)}">
+        ${avatarHTML(m, "md")}<span class="mem-n">${esc(m.display_name)}${m.is_me ? " (you)" : ""}</span></a>`).join("")}</div>`;
+}
+
+async function loadProfileStats(statsPath, advPath, host) {
+  const box = $("#prof-stats", host); if (!box) return;
+  const c = cached(statsPath);
+  const paint = d => { if ($("#prof-stats", host)) box.innerHTML = statsSection(d); };
+  if (c.stale) paint(c.stale);
+  c.refresh(() => !!$("#prof-stats", host), paint);
+  /* advanced stats stream in under the core numbers */
+  try {
+    const a = await api(advPath);
+    const adv = $("#prof-adv", host);
+    if (adv && a) adv.innerHTML = advancedSection(a);
+  } catch { /* advanced is best-effort */ }
+}
+
+routes.profile = async (username) => {
+  const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
+  const ppath = me ? "/profile" : "/profile/" + encodeURIComponent(username);
+  const c = cached(ppath);
+  const render = p => {
+    syncFavSet(p.favorites || []);
+    const statsPath = me ? "/stats" : `/profile/${encodeURIComponent(username)}/stats`;
+    const advPath = me ? "/stats/advanced" : `/profile/${encodeURIComponent(username)}/stats/advanced`;
+    view.innerHTML = `
+      ${me ? "" : `<div class="page-head"><a class="crumb" href="#/profile">${backIcon} Your profile</a></div>`}
+      <div class="prof-hero reveal">
+        ${me ? `<a class="prof-gear" href="#/settings" title="Settings & Plex" aria-label="Settings">${gearIcon()}</a>` : ""}
+        <div class="prof-av" id="avwrap">${avatarHTML(p, "xl")}
+          ${me ? `<button class="av-edit" id="avedit" title="Change photo">${I.camera}</button>
+          <input type="file" id="avfile" accept="image/png,image/jpeg,image/webp" hidden>` : ""}</div>
+        <div class="prof-name">${esc(p.display_name)}</div>
+        <div class="prof-sub">@${esc(p.username)}${p.is_admin ? " · admin" : ""}${p.member_since ? ` · since ${fmtDate(p.member_since.slice(0, 10))}` : ""}</div>
+        ${headPills(p.headline || {})}
+        ${me ? `<button class="btn" id="editprof">${I.edit} Edit profile</button>` : ""}
+      </div>
+
+      <div class="section reveal"><h2>Favorites</h2><div class="rule"></div></div>
+      <div class="fav-shelf reveal"><div class="fav-strip" id="favstrip">${favStripHTML(p.favorites || [], me)}</div></div>
+
+      ${recapTeaser(me, p.username)}
+
+      <div id="profile-lists"></div>
+
+      ${me ? `<div class="hublinks reveal">
+        <a class="hublink" href="#/lists">${I.bookmark}<span>My Lists</span>${I.chevR}</a>
+        <a class="hublink" href="#/history">${I.ticket}<span>History</span>${I.chevR}</a>
+      </div>` : ""}
+
+      <div id="members-strip"></div>
+
+      <div class="section reveal"><h2>${me ? "Your numbers" : esc(p.display_name.split(" ")[0]) + "’s numbers"}</h2><div class="rule"></div></div>
+      <div id="prof-stats">${statsSkeleton()}</div>
+      <div id="prof-adv"></div>
+
+      ${me ? `<button class="btn signout" id="signout">Sign out</button>` : ""}`;
+
+    if (me) {
+      $("#avedit").onclick = () => $("#avfile").click();
+      $("#avfile").onchange = async () => {
+        const f = $("#avfile").files[0]; if (!f) return;
+        $("#avfile").value = "";
+        const blob = await cropImage(f);
+        if (!blob) return;
+        const fd = new FormData(); fd.append("file", new File([blob], "avatar.jpg", { type: "image/jpeg" }));
+        const r = await api("/profile/avatar", { method: "POST", body: fd });
+        ME.avatar = r.avatar; p.avatar = r.avatar; delete CACHE["/profile"];
+        $("#avwrap").querySelector(".avatar").outerHTML = avatarHTML({ ...p, avatar: r.avatar }, "xl");
+        paintAvatars(); toast("Photo updated");
+      };
+      $("#editprof").onclick = () => editProfile(p);
+      $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
+    }
+    wireFavorites(view, me);
+    loadMembers(view);
+    loadProfileStats(statsPath, advPath, view);
+    if (window.renderProfileLists) { try { window.renderProfileLists(p.username, me); } catch { /* provided by another feature */ } }
+  };
+
+  if (c.stale) render(c.stale);
+  else view.innerHTML = `<div class="prof-hero"><div class="sk" style="width:104px;height:104px;border-radius:50%;margin:12px auto"></div></div>${statsSkeleton()}`;
+  c.refresh(() => { const s = seg(); return s[0] === "profile" || s[0] === "u"; }, render);
 };
 
 function editProfile(p) {
@@ -1624,6 +1836,7 @@ function editProfile(p) {
         await api("/profile", { body });
         ME.display_name = body.display_name || body.username;
         ME.username = body.username;
+        delete CACHE["/profile"];
         s.close(); toast("Profile saved"); routes.profile();
       } catch {}
     }
@@ -1918,49 +2131,85 @@ routes.history = (tab = "tv") => {
 };
 
 /* ---------- stats ---------- */
-function barSVG(labels, vals, { yearMarks = false } = {}) {
+/* ---------- data viz primitives (axis · grid · area fill · emphasized endpoint) ---------- */
+let _chartSeq = 0;
+const niceStep = x => {
+  const e = Math.floor(Math.log10(x || 1)), f = (x || 1) / Math.pow(10, e);
+  return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * Math.pow(10, e);
+};
+function niceTicks(max, count = 3) {
+  const step = niceStep(max / count), out = [];
+  for (let t = step; t <= max + step * 0.01; t += step) out.push(Math.round(t));
+  return out.length ? out : [max];
+}
+/* area/line chart: baseline axis, faint gridlines w/ value labels, gradient fill, bright endpoint */
+function areaSVG(labels, vals, { yearMarks = false, unit = "" } = {}) {
+  const n = vals.length || 1;
   const max = Math.max(...vals, 1);
-  const W = 720, H = 190, pad = 24, bw = (W - pad * 2) / vals.length;
-  const bars = labels.map((m, i) => {
-    const h = Math.round((H - 48) * vals[i] / max);
-    const x = pad + i * bw, y = H - 26 - h;
-    const showLbl = yearMarks ? m.endsWith("-01") : true;
-    const lbl = showLbl ? `<text x="${x + bw / 2}" y="${H - 9}" text-anchor="middle">${yearMarks ? m.slice(0, 4) : m}</text>` : "";
-    return `<g><rect class="bar" x="${x + 1.5}" y="${y}" width="${Math.max(bw - 3, 2)}" height="${Math.max(h, vals[i] ? 3 : 0)}" rx="3">
-      <title>${m}: ${vals[i]} watched</title></rect>${lbl}
-      ${vals[i] === max && max > 0 ? `<text class="val" x="${x + bw / 2}" y="${y - 6}" text-anchor="middle">${vals[i]}</text>` : ""}</g>`;
+  const W = 720, H = 210, padL = 34, padR = 14, padT = 16, padB = 26;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const X = i => padL + (n <= 1 ? iw / 2 : iw * i / (n - 1));
+  const Y = v => padT + ih * (1 - v / max);
+  const ticks = niceTicks(max, 3);
+  const grid = [0, ...ticks].map(t => `<line class="grid-l" x1="${padL}" x2="${W - padR}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}"/>`
+    + (t ? `<text class="axis" x="${padL - 7}" y="${(Y(t) + 3.4).toFixed(1)}" text-anchor="end">${t}</text>` : "")).join("");
+  const line = vals.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ");
+  const area = `M${X(0).toFixed(1)} ${Y(0).toFixed(1)} `
+    + vals.map((v, i) => `L${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ")
+    + ` L${X(n - 1).toFixed(1)} ${Y(0).toFixed(1)} Z`;
+  const lbls = labels.map((m, i) => {
+    const show = yearMarks ? String(m).endsWith("-01") : (n <= 12 || i % Math.ceil(n / 12) === 0 || i === n - 1);
+    return show ? `<text class="axis" x="${X(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${yearMarks ? String(m).slice(0, 4) : m}</text>` : "";
   }).join("");
-  return `<svg viewBox="0 0 ${W} ${H}">
-    <line class="grid-l" x1="${pad}" x2="${W - pad}" y1="${H - 26}" y2="${H - 26}"/>${bars}</svg>`;
+  const e = n - 1, gid = "ag" + (++_chartSeq);
+  const cap = `<circle class="pt-halo" cx="${X(e).toFixed(1)}" cy="${Y(vals[e]).toFixed(1)}" r="6"/>`
+    + `<circle class="pt-end" cx="${X(e).toFixed(1)}" cy="${Y(vals[e]).toFixed(1)}" r="3.4"/>`
+    + `<text class="val" x="${X(e).toFixed(1)}" y="${(Y(vals[e]) - 11).toFixed(1)}" text-anchor="${e > n - 2 ? "end" : "middle"}">${vals[e]}${unit}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}"><defs>
+    <linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--amber)" stop-opacity=".34"/>
+      <stop offset="1" stop-color="var(--amber)" stop-opacity="0"/></linearGradient></defs>
+    ${grid}<path class="area" d="${area}" fill="url(#${gid})"/>
+    <path class="aline" d="${line}"/>${cap}${lbls}</svg>`;
+}
+/* horizontal ranked bars — optional rank + face image, gradient track, tabular numbers */
+function rankBars(rows, { face = false } = {}) {
+  const max = Math.max(...rows.map(r => r.v), 1);
+  return `<div class="rbars">${rows.map((r, i) => `
+    <div class="rbar" title="${esc(r.name)}">
+      <span class="rb-rank">${i + 1}</span>
+      ${face ? `<span class="rb-face">${r.img ? `<img loading="lazy" src="${r.img}" alt="">` : personGlyph()}</span>` : ""}
+      <span class="rb-body">
+        <span class="rb-top"><span class="rb-name">${esc(r.name)}</span><span class="rb-num">${r.label ?? r.v}</span></span>
+        <span class="rb-track"><i style="width:${Math.max(4, Math.round(100 * r.v / max))}%"></i></span>
+      </span></div>`).join("")}</div>`;
 }
 
-function renderStats(d, animate = true) {
+function statsSkeleton() {
+  return `<div class="tiles">${Array.from({ length: 4 }, () => `<div class="sk tile-sk"></div>`).join("")}</div>
+    <div class="sk" style="height:210px;border-radius:var(--r-s);margin-bottom:16px"></div>`;
+}
+
+function statsSection(d) {
   const months = [];
   for (let i = 23; i >= 0; i--) {
     const dt = new Date(); dt.setDate(1); dt.setMonth(dt.getMonth() - i);
     months.push(dt.toISOString().slice(0, 7));
   }
   const byM = Object.fromEntries(d.monthly.map(m => [m.ym, m.count]));
-  const hbars = (rows, unit) => {
-    const hmax = Math.max(...rows.map(r => r.v), 1);
-    return rows.map(r => `
-    <div class="hbar-row"><span class="name" title="${esc(r.name)}">${esc(r.name)}</span>
-      <span class="track"><i style="width:${Math.round(100 * r.v / hmax)}%"></i></span>
-      <span class="num">${r.label ?? r.v + unit}</span></div>`).join("");
-  };
-
-  /* watch clock heatmap: 7 rows × 24 cols */
   const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const hm = Array.from({ length: 7 }, () => Array(24).fill(0));
   (d.heatmap || []).forEach(([dow, h, c]) => { hm[dow][h] = c; });
   const hmMax = Math.max(...hm.flat(), 1);
+  const hourLbl = c => c === 0 ? "12am" : c < 12 ? c + "am" : c === 12 ? "12pm" : (c - 12) + "pm";
   const heat = `<div class="heat">
     <div class="heat-grid">
       ${wd.map((n, r) => `<div class="heat-lbl">${n}</div>` + hm[r].map((v, c) =>
-        `<div class="heat-c" style="--a:${v ? (0.12 + 0.88 * v / hmMax).toFixed(2) : 0}"
-          title="${n} ${c === 0 ? "12am" : c < 12 ? c + "am" : c === 12 ? "12pm" : (c - 12) + "pm"} — ${v} watched"></div>`).join("")).join("")}
-      <div></div>${[0, 6, 12, 18].map(h => `<div class="heat-h" style="grid-column:${h + 2} / span 6">${h === 0 ? "12am" : h === 12 ? "12pm" : h < 12 ? h + "am" : (h - 12) + "pm"}</div>`).join("")}
-    </div></div>`;
+        `<div class="heat-c" style="--a:${v ? (0.14 + 0.86 * v / hmMax).toFixed(2) : 0}"
+          title="${n} ${hourLbl(c)} — ${v} watched"></div>`).join("")).join("")}
+      <div></div>${[0, 6, 12, 18].map(h => `<div class="heat-h" style="grid-column:${h + 2} / span 6">${hourLbl(h)}</div>`).join("")}
+    </div>
+    <div class="heat-legend"><span>less</span><i style="--a:.16"></i><i style="--a:.4"></i><i style="--a:.66"></i><i style="--a:1"></i><span>more</span></div></div>`;
 
   const totalMin = d.tv_minutes + d.movie_minutes;
   const comp = d.completion || {};
@@ -1970,24 +2219,10 @@ function renderStats(d, animate = true) {
       <span class="track"><i style="width:${Math.round(100 * comp[key] / compTotal)}%"></i></span>
       <span class="num">${comp[key]}</span></div>` : "";
 
-  const records = `
-    <div class="tiles reveal">
-      <div class="tile"><div class="v">${d.streak.current || 0}<small class="unit">days</small></div>
-        <div class="l">current streak</div>
-        <div class="sub">best: ${d.streak.longest} days${d.streak.longest_end ? " · ended " + fmtDate(d.streak.longest_end) : ""}</div></div>
-      ${d.big_day ? `<div class="tile"><div class="v">${d.big_day.count}<small class="unit">eps</small></div>
-        <div class="l">biggest binge day</div>
-        <div class="sub">${fmtDate(d.big_day.date)}${d.big_day.top ? " · mostly " + esc(d.big_day.top) : ""}</div></div>` : ""}
-      <div class="tile"><div class="v">${d.per_day}</div><div class="l">watches / day</div>
-        <div class="sub">since ${d.first_watch ? fmtDate(d.first_watch.watched_at) : "the beginning"}</div></div>
-      ${d.first_watch ? `<div class="tile"><div class="v" style="font-size:17px;line-height:1.3;padding-top:4px">${esc(d.first_watch.title)}</div>
-        <div class="l">first ever watch</div><div class="sub">${fmtDate(d.first_watch.watched_at)}</div></div>` : ""}
-    </div>`;
-
-  view.innerHTML = `<h1>Stats <span class="cnt">· ${esc(ME.username)}</span></h1>
+  return `
     <div class="tiles reveal">
       <div class="tile big"><div class="v">${fmtHours(totalMin)}</div><div class="l">in front of the screen</div>
-        <div class="sub">${Math.round(totalMin / 60).toLocaleString()} hours total</div></div>
+        <div class="sub">${Math.round(totalMin / 60).toLocaleString()} hours all told</div></div>
       <div class="tile"><div class="v">${d.episodes.toLocaleString()}</div><div class="l">episodes</div>
         <div class="sub">${fmtHours(d.tv_minutes)} of TV</div></div>
       <div class="tile"><div class="v">${d.movies.toLocaleString()}</div><div class="l">movies</div>
@@ -1996,52 +2231,183 @@ function renderStats(d, animate = true) {
         <div class="sub">${comp.finished || 0} finished</div></div>
     </div>
 
-    <div class="section"><h2>Records</h2><div class="rule"></div></div>
-    ${records}
-
-    <div class="section"><h2>${new Date().getFullYear()} so far</h2><div class="rule"></div></div>
-    <div class="tiles reveal">
-      <div class="tile"><div class="v">${d.this_year.episodes.toLocaleString()}</div><div class="l">episodes</div></div>
-      <div class="tile"><div class="v">${d.this_year.movies}</div><div class="l">movies</div></div>
-      ${d.this_year.top?.[0] ? `<div class="tile wide"><div class="v" style="font-size:17px;line-height:1.3;padding-top:4px">${esc(d.this_year.top[0].title)}</div>
-        <div class="l">show of the year</div><div class="sub">${d.this_year.top[0].eps} episodes · ${fmtHours(d.this_year.top[0].mins)}</div></div>` : ""}
+    <div class="statcols reveal">
+      <div class="tile stat-rec"><div class="v">${d.streak.current || 0}<small class="unit">days</small></div>
+        <div class="l">current streak</div>
+        <div class="sub">best ${d.streak.longest} days${d.streak.longest_end ? " · ended " + fmtDate(d.streak.longest_end) : ""}</div></div>
+      ${d.big_day ? `<div class="tile stat-rec"><div class="v">${d.big_day.count}<small class="unit">eps</small></div>
+        <div class="l">biggest binge day</div>
+        <div class="sub">${fmtDate(d.big_day.date)}${d.big_day.top ? " · mostly " + esc(d.big_day.top) : ""}</div></div>` : ""}
+      <div class="tile stat-rec"><div class="v">${d.per_day}</div><div class="l">watches / day</div>
+        <div class="sub">since ${d.first_watch ? fmtDate(d.first_watch.watched_at) : "the start"}</div></div>
+      ${d.first_watch ? `<div class="tile stat-rec"><div class="v tt">${esc(d.first_watch.title)}</div>
+        <div class="l">first ever watch</div><div class="sub">${fmtDate(d.first_watch.watched_at)}</div></div>` : ""}
     </div>
 
-    <div class="chart"><h3>Month by month</h3>
+    <div class="chart reveal"><h3>Month by month</h3>
       <div class="sub">episodes + movies · last 24 months</div>
-      ${barSVG(months, months.map(m => byM[m] || 0), { yearMarks: true })}</div>
+      ${areaSVG(months, months.map(m => byM[m] || 0), { yearMarks: true })}</div>
 
-    <div class="chart"><h3>Your watching life</h3><div class="sub">episodes per year, all time</div>
-      ${barSVG(d.yearly.map(y => y.y), d.yearly.map(y => y.c))}</div>
+    <div class="chart reveal"><h3>Your watching life</h3><div class="sub">episodes per year, all time</div>
+      ${areaSVG(d.yearly.map(y => y.y), d.yearly.map(y => y.c))}</div>
 
-    <div class="chart"><h3>The watch clock</h3><div class="sub">when you actually watch — darker is more</div>
+    <div class="chart reveal"><h3>The watch clock</h3><div class="sub">when you actually watch — brighter is more</div>
       ${heat}</div>
 
-    <div class="charts2">
+    <div class="charts2 reveal">
       <div class="chart"><h3>Top shows by time</h3><div class="sub">your biggest commitments</div>
-        ${hbars(d.top_shows.map(s => ({ name: s.title, v: s.mins, label: fmtHours(s.mins) })), "")}</div>
+        ${rankBars(d.top_shows.map(s => ({ name: s.title, v: s.mins, label: fmtHours(s.mins) })))}</div>
       <div class="chart"><h3>Genres</h3><div class="sub">by episodes watched</div>
-        ${hbars(d.genres.map(g => ({ name: g.name, v: g.count })), "")}</div>
+        ${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div>
       <div class="chart"><h3>Show shelf</h3><div class="sub">where your ${compTotal} shows stand</div>
         ${compRow("Finished", "finished")}${compRow("Up to date", "up_to_date")}
         ${compRow("In progress", "in_progress")}${compRow("Dropped", "dropped")}
         ${compRow("Not started", "not_started")}</div>
       <div class="chart"><h3>Movies by decade</h3><div class="sub">release decade of what you've watched</div>
-        ${hbars((d.movie_decades || []).map(x => ({ name: x.dec + "s", v: x.c })), "")}</div>
+        ${rankBars((d.movie_decades || []).map(x => ({ name: x.dec + "s", v: x.c })))}</div>
       ${Object.keys(d.rating_hist || {}).length ? `
       <div class="chart"><h3>Your ratings</h3><div class="sub">how you score things</div>
-        ${hbars(Object.entries(d.rating_hist).sort((a, b) => b[0] - a[0]).map(([r, c]) => ({ name: r + "/10", v: c })), "")}</div>
+        ${rankBars(Object.entries(d.rating_hist).sort((a, b) => b[0] - a[0]).map(([r, c]) => ({ name: r + "/10", v: c })))}</div>
       <div class="chart"><h3>All-timers</h3><div class="sub">your highest-rated</div>
-        ${(d.top_rated || []).map(t => `<div class="hbar-row" style="grid-template-columns:1fr 44px">
-          <span class="name">${esc(t.title)}</span><span class="num">${t.rating}/10</span></div>`).join("")}</div>` : ""}
+        ${(d.top_rated || []).map(t => `<div class="hbar-row" style="grid-template-columns:1fr 48px">
+          <span class="name">${esc(t.title)}</span><span class="num rate">${t.rating}/10</span></div>`).join("")}</div>` : ""}
     </div>`;
 }
-routes.stats = () => {
-  const c = cached("/stats");
-  if (c.stale) renderStats(c.stale);
-  else view.innerHTML = `<h1>Stats</h1><div class="tiles">${Array.from({ length: 5 }, () => `<div class="sk tile-sk"></div>`).join("")}</div>${skRows(3)}`;
-  c.refresh(() => seg()[0] === "stats", d => renderStats(d, !c.stale));
+
+function advancedSection(a) {
+  const has = k => (a[k] && a[k].length);
+  if (!has("networks") && !has("studios") && !has("actors") && !has("directors") && !has("countries")) return "";
+  const enrichNote = a.movies_total && a.movies_enriched < a.movies_total
+    ? `<div class="adv-note">Studios, film countries &amp; movie cast fill in gradually — ${a.movies_enriched}/${a.movies_total} movies enriched so far.</div>` : "";
+  const netStudio = (has("networks") || has("studios")) ? `
+    <div class="charts2">
+      ${has("networks") ? `<div class="chart"><h3>Networks</h3><div class="sub">TV homes, by episodes watched</div>
+        ${rankBars(a.networks.map(n => ({ name: n.name, v: n.count })))}</div>` : ""}
+      ${has("studios") ? `<div class="chart"><h3>Studios</h3><div class="sub">film production companies, by titles</div>
+        ${rankBars(a.studios.map(n => ({ name: n.name, v: n.count })))}</div>` : ""}
+    </div>` : "";
+  const people = (has("actors") || has("directors")) ? `
+    <div class="charts2">
+      ${has("actors") ? `<div class="chart"><h3>Most-watched faces</h3><div class="sub">actors across your shows &amp; films</div>
+        ${rankBars(a.actors.map(p => ({ name: p.name, img: p.img, v: p.shows + p.movies,
+          label: [p.shows ? p.shows + " show" + (p.shows > 1 ? "s" : "") : "", p.movies ? p.movies + " film" + (p.movies > 1 ? "s" : "") : ""].filter(Boolean).join(" · ") })), { face: true })}</div>` : ""}
+      ${has("directors") ? `<div class="chart"><h3>Creators &amp; directors</h3><div class="sub">whose work you keep coming back to</div>
+        ${rankBars(a.directors.map(n => ({ name: n.name, v: n.count, label: n.count + " title" + (n.count > 1 ? "s" : "") })))}</div>` : ""}
+    </div>` : "";
+  const country = has("countries") ? `
+    <div class="chart"><h3>Around the world</h3><div class="sub">where your stories are made</div>
+      ${rankBars(a.countries.map(c => ({ name: c.name, v: c.count })))}</div>` : "";
+  return `<div class="section reveal"><h2>Deeper cuts</h2><div class="rule"></div></div>
+    ${enrichNote}${netStudio}${people}${country}`;
+}
+
+/* stats now live on the profile — keep old #/stats links working */
+routes.stats = () => { history.replaceState(null, "", "#/profile"); parseHash(); };
+
+/* ---------- year in review (the flagship, shareable recap) ---------- */
+routes.recap = async (username, year) => {
+  const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
+  const yr = parseInt(year, 10) || new Date().getFullYear();
+  const path = me ? `/recap/${yr}` : `/profile/${encodeURIComponent(username)}/recap/${yr}`;
+  const who = me ? "profile" : "u/" + encodeURIComponent(username);
+  view.innerHTML = `<div class="recap-load">${skRows(2)}</div>`;
+  let d; try { d = await api(path); } catch { return; }
+  if (seg()[0] !== "recap" && seg()[0] !== "u") return;
+  renderRecap(d, me, username, who);
 };
+
+function renderRecap(d, me, username, who) {
+  const yr = d.year;
+  const yrs = [yr, yr - 1, yr - 2];
+  const monthsFull = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+  if (!d.has_data) {
+    view.innerHTML = `<div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
+      <div class="recap"><div class="recap-hd"><div class="rc-year">${yr}</div>
+        <div class="rc-kicker">Year in Review</div></div>
+      <div class="empty" style="padding:40px 16px">Nothing tracked in ${yr} yet. Watch a few things and check back.</div>
+      <div class="rc-switch">${yrs.map(y => `<a class="rc-yr ${y === yr ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}">${y}</a>`).join("")}</div></div>`;
+    return;
+  }
+  const topShow = d.top_shows[0];
+  const posters = d.top_shows.filter(s => s.poster).slice(0, 5);
+  const share = `<button class="btn rc-share" id="rcshare">${I.share} Share</button>`;
+  view.innerHTML = `
+    <div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
+    <div class="recap" id="recap">
+      <div class="recap-hero reveal">
+        <div class="rc-grain"></div>
+        <div class="rc-kicker">Year in Review</div>
+        <div class="rc-year">${yr}</div>
+        <div class="rc-sub">${me ? "Your" : esc((username || "").split(" ")[0]) + "’s"} year at the movies &amp; on the couch</div>
+      </div>
+
+      <div class="rc-bignums reveal">
+        <div class="rc-big"><div class="rc-bv">${fmtHours(d.minutes)}</div><div class="rc-bl">watched</div></div>
+        <div class="rc-big"><div class="rc-bv">${d.episodes.toLocaleString()}</div><div class="rc-bl">episodes</div></div>
+        <div class="rc-big"><div class="rc-bv">${d.movies.toLocaleString()}</div><div class="rc-bl">movies</div></div>
+        <div class="rc-big"><div class="rc-bv">${d.new_shows}</div><div class="rc-bl">new shows</div></div>
+      </div>
+
+      ${topShow ? `<div class="rc-card rc-headline reveal">
+        <div class="rc-cap">Show of the year</div>
+        <div class="rc-hl">
+          ${topShow.poster ? `<img class="rc-poster" src="${POSTER(topShow.poster)}" alt="">` : ""}
+          <div class="rc-hl-txt"><div class="rc-hl-t">${esc(topShow.title)}</div>
+            <div class="rc-hl-s">${topShow.eps} episodes · ${fmtHours(topShow.mins)}</div></div>
+        </div>
+        ${posters.length > 1 ? `<div class="rc-poster-row">${posters.slice(1).map(s =>
+          `<img src="${POSTER(s.poster)}" alt="${esc(s.title)}" title="${esc(s.title)}">`).join("")}</div>` : ""}
+      </div>` : ""}
+
+      <div class="rc-grid reveal">
+        <div class="rc-card rc-months">
+          <div class="rc-cap">The shape of your year</div>
+          ${(() => {
+            const mx = Math.max(...d.months, 1);
+            return `<div class="rc-bars">${d.months.map((v, i) => `
+              <div class="rc-bcol"><i style="height:${Math.max(3, Math.round(100 * v / mx))}%"></i>
+                <span>${monthsFull[i]}</span></div>`).join("")}</div>`;
+          })()}
+          ${d.busiest_month ? `<div class="rc-foot">Busiest in <b>${d.busiest_month}</b> · ${d.busiest_month_count} watches</div>` : ""}
+        </div>
+        ${d.genres.length ? `<div class="rc-card">
+          <div class="rc-cap">Your top genres</div>
+          ${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div>` : ""}
+      </div>
+
+      ${d.top_movies.length ? `<div class="rc-card reveal">
+        <div class="rc-cap">Films you loved</div>
+        <div class="rc-movie-row">${d.top_movies.map(m => `
+          <div class="rc-movie"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>
+          ${m.rating ? `<b class="rc-rate">${m.rating}/10</b>` : ""}</div>`).join("")}</div></div>` : ""}
+
+      <div class="rc-grid reveal">
+        ${d.binge ? `<div class="rc-card rc-mini"><div class="rc-cap">Biggest binge</div>
+          <div class="rc-mv">${d.binge.count}<small> eps</small></div>
+          <div class="rc-ms">${fmtDate(d.binge.date)}${d.binge.top ? " · mostly " + esc(d.binge.top) : ""}</div></div>` : ""}
+        ${d.first_watch ? `<div class="rc-card rc-mini"><div class="rc-cap">Kicked off with</div>
+          <div class="rc-mt">${esc(d.first_watch.title)}</div>
+          <div class="rc-ms">${fmtDate(d.first_watch.watched_at)}</div></div>` : ""}
+        ${d.last_watch ? `<div class="rc-card rc-mini"><div class="rc-cap">Most recently</div>
+          <div class="rc-mt">${esc(d.last_watch.title)}</div>
+          <div class="rc-ms">${fmtDate(d.last_watch.watched_at)}</div></div>` : ""}
+      </div>
+
+      <div class="rc-actions reveal">${share}
+        <div class="rc-switch">${yrs.map(y => `<a class="rc-yr ${y === yr ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}">${y}</a>`).join("")}</div></div>
+    </div>`;
+
+  const btn = $("#rcshare");
+  if (btn) btn.onclick = async () => {
+    const url = location.href;
+    const text = `${me ? "My" : esc((username || "").split(" ")[0]) + "’s"} ${yr} on Marquee — ${fmtHours(d.minutes)} watched, ${d.episodes} episodes, ${d.movies} movies.`;
+    try {
+      if (navigator.share) await navigator.share({ title: `Marquee ${yr}`, text, url });
+      else { await navigator.clipboard.writeText(url); toast("Link copied"); }
+    } catch { /* user dismissed share */ }
+  };
+}
+
 
 /* ---------- settings ---------- */
 const PLEX_LOGO = `<svg class="plexlogo" viewBox="0 0 24 24" aria-hidden="true">

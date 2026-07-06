@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260706h"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260706i"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -91,6 +91,10 @@ CREATE TABLE IF NOT EXISTS notif_sent(
   user_id INTEGER, dedup TEXT, created_at TEXT, PRIMARY KEY(user_id, dedup));
 CREATE TABLE IF NOT EXISTS push_subscriptions(
   id INTEGER PRIMARY KEY, user_id INTEGER, endpoint TEXT UNIQUE, p256dh TEXT, auth TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS favorites(
+  user_id INTEGER, item_type TEXT, item_id INTEGER, position INTEGER, created_at TEXT,
+  PRIMARY KEY(user_id, item_type, item_id));
+CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, position);
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
 CREATE INDEX IF NOT EXISTS idx_watches_user ON watches(user_id, watched_at);
 CREATE INDEX IF NOT EXISTS idx_eps_show ON episodes(show_id, air_date);
@@ -227,19 +231,50 @@ def upsert_show(con, tmdb_id, fetch_episodes=True):
     return d
 
 
+def movie_details_json(d):
+    """Compact JSON of the richer bits we keep for stats (studios/countries/people)."""
+    credits = d.get("credits") or {}
+    crew = credits.get("crew") or []
+    return json.dumps({
+        "companies": [c["name"] for c in (d.get("production_companies") or [])][:4],
+        "countries": [c["iso_3166_1"] for c in (d.get("production_countries") or []) if c.get("iso_3166_1")],
+        "directors": [c["name"] for c in crew if c.get("job") == "Director"][:3],
+        "cast": [{"id": c["id"], "name": c["name"], "img": img(c.get("profile_path"), "w185")}
+                 for c in (credits.get("cast") or [])[:10]],
+    })
+
+
 def upsert_movie(con, tmdb_id):
-    d = tmdb(f"/movie/{tmdb_id}")
+    d = tmdb(f"/movie/{tmdb_id}", append_to_response="credits")
     if not d:
         return None
-    con.execute("""INSERT INTO movies(id,title,poster,year,release_date,runtime,genres)
-        VALUES(?,?,?,?,?,?,?)
+    con.execute("""INSERT INTO movies(id,title,poster,year,release_date,runtime,genres,details)
+        VALUES(?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET title=excluded.title, poster=excluded.poster,
           year=excluded.year, release_date=excluded.release_date, runtime=excluded.runtime,
-          genres=excluded.genres""",
+          genres=excluded.genres, details=excluded.details""",
         (tmdb_id, d.get("title"), img(d.get("poster_path")),
          int(d["release_date"][:4]) if d.get("release_date") else None,
-         d.get("release_date"), d.get("runtime"), ",".join(g["name"] for g in d.get("genres", []))))
+         d.get("release_date"), d.get("runtime"), ",".join(g["name"] for g in d.get("genres", [])),
+         movie_details_json(d)))
     return d
+
+
+def backfill_movie_details(con, ids, cap=8):
+    """Populate movies.details for up to `cap` already-watched movies that lack it.
+    Best-effort + bounded so the advanced-stats endpoint stays responsive; studios /
+    movie-people / movie-countries therefore fill in progressively over repeat visits."""
+    if not (setting(con, "tmdb_token") or os.environ.get("TMDB_TOKEN")):
+        return
+    todo = [i for i in ids if con.execute(
+        "SELECT 1 FROM movies WHERE id=? AND details IS NULL", (i,)).fetchone()]
+    for mid in todo[:cap]:
+        try:
+            d = tmdb(f"/movie/{mid}", append_to_response="credits")
+            if d:
+                con.execute("UPDATE movies SET details=? WHERE id=?", (movie_details_json(d), mid))
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- app + auth
@@ -346,11 +381,120 @@ def me(user=Depends(current_user)):
     return {**user_public(u), "is_admin": bool(user["is_admin"])}
 
 
+def headline_counts(con, uid):
+    """Cheap identity numbers for the profile hero (no full stats needed)."""
+    eps = con.execute("SELECT COUNT(*) c FROM watches WHERE user_id=?", (uid,)).fetchone()["c"]
+    shows = con.execute("SELECT COUNT(*) c FROM follows WHERE user_id=?", (uid,)).fetchone()["c"]
+    movs = con.execute("SELECT COUNT(*) c FROM movie_states WHERE user_id=? AND state='watched'",
+                       (uid,)).fetchone()["c"]
+    tvm = con.execute("""SELECT COALESCE(SUM(COALESCE(e.runtime, s.avg_runtime, 30)),0) m
+        FROM watches w JOIN shows s ON s.id=w.show_id
+        LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
+        WHERE w.user_id=?""", (uid,)).fetchone()["m"]
+    mvm = con.execute("""SELECT COALESCE(SUM(COALESCE(m.runtime,110)),0) m FROM movie_states ms
+        JOIN movies m ON m.id=ms.movie_id WHERE ms.user_id=? AND ms.state='watched'""",
+        (uid,)).fetchone()["m"]
+    return {"episodes": eps, "shows": shows, "movies": movs, "hours": round((tvm + mvm) / 60)}
+
+
+def fav_row(con, r):
+    tbl = "shows" if r["item_type"] == "show" else "movies"
+    s = con.execute(f"SELECT id,title,poster,year FROM {tbl} WHERE id=?", (r["item_id"],)).fetchone()
+    if not s:
+        return None
+    return {"type": r["item_type"], "id": s["id"], "title": s["title"],
+            "poster": s["poster"], "year": s["year"], "position": r["position"]}
+
+
+def get_favorites(con, uid):
+    rows = con.execute("""SELECT item_type,item_id,position FROM favorites
+        WHERE user_id=? ORDER BY position, created_at""", (uid,)).fetchall()
+    return [x for x in (fav_row(con, r) for r in rows) if x]
+
+
+def profile_payload(con, u, viewer_id):
+    return {**user_public(u), "is_admin": bool(u["is_admin"]),
+            "member_since": (u["created_at"] if "created_at" in u.keys() else None),
+            "is_me": u["id"] == viewer_id,
+            "headline": headline_counts(con, u["id"]),
+            "favorites": get_favorites(con, u["id"])}
+
+
+def resolve_member(con, username):
+    u = con.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone()
+    if not u:
+        raise HTTPException(404, "no such member")
+    return u
+
+
 @app.get("/api/profile")
 def get_profile(user=Depends(current_user)):
     with db() as con:
         u = con.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
-    return {**user_public(u), "is_admin": bool(user["is_admin"])}
+        return profile_payload(con, u, user["id"])
+
+
+@app.get("/api/members")
+def members(user=Depends(current_user)):
+    with db() as con:
+        rows = con.execute("""SELECT id,username,display_name,avatar,created_at FROM users
+            ORDER BY created_at""").fetchall()
+    return {"members": [{"id": r["id"], "username": r["username"],
+                         "display_name": r["display_name"] or r["username"],
+                         "avatar": r["avatar"], "is_me": r["id"] == user["id"]} for r in rows]}
+
+
+@app.get("/api/profile/{username}")
+def get_profile_public(username: str, user=Depends(current_user)):
+    with db() as con:
+        u = resolve_member(con, username)
+        return profile_payload(con, u, user["id"])
+
+
+@app.get("/api/favorites")
+def favorites_list(user=Depends(current_user)):
+    with db() as con:
+        return {"favorites": get_favorites(con, user["id"])}
+
+
+@app.post("/api/favorites")
+async def favorites_add(request: Request, user=Depends(current_user)):
+    body = await request.json()
+    it = body.get("item_type")
+    if it not in ("show", "movie"):
+        raise HTTPException(400, "item_type must be show or movie")
+    iid = int(body.get("item_id"))
+    with db() as con:
+        if it == "show" and not con.execute("SELECT 1 FROM shows WHERE id=?", (iid,)).fetchone():
+            if not upsert_show(con, iid, fetch_episodes=False):
+                raise HTTPException(404, "not found on TMDB")
+        if it == "movie" and not con.execute("SELECT 1 FROM movies WHERE id=?", (iid,)).fetchone():
+            if not upsert_movie(con, iid):
+                raise HTTPException(404, "not found on TMDB")
+        n = con.execute("SELECT COALESCE(MAX(position),-1)+1 p FROM favorites WHERE user_id=?",
+                        (user["id"],)).fetchone()["p"]
+        con.execute("""INSERT OR IGNORE INTO favorites(user_id,item_type,item_id,position,created_at)
+            VALUES(?,?,?,?,?)""", (user["id"], it, iid, n, datetime.utcnow().isoformat()))
+        return {"favorites": get_favorites(con, user["id"])}
+
+
+@app.delete("/api/favorites/{item_type}/{item_id}")
+def favorites_remove(item_type: str, item_id: int, user=Depends(current_user)):
+    with db() as con:
+        con.execute("DELETE FROM favorites WHERE user_id=? AND item_type=? AND item_id=?",
+                    (user["id"], item_type, item_id))
+        return {"favorites": get_favorites(con, user["id"])}
+
+
+@app.post("/api/favorites/reorder")
+async def favorites_reorder(request: Request, user=Depends(current_user)):
+    body = await request.json()
+    for pos, pair in enumerate(body.get("order") or []):
+        with db() as con:
+            con.execute("""UPDATE favorites SET position=? WHERE user_id=? AND item_type=? AND item_id=?""",
+                        (pos, user["id"], pair[0], int(pair[1])))
+    with db() as con:
+        return {"favorites": get_favorites(con, user["id"])}
 
 
 @app.post("/api/profile")
@@ -1743,9 +1887,7 @@ def discover(user=Depends(current_user)):
 
 # ---------------------------------------------------------------- stats
 
-@app.get("/api/stats")
-def stats(user=Depends(current_user)):
-    uid = user["id"]
+def compute_stats(uid):
     with db() as con:
         eps_total = con.execute("SELECT COUNT(*) c FROM watches WHERE user_id=?", (uid,)).fetchone()["c"]
         minutes = con.execute("""SELECT COALESCE(SUM(COALESCE(e.runtime, s.avg_runtime, 30)),0) m
@@ -1886,6 +2028,205 @@ def stats(user=Depends(current_user)):
         "rating_hist": {r["r"]: r["c"] for r in rating_hist},
         "top_rated": [dict(r) for r in top_rated],
     }
+
+
+@app.get("/api/stats")
+def stats(user=Depends(current_user)):
+    return compute_stats(user["id"])
+
+
+@app.get("/api/profile/{username}/stats")
+def stats_public(username: str, user=Depends(current_user)):
+    with db() as con:
+        u = resolve_member(con, username)
+    return compute_stats(u["id"])
+
+
+# ------------------------------------------------- advanced stats (Trakt-VIP parity)
+
+COUNTRY_NAMES = {
+    "US": "United States", "GB": "United Kingdom", "CA": "Canada", "JP": "Japan",
+    "KR": "South Korea", "FR": "France", "DE": "Germany", "ES": "Spain", "IT": "Italy",
+    "AU": "Australia", "NZ": "New Zealand", "IN": "India", "CN": "China", "TW": "Taiwan",
+    "HK": "Hong Kong", "BR": "Brazil", "MX": "Mexico", "AR": "Argentina", "SE": "Sweden",
+    "NO": "Norway", "DK": "Denmark", "FI": "Finland", "IS": "Iceland", "NL": "Netherlands",
+    "BE": "Belgium", "IE": "Ireland", "RU": "Russia", "PL": "Poland", "TR": "Turkey",
+    "IL": "Israel", "ZA": "South Africa", "TH": "Thailand", "PH": "Philippines",
+    "ID": "Indonesia", "SG": "Singapore", "MY": "Malaysia", "VN": "Vietnam", "PT": "Portugal",
+    "GR": "Greece", "AT": "Austria", "CH": "Switzerland", "CZ": "Czechia", "HU": "Hungary",
+    "CO": "Colombia", "CL": "Chile", "UA": "Ukraine", "AE": "UAE", "SA": "Saudi Arabia",
+    "EG": "Egypt", "NG": "Nigeria", "RO": "Romania", "LU": "Luxembourg",
+}
+
+
+def compute_advanced(con, uid):
+    show_eps = {r["show_id"]: r["c"] for r in con.execute(
+        "SELECT show_id, COUNT(*) c FROM watches WHERE user_id=? GROUP BY show_id", (uid,))}
+    networks, countries = {}, {}
+    actors, directors = {}, {}
+    if show_eps:
+        ids = list(show_eps)
+        rows = con.execute("SELECT id,title,details FROM shows WHERE id IN (%s)"
+                           % ",".join("?" * len(ids)), ids).fetchall()
+        for r in rows:
+            eps = show_eps.get(r["id"], 0)
+            det = json.loads(r["details"]) if r["details"] else {}
+            for n in (det.get("networks") or []):
+                networks[n] = networks.get(n, 0) + eps
+            for iso in (det.get("origin") or "").split(","):
+                iso = iso.strip()
+                if iso:
+                    countries[iso] = countries.get(iso, 0) + eps
+            for c in (det.get("cast") or [])[:10]:
+                a = actors.setdefault(c["id"], {"name": c["name"], "img": c.get("img"),
+                                                "shows": 0, "movies": 0})
+                a["shows"] += 1
+            for name in (det.get("created_by") or []):
+                directors[name] = directors.get(name, 0) + 1
+
+    mov_ids = [r["movie_id"] for r in con.execute(
+        "SELECT movie_id FROM movie_states WHERE user_id=? AND state='watched'", (uid,))]
+    studios = {}
+    if mov_ids:
+        rows = con.execute("SELECT id,title,details FROM movies WHERE id IN (%s)"
+                           % ",".join("?" * len(mov_ids)), mov_ids).fetchall()
+        for r in rows:
+            det = json.loads(r["details"]) if r["details"] else {}
+            for n in (det.get("companies") or []):
+                studios[n] = studios.get(n, 0) + 1
+            for iso in (det.get("countries") or []):
+                countries[iso] = countries.get(iso, 0) + 1
+            for c in (det.get("cast") or [])[:10]:
+                a = actors.setdefault(c["id"], {"name": c["name"], "img": c.get("img"),
+                                                "shows": 0, "movies": 0})
+                a["movies"] += 1
+            for name in (det.get("directors") or []):
+                directors[name] = directors.get(name, 0) + 1
+
+    def top(d, key=lambda kv: -kv[1], n=10):
+        return sorted(d.items(), key=key)[:n]
+
+    people = sorted(actors.values(), key=lambda a: -(a["shows"] + a["movies"]))
+    people = [a for a in people if (a["shows"] + a["movies"]) > 1][:12] or \
+        sorted(actors.values(), key=lambda a: -(a["shows"] + a["movies"]))[:12]
+    return {
+        "networks": [{"name": k, "count": v} for k, v in top(networks)],
+        "studios": [{"name": k, "count": v} for k, v in top(studios)],
+        "countries": [{"code": k, "name": COUNTRY_NAMES.get(k, k), "count": v}
+                      for k, v in top(countries, n=12)],
+        "actors": [{"name": a["name"], "img": a["img"],
+                    "shows": a["shows"], "movies": a["movies"]} for a in people],
+        "directors": [{"name": k, "count": v} for k, v in top(directors)],
+        "movies_enriched": con.execute(
+            "SELECT COUNT(*) c FROM movies WHERE id IN (%s) AND details IS NOT NULL"
+            % (",".join("?" * len(mov_ids)) or "NULL"), mov_ids).fetchone()["c"] if mov_ids else 0,
+        "movies_total": len(mov_ids),
+    }
+
+
+@app.get("/api/stats/advanced")
+def stats_advanced(user=Depends(current_user)):
+    with db() as con:
+        mov_ids = [r["movie_id"] for r in con.execute(
+            "SELECT movie_id FROM movie_states WHERE user_id=? AND state='watched'", (user["id"],))]
+        backfill_movie_details(con, mov_ids, cap=8)
+        return compute_advanced(con, user["id"])
+
+
+@app.get("/api/profile/{username}/stats/advanced")
+def stats_advanced_public(username: str, user=Depends(current_user)):
+    with db() as con:
+        u = resolve_member(con, username)
+        return compute_advanced(con, u["id"])
+
+
+# ------------------------------------------------- year in review (shareable recap)
+
+def compute_recap(con, uid, year):
+    y = str(year)
+    lo, hi = f"{y}-01-01", f"{y}-12-31T23:59:59.999999"
+    eps = con.execute("""SELECT COUNT(*) c, COALESCE(SUM(COALESCE(e.runtime,s.avg_runtime,30)),0) m
+        FROM watches w JOIN shows s ON s.id=w.show_id
+        LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
+        WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=?""", (uid, lo, hi)).fetchone()
+    mov = con.execute("""SELECT COUNT(*) c, COALESCE(SUM(COALESCE(m.runtime,110)),0) m
+        FROM movie_states ms JOIN movies m ON m.id=ms.movie_id
+        WHERE ms.user_id=? AND ms.state='watched' AND ms.watched_at>=? AND ms.watched_at<=?""",
+        (uid, lo, hi)).fetchone()
+    top_shows = con.execute("""SELECT s.title, s.poster, COUNT(*) eps,
+          SUM(COALESCE(e.runtime, s.avg_runtime, 30)) mins
+        FROM watches w JOIN shows s ON s.id=w.show_id
+        LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
+        WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=?
+        GROUP BY s.id ORDER BY mins DESC LIMIT 5""", (uid, lo, hi)).fetchall()
+    top_movies = con.execute("""SELECT m.title, m.poster, ms.rating
+        FROM movie_states ms JOIN movies m ON m.id=ms.movie_id
+        WHERE ms.user_id=? AND ms.state='watched' AND ms.watched_at>=? AND ms.watched_at<=?
+        ORDER BY ms.rating IS NULL, ms.rating DESC, ms.watched_at DESC LIMIT 5""",
+        (uid, lo, hi)).fetchall()
+    grows = con.execute("""SELECT s.genres FROM watches w JOIN shows s ON s.id=w.show_id
+        WHERE w.user_id=? AND s.genres!='' AND w.watched_at>=? AND w.watched_at<=?""",
+        (uid, lo, hi)).fetchall()
+    gcount = {}
+    for r in grows:
+        for g in r["genres"].split(","):
+            gcount[g] = gcount.get(g, 0) + 1
+    monthly = con.execute("""SELECT substr(watched_at,6,2) mo, COUNT(*) c FROM watches
+        WHERE user_id=? AND watched_at>=? AND watched_at<=? GROUP BY mo""", (uid, lo, hi)).fetchall()
+    months = [0] * 12
+    for r in monthly:
+        if r["mo"]:
+            months[int(r["mo"]) - 1] += r["c"]
+    big = con.execute("""SELECT substr(watched_at,1,10) d, COUNT(*) c FROM watches
+        WHERE user_id=? AND watched_at>=? AND watched_at<=? GROUP BY d ORDER BY c DESC LIMIT 1""",
+        (uid, lo, hi)).fetchone()
+    binge = None
+    if big:
+        bt = con.execute("""SELECT s.title FROM watches w JOIN shows s ON s.id=w.show_id
+            WHERE w.user_id=? AND substr(w.watched_at,1,10)=? GROUP BY s.id
+            ORDER BY COUNT(*) DESC LIMIT 1""", (uid, big["d"])).fetchone()
+        binge = {"date": big["d"], "count": big["c"], "top": bt["title"] if bt else None}
+    first = con.execute("""SELECT w.watched_at, s.title FROM watches w JOIN shows s ON s.id=w.show_id
+        WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=? ORDER BY w.watched_at LIMIT 1""",
+        (uid, lo, hi)).fetchone()
+    last = con.execute("""SELECT w.watched_at, s.title FROM watches w JOIN shows s ON s.id=w.show_id
+        WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=? ORDER BY w.watched_at DESC LIMIT 1""",
+        (uid, lo, hi)).fetchone()
+    new_shows = con.execute("""SELECT COUNT(*) c FROM (
+        SELECT show_id, MIN(watched_at) f FROM watches WHERE user_id=? GROUP BY show_id
+        HAVING f>=? AND f<=?)""", (uid, lo, hi)).fetchone()["c"]
+    mo_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    busiest = max(range(12), key=lambda i: months[i]) if any(months) else None
+    genres = sorted(({"name": k, "count": v} for k, v in gcount.items()), key=lambda x: -x["count"])[:5]
+    return {
+        "year": year,
+        "has_data": (eps["c"] + mov["c"]) > 0,
+        "episodes": eps["c"], "movies": mov["c"],
+        "minutes": eps["m"] + mov["m"], "tv_minutes": eps["m"], "movie_minutes": mov["m"],
+        "top_shows": [dict(r) for r in top_shows],
+        "top_movies": [dict(r) for r in top_movies],
+        "genres": genres,
+        "months": months,
+        "busiest_month": mo_names[busiest] if busiest is not None else None,
+        "busiest_month_count": months[busiest] if busiest is not None else 0,
+        "binge": binge,
+        "first_watch": dict(first) if first else None,
+        "last_watch": dict(last) if last else None,
+        "new_shows": new_shows,
+    }
+
+
+@app.get("/api/recap/{year}")
+def recap(year: int, user=Depends(current_user)):
+    with db() as con:
+        return compute_recap(con, user["id"], year)
+
+
+@app.get("/api/profile/{username}/recap/{year}")
+def recap_public(username: str, year: int, user=Depends(current_user)):
+    with db() as con:
+        u = resolve_member(con, username)
+        return compute_recap(con, u["id"], year)
 
 
 # ---------------------------------------------------------------- history
@@ -2619,7 +2960,8 @@ def startup():
                      "ALTER TABLE episodes ADD COLUMN details TEXT",
                      "ALTER TABLE episodes ADD COLUMN rating REAL",
                      "ALTER TABLE users ADD COLUMN avatar TEXT",
-                     "ALTER TABLE users ADD COLUMN display_name TEXT"):
+                     "ALTER TABLE users ADD COLUMN display_name TEXT",
+                     "ALTER TABLE movies ADD COLUMN details TEXT"):
             try:
                 con.execute(stmt)
             except sqlite3.OperationalError:
