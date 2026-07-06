@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260706h"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260706i"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -416,29 +416,55 @@ def list_item_row(con, it):
             "poster": s["poster"], "year": s["year"], "added_at": it["added_at"]}
 
 
+def list_visibility(row):
+    """Read the (optionally-not-yet-migrated) visibility column, defaulting to private."""
+    return (row["visibility"] if "visibility" in row.keys() else None) or "private"
+
+
+def list_cards(con, uid, public_only=False):
+    """Assemble the list-card summaries (name, count, up-to-4 cover posters, visibility)
+    for one user's lists. public_only hides that user's private lists (for other viewers)."""
+    q = ("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n
+            FROM lists l WHERE l.user_id=?""")
+    if public_only:
+        q += " AND l.visibility='public'"
+    q += " ORDER BY l.is_default DESC, l.created_at"
+    out = []
+    for r in con.execute(q, (uid,)).fetchall():
+        covers = con.execute("""SELECT item_type, item_id FROM list_items
+            WHERE list_id=? ORDER BY added_at DESC LIMIT 4""", (r["id"],)).fetchall()
+        posters = []
+        for c in covers:
+            tbl = "shows" if c["item_type"] == "show" else "movies"
+            p = con.execute(f"SELECT poster FROM {tbl} WHERE id=?", (c["item_id"],)).fetchone()
+            if p and p["poster"]:
+                posters.append(p["poster"])
+        out.append({"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
+                    "count": r["n"], "posters": posters, "visibility": list_visibility(r)})
+    return out
+
+
 @app.get("/api/lists")
 def get_lists(user=Depends(current_user)):
     uid = user["id"]
     with db() as con:
         ensure_default_list(con, uid)
-        rows = con.execute("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n,
-            (SELECT li.item_type||':'||li.item_id FROM list_items li WHERE li.list_id=l.id
-             ORDER BY li.added_at DESC LIMIT 1) recent
-            FROM lists l WHERE l.user_id=? ORDER BY l.is_default DESC, l.created_at""", (uid,)).fetchall()
-        out = []
-        for r in rows:
-            poster = None
-            covers = con.execute("""SELECT item_type, item_id FROM list_items
-                WHERE list_id=? ORDER BY added_at DESC LIMIT 4""", (r["id"],)).fetchall()
-            posters = []
-            for c in covers:
-                tbl = "shows" if c["item_type"] == "show" else "movies"
-                p = con.execute(f"SELECT poster FROM {tbl} WHERE id=?", (c["item_id"],)).fetchone()
-                if p and p["poster"]:
-                    posters.append(p["poster"])
-            out.append({"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
-                        "count": r["n"], "posters": posters})
+        out = list_cards(con, uid)
     return {"lists": out}
+
+
+@app.get("/api/user/{username}/lists")
+def user_lists(username: str, user=Depends(current_user)):
+    """A user's lists for their profile — all of them if it's you, else only the public ones."""
+    with db() as con:
+        u = con.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone()
+        if not u:
+            raise HTTPException(404, "no such user")
+        is_me = u["id"] == user["id"]
+        if is_me:
+            ensure_default_list(con, u["id"])
+        out = list_cards(con, u["id"], public_only=not is_me)
+    return {"user": user_public(u), "is_me": is_me, "lists": out}
 
 
 @app.post("/api/lists")
@@ -447,10 +473,23 @@ async def create_list(request: Request, user=Depends(current_user)):
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "name required")
+    visibility = "public" if body.get("visibility") == "public" else "private"
     with db() as con:
-        cur = con.execute("INSERT INTO lists(user_id,name,created_at) VALUES(?,?,?)",
-                          (user["id"], name, datetime.utcnow().isoformat()))
-    return {"id": cur.lastrowid, "name": name}
+        cur = con.execute("INSERT INTO lists(user_id,name,visibility,created_at) VALUES(?,?,?,?)",
+                          (user["id"], name, visibility, datetime.utcnow().isoformat()))
+    return {"id": cur.lastrowid, "name": name, "visibility": visibility}
+
+
+@app.post("/api/list/{list_id}/visibility")
+async def set_list_visibility(list_id: int, request: Request, user=Depends(current_user)):
+    body = await request.json()
+    visibility = "public" if body.get("visibility") == "public" else "private"
+    with db() as con:
+        if not con.execute("SELECT 1 FROM lists WHERE id=? AND user_id=?",
+                           (list_id, user["id"])).fetchone():
+            raise HTTPException(404)
+        con.execute("UPDATE lists SET visibility=? WHERE id=?", (visibility, list_id))
+    return {"ok": True, "visibility": visibility}
 
 
 @app.delete("/api/list/{list_id}")
@@ -470,14 +509,21 @@ def delete_list(list_id: int, user=Depends(current_user)):
 @app.get("/api/list/{list_id}")
 def get_list(list_id: int, user=Depends(current_user)):
     with db() as con:
-        l = con.execute("SELECT * FROM lists WHERE id=? AND user_id=?",
-                        (list_id, user["id"])).fetchone()
+        l = con.execute("SELECT * FROM lists WHERE id=?", (list_id,)).fetchone()
         if not l:
             raise HTTPException(404)
+        visibility = list_visibility(l)
+        is_owner = l["user_id"] == user["id"]
+        # owner sees any of their lists; anyone else may only see public ones (404 hides the rest)
+        if not is_owner and visibility != "public":
+            raise HTTPException(404)
+        owner = con.execute("SELECT * FROM users WHERE id=?", (l["user_id"],)).fetchone()
         items = con.execute("SELECT * FROM list_items WHERE list_id=? ORDER BY added_at DESC",
                             (list_id,)).fetchall()
         out = [x for x in (list_item_row(con, it) for it in items) if x]
-    return {"id": l["id"], "name": l["name"], "is_default": bool(l["is_default"]), "items": out}
+    return {"id": l["id"], "name": l["name"], "is_default": bool(l["is_default"]),
+            "visibility": visibility, "is_owner": is_owner,
+            "owner": user_public(owner), "items": out}
 
 
 @app.post("/api/list/{list_id}/item")
@@ -2619,7 +2665,8 @@ def startup():
                      "ALTER TABLE episodes ADD COLUMN details TEXT",
                      "ALTER TABLE episodes ADD COLUMN rating REAL",
                      "ALTER TABLE users ADD COLUMN avatar TEXT",
-                     "ALTER TABLE users ADD COLUMN display_name TEXT"):
+                     "ALTER TABLE users ADD COLUMN display_name TEXT",
+                     "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
             try:
                 con.execute(stmt)
             except sqlite3.OperationalError:

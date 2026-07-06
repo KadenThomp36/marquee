@@ -810,10 +810,11 @@ a.h-row:hover{border-color:var(--line-2)}
 .listcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
   transition:border-color .13s, transform .15s;display:block}
 .listcard:hover{border-color:var(--line-2);transform:translateY(-2px)}
-.lc-covers{display:grid;grid-template-columns:1fr 1fr;height:132px;background:var(--panel-2)}
-.lc-covers img{width:100%;height:100%;object-fit:cover}
-.lc-covers img:only-child{grid-column:span 2}
-.lc-empty{grid-column:span 2;display:grid;place-items:center;color:var(--line-2)}
+.lc-covers{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;height:132px;
+  background:var(--panel-2)}
+.lc-covers img{width:100%;height:100%;min-height:0;object-fit:cover}
+.lc-covers img:only-child{grid-column:span 2;grid-row:span 2}
+.lc-empty{grid-column:span 2;grid-row:span 2;display:grid;place-items:center;color:var(--line-2)}
 .lc-empty svg{width:34px;height:34px}
 .lc-body{padding:10px 12px}
 .lc-name{font-weight:700;font-size:14px;display:flex;align-items:center;gap:5px}
@@ -837,6 +838,65 @@ a.h-row:hover{border-color:var(--line-2)}
   background:var(--panel);color:var(--ink);font:inherit}
 .sheet.listsheet .newlist .btn{padding:0 14px}
 #listopts{max-height:46vh;overflow-y:auto}
+
+/* ── shared / public lists ── */
+.lc-covers{position:relative}
+.lc-vis{position:absolute;top:8px;right:8px;display:inline-flex;align-items:center;gap:4px;
+  padding:3px 8px 3px 6px;border-radius:99px;font-size:10px;font-weight:700;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--amber-2);background:rgba(15,13,10,.78);
+  border:1px solid var(--amber-dim);backdrop-filter:blur(4px)}
+.lc-vis svg{width:11px;height:11px}
+
+/* create-list private/public choice */
+.vis-choice{display:flex;flex-direction:column;gap:8px;margin:12px 0 4px}
+.vis-opt{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 13px;
+  border-radius:13px;border:1px solid var(--line-2);background:var(--panel);color:var(--ink);
+  transition:border-color .13s, background .13s}
+.vis-opt:hover{border-color:var(--amber-dim)}
+.vis-opt.on{border-color:var(--amber);background:var(--amber-soft)}
+.vis-opt .vis-ic{flex:none;width:22px;color:var(--mut);display:grid;place-items:center}
+.vis-opt.on .vis-ic{color:var(--amber)}
+.vis-opt .vis-ic svg{width:19px;height:19px}
+.vis-txt{flex:1;line-height:1.35;min-width:0}
+.vis-txt b{display:block;font-weight:700;font-size:13.5px}
+.vis-txt i{display:block;font-style:normal;color:var(--mut);font-size:11.5px;margin-top:1px}
+.vis-dot{flex:none;width:17px;height:17px;border-radius:50%;border:2px solid var(--line-2);position:relative}
+.vis-opt.on .vis-dot{border-color:var(--amber)}
+.vis-opt.on .vis-dot::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--amber)}
+
+/* list page · owner visibility toggle */
+.vis-toggle{display:flex;align-items:center;gap:12px;width:100%;text-align:left;margin:12px 0 20px;
+  padding:12px 14px;border-radius:13px;border:1px solid var(--line);background:var(--panel);
+  color:var(--ink);transition:border-color .13s, background .13s}
+.vis-toggle:hover{border-color:var(--line-2)}
+.vis-toggle.on{border:1px solid transparent;
+  background:linear-gradient(var(--panel),var(--panel)) padding-box,
+    linear-gradient(120deg,rgba(240,181,68,.22),transparent) border-box}
+.vt-ic{flex:none;width:22px;color:var(--mut);display:grid;place-items:center}
+.vis-toggle.on .vt-ic{color:var(--amber)}
+.vt-ic svg{width:19px;height:19px}
+.vt-body{flex:1;line-height:1.35;min-width:0}
+.vt-body b{display:block;font-weight:700;font-size:13.5px}
+.vt-body i{display:block;font-style:normal;color:var(--mut);font-size:11.5px;margin-top:1px}
+.vt-sw{flex:none;width:40px;height:23px;border-radius:99px;background:var(--line-2);position:relative;
+  transition:background .16s}
+.vt-sw::after{content:"";position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;
+  background:var(--ink);transition:transform .16s}
+.vis-toggle.on .vt-sw{background:var(--amber)}
+.vis-toggle.on .vt-sw::after{transform:translateX(17px);background:#221703}
+
+/* list page · non-owner attribution */
+.list-owner{display:flex;align-items:center;gap:10px;margin:12px 0 20px;color:var(--ink-2);font-size:13px}
+.list-owner .lo-txt b{color:var(--ink);font-weight:700}
+.list-owner .vis-pill{margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:4px 10px;
+  border-radius:99px;font-size:11px;font-weight:700;letter-spacing:.03em;color:var(--amber-2);
+  background:var(--amber-soft);border:1px solid var(--amber-dim)}
+.list-owner .vis-pill svg{width:13px;height:13px}
+
+/* profile lists section (embedded via renderProfileLists) */
+.prof-lists{margin-top:8px}
+.prof-lists .list-grid{margin-top:2px}
+.empty .tlink{color:var(--amber);font-weight:700}
 
 /* ── reviews ── */
 .reviews{margin-top:28px}
