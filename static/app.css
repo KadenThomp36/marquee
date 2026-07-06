@@ -463,6 +463,44 @@ a.cast:hover .cn{color:var(--amber-2)}
 .btn.onplex{border-color:#3f7d4e;color:#7fd39a;background:rgba(63,125,78,.12);cursor:default}
 .btn.requested svg,.btn.onplex svg{width:15px;height:15px}
 
+/* ── where to watch: streaming availability (TMDB / JustWatch) ── */
+.section .cnt .wn-jw{display:inline-flex;align-items:center;gap:1px;color:var(--mut);transition:color .12s}
+.section .cnt .wn-jw:hover{color:var(--amber-2)}
+.section .cnt .wn-jw svg{width:12px;height:12px;opacity:.8}
+.watchnow{margin-bottom:6px}
+.wn-plex{display:flex;align-items:center;gap:11px;padding:11px 13px;border:1px solid #3f7d4e;
+  background:rgba(63,125,78,.12);border-radius:var(--r-s);margin-bottom:18px}
+.wn-plex .plexlogo{width:22px;height:22px;flex:none;color:#7fd39a}
+.wn-plex .wn-plex-t{display:flex;flex-direction:column;line-height:1.3;min-width:0;flex:1}
+.wn-plex .wn-plex-t b{font-size:13.5px;font-weight:750;color:#a7e3ba;letter-spacing:.01em}
+.wn-plex .wn-plex-t span{font-size:12px;color:#7fbf8e}
+.wn-plex>.ico{width:17px;height:17px;flex:none;color:#7fd39a;opacity:.75}
+.wn-group{margin:0 0 18px}
+.wn-group:last-child{margin-bottom:2px}
+.wn-glabel{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:750;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--mut);margin-bottom:12px}
+.wn-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--mut)}
+.wn-dot.flatrate{background:var(--amber)}
+.wn-dot.rent{background:var(--ink-2)}
+.wn-dot.buy{background:var(--line-2)}
+.wn-logos{display:flex;flex-wrap:wrap;gap:15px}
+.wn-prov{display:flex;flex-direction:column;align-items:center;gap:7px;width:66px;text-align:center}
+.wn-logo{width:54px;height:54px;border-radius:14px;overflow:hidden;background:var(--panel-2);
+  border:1px solid var(--line-2);box-shadow:0 4px 14px rgba(0,0,0,.4);
+  display:grid;place-items:center;transition:transform .14s,box-shadow .14s}
+.wn-logo img{width:100%;height:100%;object-fit:cover}
+.wn-logo .wn-ph{font-weight:800;font-size:20px;color:var(--mut)}
+.wn-name{font-size:10.5px;line-height:1.25;color:var(--ink-2);display:-webkit-box;
+  -webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+a.wn-prov{transition:transform .14s}
+a.wn-prov:hover{transform:translateY(-2px)}
+a.wn-prov:hover .wn-logo{box-shadow:0 8px 22px rgba(0,0,0,.55),inset 0 0 0 1px var(--amber-dim),0 0 0 1px var(--amber-dim)}
+a.wn-prov:hover .wn-name{color:var(--amber-2)}
+.wn-none{padding:2px 0 6px}
+@media(max-width:700px){
+  .wn-logos{gap:12px}.wn-prov{width:60px}.wn-logo{width:50px;height:50px;border-radius:13px}
+}
+
 /* ── person page ── */
 .perhero{display:flex;align-items:flex-start;gap:18px;margin-bottom:8px}
 .per-face{width:120px;height:120px;border-radius:50%;overflow:hidden;background:var(--panel-2);flex:none;

@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260706h";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260706i";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -921,6 +921,52 @@ async function ratingsPanel(id) {
 }
 
 
+/* ---------- where to watch: streaming availability (TMDB / JustWatch) ---------- */
+// Lazy, non-blocking: fetched after the main detail render. Plex-first — if the title is
+// already on the household server we lead with that, then surface streaming/rent/buy.
+async function watchNow(itemType, id, hostId) {
+  const host = document.getElementById(hostId); if (!host) return;
+  let d;
+  try { d = await api(`/watch_providers/${itemType}/${id}`); } catch { return; }
+  // Does Plex already have it? Reuse the Overseerr status (only when a server is configured).
+  let onPlex = false;
+  if (SEER === null) { try { SEER = await api("/request/config"); } catch { SEER = { enabled: false }; } }
+  if (SEER && SEER.enabled) {
+    try { const st = await api(`/request/status/${itemType}/${id}`); onPlex = st.status === "available"; } catch {}
+  }
+  const groups = [
+    ["flatrate", onPlex ? "Also streaming" : "Stream"],
+    ["rent", "Rent"],
+    ["buy", "Buy"],
+  ].filter(([k]) => (d[k] || []).length);
+  if (!onPlex && !groups.length) { host.innerHTML = ""; return; }   // nothing worth showing
+  const link = d.link || "";
+  const prov = p => {
+    const inner = `<span class="wn-logo">${p.logo
+        ? `<img loading="lazy" src="${p.logo}" alt="${esc(p.name || "")}">`
+        : `<span class="wn-ph">${esc((p.name || "?").trim()[0] || "?")}</span>`}</span>
+      <span class="wn-name">${esc(p.name || "")}</span>`;
+    return link
+      ? `<a class="wn-prov" href="${esc(link)}" target="_blank" rel="noopener" title="${esc(p.name || "")} — open on JustWatch">${inner}</a>`
+      : `<span class="wn-prov">${inner}</span>`;
+  };
+  const groupHTML = ([k, label]) => `<div class="wn-group">
+      <div class="wn-glabel"><span class="wn-dot ${k}"></span>${esc(label)}</div>
+      <div class="wn-logos">${d[k].map(prov).join("")}</div></div>`;
+  const plexLead = onPlex ? `<div class="wn-plex">${PLEX_LOGO}
+      <div class="wn-plex-t"><b>On your Plex</b>
+        <span>Ready to play now${groups.length ? " — also streaming below" : ""}</span></div>
+      ${I.check}</div>` : "";
+  const bodyGroups = groups.map(groupHTML).join("")
+    || `<div class="hint wn-none">No streaming, rent, or buy options listed for the US right now.</div>`;
+  host.innerHTML = `<div class="section"><h2>Where to watch</h2><div class="rule"></div>
+      <span class="cnt">${link
+        ? `<a class="wn-jw" href="${esc(link)}" target="_blank" rel="noopener">US · JustWatch ${I.chevR}</a>`
+        : "US"}</span></div>
+    <div class="watchnow">${plexLead}${bodyGroups}</div>`;
+}
+
+
 routes.show = async id => {
   const stop = deferSkeleton(`<div class="backdrop"><div class="hero">
       <div class="sk" style="width:136px;aspect-ratio:2/3"></div>
@@ -991,6 +1037,7 @@ routes.show = async id => {
     <div class="dbody">
     ${info.overview ? `<p class="overview clamp" id="ov">${esc(info.overview)}</p>` : ""}
     <div id="upnext-host"></div>
+    <div id="watch-now"></div>
     ${castStrip(info.cast)}
     <div id="show-ratings"></div>
     <div class="reveal">
@@ -1088,6 +1135,7 @@ routes.show = async id => {
     api(`/show/${id}/watch`, { body: { season, number, unwatch: !on } }).catch(() => routes.show(id));
   }
   ratingsPanel(id);
+  watchNow("show", +id, "watch-now");
   reviewsBlock("show", +id).then(el => { const c = $("#show-reviews"); if (c) c.appendChild(el); });
   mountRequest($("#reqslot"), "show", +id);
   if ($("#shareshow")) $("#shareshow").onclick = () => share(s.title, `show/${id}`);
@@ -1510,6 +1558,7 @@ routes.movie = async id => {
     </div>
     <div class="dbody">
     ${i.overview ? `<p class="overview clamp" id="ov">${esc(i.overview)}</p>` : ""}
+    <div id="watch-now"></div>
     ${castStrip(i.cast)}
     <div id="movie-reviews"></div>
     </div>`;
@@ -1527,6 +1576,7 @@ routes.movie = async id => {
   $("#maddlist").onclick = () => addToListMenu("movie", +id, m.title);
   $("#mshare").onclick = () => share(m.title, `movie/${id}`);
   mountRequest($("#reqslot"), "movie", +id);
+  watchNow("movie", +id, "watch-now");
   $("#movie-reviews").appendChild(await reviewsBlock("movie", +id));
 };
 

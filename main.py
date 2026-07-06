@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260706h"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260706i"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -92,6 +92,9 @@ CREATE TABLE IF NOT EXISTS notif_sent(
 CREATE TABLE IF NOT EXISTS push_subscriptions(
   id INTEGER PRIMARY KEY, user_id INTEGER, endpoint TEXT UNIQUE, p256dh TEXT, auth TEXT, created_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
+CREATE TABLE IF NOT EXISTS watch_providers(
+  item_type TEXT, item_id INTEGER, region TEXT DEFAULT 'US',
+  data TEXT, fetched_at TEXT, PRIMARY KEY(item_type, item_id, region));
 CREATE INDEX IF NOT EXISTS idx_watches_user ON watches(user_id, watched_at);
 CREATE INDEX IF NOT EXISTS idx_eps_show ON episodes(show_id, air_date);
 CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_type, item_id);
@@ -1569,6 +1572,62 @@ def movie_detail(movie_id: int, user=Depends(current_user)):
                         (uid, movie_id)).fetchone()
     return {**{k: m[k] for k in m.keys() if k != "details"}, "info": info,
             "state": st["state"] if st else None, "my_rating": st["rating"] if st else None}
+
+
+# ---------------------------------------------------------------- where to watch (streaming availability)
+
+WATCH_TTL = 7 * 24 * 3600   # streaming availability shifts slowly — refresh weekly
+
+
+@app.get("/api/watch_providers/{item_type}/{item_id}")
+def watch_providers(item_type: str, item_id: int, user=Depends(current_user)):
+    """US streaming / rent / buy availability from TMDB (JustWatch data), cached weekly.
+    Always returns a well-formed result — empty groups when there's no token or no coverage."""
+    if item_type not in ("show", "movie"):
+        raise HTTPException(404, "unknown type")
+    kind = "tv" if item_type == "show" else "movie"
+    with db() as con:
+        row = con.execute("SELECT data, fetched_at FROM watch_providers "
+                          "WHERE item_type=? AND item_id=? AND region='US'",
+                          (item_type, item_id)).fetchone()
+    if row and row["fetched_at"]:
+        try:
+            age = (datetime.utcnow() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+            if age < WATCH_TTL:
+                return json.loads(row["data"])
+        except (ValueError, json.JSONDecodeError):
+            pass
+    # (re)fetch — a missing TMDB token or network hiccup degrades to an empty result, never a 500
+    try:
+        d = tmdb(f"/{kind}/{item_id}/watch/providers") or {}
+    except httpx.HTTPError:
+        d = {}
+    us = (d.get("results") or {}).get("US") or {}
+
+    def group(items):
+        out, seen = [], set()
+        for p in items or []:
+            pid = p.get("provider_id")
+            if pid in seen:
+                continue
+            seen.add(pid)
+            out.append({"id": pid, "name": p.get("provider_name"),
+                        "logo": img(p.get("logo_path"), "w92")})
+        return out
+
+    # "stream" folds free + ad-supported tiers in with subscription flatrate (all watch-now-included)
+    stream = group((us.get("flatrate") or []) + (us.get("free") or []) + (us.get("ads") or []))
+    rent, buy = group(us.get("rent")), group(us.get("buy"))
+    result = {"region": "US", "link": us.get("link"),
+              "flatrate": stream, "rent": rent, "buy": buy,
+              "has_any": bool(stream or rent or buy)}
+    with db() as con:
+        con.execute("""INSERT INTO watch_providers(item_type,item_id,region,data,fetched_at)
+            VALUES(?,?,'US',?,?)
+            ON CONFLICT(item_type,item_id,region)
+              DO UPDATE SET data=excluded.data, fetched_at=excluded.fetched_at""",
+            (item_type, item_id, json.dumps(result), datetime.utcnow().isoformat()))
+    return result
 
 
 @app.post("/api/movie/{movie_id}/state")
