@@ -402,7 +402,38 @@ function seasonRequestSheet(tmdbId, st, done) {
 const RSTARS = (n, cls = "") => `<span class="rstars ${cls}">${[1,2,3,4,5,6,7,8,9,10].map(i =>
   `<i class="${n >= i ? "on" : ""}" data-v="${i}">${I.star}</i>`).join("")}</span>`;
 
-async function reviewsBlock(itemType, itemId) {
+/* ---------- spoiler veil ----------
+   One reusable "frosted curtain" used everywhere spoilers are hidden — unwatched
+   episode overviews AND review/comment bodies. If `watched` is true the content is
+   auto-uncovered (returned plain, never veiled — you've already seen the thing);
+   otherwise it's blurred behind a tap/keyboard reveal. Revealing is handled once,
+   globally, by the delegated listeners below. */
+function veil(inner, { watched = false, cls = "", label = "Contains spoilers", sub = "Tap to reveal" } = {}) {
+  if (watched) return inner;
+  return `<div class="spoiler ${cls}" role="button" tabindex="0" aria-expanded="false"
+      aria-label="${esc(label)} — press to reveal">
+    <div class="spoiler-inner">${inner}</div>
+    <div class="spoiler-veil" aria-hidden="true"><span class="spoiler-cue">${I.eye}<b>${esc(label)}</b><small>${esc(sub)}</small></span></div>
+  </div>`;
+}
+function revealSpoiler(sp) {
+  sp.classList.add("revealed");
+  sp.setAttribute("aria-expanded", "true");
+  sp.removeAttribute("role");
+  sp.removeAttribute("tabindex");
+  sp.removeAttribute("aria-label");
+}
+document.addEventListener("click", e => {
+  const sp = e.target.closest?.(".spoiler:not(.revealed)");
+  if (sp) { e.preventDefault(); revealSpoiler(sp); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+  const sp = document.activeElement?.closest?.(".spoiler:not(.revealed)");
+  if (sp) { e.preventDefault(); revealSpoiler(sp); }
+});
+
+async function reviewsBlock(itemType, itemId, { watched = true } = {}) {
   const wrap = document.createElement("div");
   wrap.className = "reviews";
   const load = async () => {
@@ -443,11 +474,13 @@ async function reviewsBlock(itemType, itemId) {
             <span class="rev-date">${r.date ? fmtDate(r.date) : ""} · via ${esc(r.source)}</span></div>
           ${r.rating ? `<span class="rev-rating">${I.star} ${r.rating}</span>` : ""}
           ${r.likes ? `<span class="rev-likes">♥ ${r.likes}</span>` : ""}</div>
-        <p class="rev-body">${esc(r.body)}</p>
+        ${veil(`<p class="rev-body">${esc(r.body)}</p>`, { watched, cls: "sp-rev", label: "Spoiler" })}
         <button class="read-more" type="button">Read more</button>
         <span class="src-tag">${esc(r.source)}</span></div>`).join("")}`;
     // only clamp reviews that actually overflow; make them expandable
+    // (skip veiled ones — the curtain handles overflow; they show in full once revealed)
     $$(".review.ext", host).forEach(el => {
+      if ($(".spoiler", el)) return;
       const body = $(".rev-body", el);
       if (body.scrollHeight > 230) {
         el.classList.add("clamped");
@@ -479,7 +512,8 @@ async function reviewsBlock(itemType, itemId) {
         ${isMine ? `<span class="rev-actions"><button class="rev-edit">${I.edit}</button>
           <button class="rev-del" data-id="${r.id}">${I.trash}</button></span>` : ""}
       </div>
-      ${r.body ? `<p class="rev-body">${esc(r.body)}</p>` : ""}
+      ${r.body ? veil(`<p class="rev-body">${esc(r.body)}</p>`,
+        { watched: isMine || watched, cls: "sp-rev", label: "Spoiler" }) : ""}
       ${replies ? `<div class="replies">${replies}</div>` : ""}
       <button class="reply-btn" data-rid="${r.id}">${I.reply}<span>Reply</span></button>
     </div>`;
@@ -1142,7 +1176,9 @@ routes.show = async id => {
   }
   ratingsPanel(id);
   watchNow("show", +id, "watch-now");
-  reviewsBlock("show", +id).then(el => { const c = $("#show-reviews"); if (c) c.appendChild(el); });
+  // show-level reviews stay veiled until you're caught up on every aired episode
+  reviewsBlock("show", +id, { watched: watchable.length > 0 && watched === watchable.length })
+    .then(el => { const c = $("#show-reviews"); if (c) c.appendChild(el); });
   mountRequest($("#reqslot"), "show", +id);
   if ($("#shareshow")) $("#shareshow").onclick = () => share(s.title, `show/${id}`);
   if ($("#addlist")) $("#addlist").onclick = () => addToListMenu("show", +id, s.title);
@@ -1371,11 +1407,8 @@ routes.episode = async (id, season, number) => {
       <div class="epmeta"><b>${sxe(e.season, e.number)}</b> · ${dur}${e.air_date ? fmtDate(e.air_date) : "TBA"}
         ${x.vote ? ` · <span class="chip star">${I.star} ${x.vote}</span>` : ""}
         ${e.watched && e.watched_at ? ` · watched ${fmtDate(e.watched_at)}` : ""}</div>
-      ${e.overview ? (e.watched
-        ? `<p class="overview">${esc(e.overview)}</p>`
-        : `<div class="spoiler" id="spoiler"><p class="overview">${esc(e.overview)}</p>
-            <div class="spoiler-veil"><button class="btn" id="revealsp">${I.eye} Reveal spoilers</button></div></div>`)
-        : ""}
+      ${e.overview ? veil(`<p class="overview">${esc(e.overview)}</p>`,
+        { watched: e.watched, cls: "sp-overview", label: "Episode spoilers" }) : ""}
       ${x.directors?.length || x.writers?.length ? `<div class="credits">
         ${x.directors?.length ? `<span><b>Directed by</b> ${esc(x.directors.join(", "))}</span>` : ""}
         ${x.writers?.length ? `<span><b>Written by</b> ${esc(x.writers.join(", "))}</span>` : ""}</div>` : ""}
@@ -1392,9 +1425,8 @@ routes.episode = async (id, season, number) => {
         ${e.next ? `<a class="btn" href="#/show/${id}/e/${e.next.season}/${e.next.number}">Next episode</a>` : ""}
       </div>
     </div>`;
-  if ($("#revealsp")) $("#revealsp").onclick = () => $("#spoiler").classList.add("revealed");
   const epKey = (+id) * 1000000 + (+season) * 1000 + (+number);
-  reviewsBlock("episode", epKey).then(el => { const c = $("#ep-reviews"); if (c) c.appendChild(el); });
+  reviewsBlock("episode", epKey, { watched: !!e.watched }).then(el => { const c = $("#ep-reviews"); if (c) c.appendChild(el); });
   $("#epshare").onclick = () => share(`${e.show_title} — ${sxe(e.season, e.number)}`, `show/${id}/e/${season}/${number}`);
   $("#mark").onclick = async () => {
     const b = $("#mark");
@@ -1651,7 +1683,7 @@ routes.movie = async id => {
   $("#mshare").onclick = () => share(m.title, `movie/${id}`);
   mountRequest($("#reqslot"), "movie", +id);
   watchNow("movie", +id, "watch-now");
-  $("#movie-reviews").appendChild(await reviewsBlock("movie", +id));
+  $("#movie-reviews").appendChild(await reviewsBlock("movie", +id, { watched: m.state === "watched" }));
 };
 
 /* ---------- person / actor ---------- */
