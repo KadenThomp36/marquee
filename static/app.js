@@ -1963,7 +1963,11 @@ routes.profile = async (username) => {
     wireFavorites(view, me);
     loadMembers(view);
     loadProfileStats(statsPath, advPath, view);
-    if (window.renderProfileLists) { try { window.renderProfileLists(p.username, me); } catch { /* provided by another feature */ } }
+    if (window.renderProfileLists) {
+      window.renderProfileLists(p.username, me)
+        .then(html => { const s = $("#profile-lists"); if (s) s.innerHTML = html; })
+        .catch(() => { /* lists feature unavailable — leave the slot empty */ });
+    }
   };
 
   if (c.stale) render(c.stale);
