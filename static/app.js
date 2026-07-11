@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260706m";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260711a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -207,7 +207,7 @@ function cropImage(file) {
 }
 
 async function share(title, path) {
-  const url = location.origin + "/" + path;
+  const url = location.origin + "/#/" + path;
   if (navigator.share) {
     try { await navigator.share({ title: "Marquee · " + title, url }); return; } catch { return; }
   }
@@ -618,7 +618,8 @@ routes.login = async (mode = "login") => {
       ME = await api(isReg ? "/register" : "/login", { body: { username: u, password: p } });
       topbar.hidden = false; tabbar.hidden = false;
       Object.keys(CACHE).forEach(k => delete CACHE[k]);
-      location.hash = "#/"; boot();
+      if (!seg()[0]) location.hash = "#/";   // keep a shared deep link through login
+      boot();
     } catch (e) {
       $("#err").textContent = isReg ? (e.message || "Couldn't create account")
         : "Wrong username or password";
@@ -1504,13 +1505,16 @@ function listCard(l) {
       ${l.visibility === "public" ? `<span class="lc-vis">${I.globe}Public</span>`
         : l.visibility === "collab" ? `<span class="lc-vis collab">${I.users}Collab</span>` : ""}</div>
     <div class="lc-body"><div class="lc-name">${l.is_default ? I.bookmarkfill : ""} ${esc(l.name)}</div>
-      <div class="lc-count">${l.count} ${l.count === 1 ? "title" : "titles"}</div></div>
+      <div class="lc-count">${l.count} ${l.count === 1 ? "title" : "titles"}${l.owner ? ` · ${esc(l.owner)}’s` : ""}</div></div>
   </a>`;
 }
 function renderLists(d) {
+  const shared = d.shared || [];
   view.innerHTML = `<div class="page-head"><h1>Lists</h1>
     <button class="btn pri" id="newlist">${I.plus} New list</button></div>
-    <div class="list-grid reveal">${d.lists.map(listCard).join("")}</div>`;
+    <div class="list-grid reveal">${d.lists.map(listCard).join("")}</div>
+    ${shared.length ? `<div class="section" style="margin-top:26px"><h2>Shared with the house</h2><div class="rule"></div></div>
+    <div class="list-grid reveal">${shared.map(listCard).join("")}</div>` : ""}`;
   $("#newlist").onclick = async () => {
     const s = sheet(`<div class="sh-t">New list</div>
       <input id="ln" placeholder="e.g. Weekend binges" maxlength="60" autofocus>
@@ -1628,7 +1632,7 @@ routes.list = async (id, quiet) => {
   if (!quiet) view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
   const l = await api(`/list/${id}`);
   const owner = l.is_owner, canEdit = l.can_edit ?? owner, vis = l.visibility || "private";
-  const crumb = owner
+  const crumb = owner || vis === "collab"
     ? `<a class="crumb" href="#/lists">${I.chevS} Lists</a>`
     : `<a class="crumb" href="#/u/${encodeURIComponent(l.owner.username)}">${I.chevS} ${esc(l.owner.display_name)}</a>`;
   const VIS = [["private", "Private", I.lock], ["public", "Public", I.globe], ["collab", "Collab", I.users]];
@@ -2974,6 +2978,8 @@ async function checkBuild() {
   return false;
 }
 async function boot() {
+  if (location.pathname !== "/")    // shared pretty URL (/list/3 …) → hash route
+    history.replaceState(null, "", "/#/" + location.pathname.replace(/^\/+/, ""));
   if (await checkBuild()) return;   // stale build → reloading with fresh code
   try { ME = await api("/me"); } catch { return; }
   topbar.hidden = false; tabbar.hidden = false;

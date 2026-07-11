@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260706m"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260711a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -614,27 +614,38 @@ def norm_vis(v):
 SHARED_VIS = ("public", "collab")
 
 
+def list_card(con, r):
+    """One list-card summary (name, count, up-to-4 cover posters, visibility) from a
+    lists row that carries an `n` item-count column."""
+    covers = con.execute("""SELECT item_type, item_id FROM list_items
+        WHERE list_id=? ORDER BY added_at DESC LIMIT 4""", (r["id"],)).fetchall()
+    posters = []
+    for c in covers:
+        tbl = "shows" if c["item_type"] == "show" else "movies"
+        p = con.execute(f"SELECT poster FROM {tbl} WHERE id=?", (c["item_id"],)).fetchone()
+        if p and p["poster"]:
+            posters.append(p["poster"])
+    return {"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
+            "count": r["n"], "posters": posters, "visibility": list_visibility(r)}
+
+
 def list_cards(con, uid, public_only=False):
-    """Assemble the list-card summaries (name, count, up-to-4 cover posters, visibility)
-    for one user's lists. public_only hides that user's private lists (for other viewers)."""
+    """One user's list cards. public_only hides that user's private lists (for other viewers)."""
     q = ("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n
             FROM lists l WHERE l.user_id=?""")
     if public_only:
         q += " AND l.visibility IN ('public','collab')"
     q += " ORDER BY l.is_default DESC, l.created_at"
-    out = []
-    for r in con.execute(q, (uid,)).fetchall():
-        covers = con.execute("""SELECT item_type, item_id FROM list_items
-            WHERE list_id=? ORDER BY added_at DESC LIMIT 4""", (r["id"],)).fetchall()
-        posters = []
-        for c in covers:
-            tbl = "shows" if c["item_type"] == "show" else "movies"
-            p = con.execute(f"SELECT poster FROM {tbl} WHERE id=?", (c["item_id"],)).fetchone()
-            if p and p["poster"]:
-                posters.append(p["poster"])
-        out.append({"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
-                    "count": r["n"], "posters": posters, "visibility": list_visibility(r)})
-    return out
+    return [list_card(con, r) for r in con.execute(q, (uid,)).fetchall()]
+
+
+def shared_list_cards(con, uid):
+    """Other members' collab lists — jointly editable, so they appear in everyone's Lists tab."""
+    rows = con.execute("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n,
+            (SELECT COALESCE(display_name, username) FROM users u WHERE u.id=l.user_id) owner
+            FROM lists l WHERE l.user_id!=? AND l.visibility='collab'
+            ORDER BY l.created_at""", (uid,)).fetchall()
+    return [dict(list_card(con, r), owner=r["owner"]) for r in rows]
 
 
 @app.get("/api/lists")
@@ -643,7 +654,8 @@ def get_lists(user=Depends(current_user)):
     with db() as con:
         ensure_default_list(con, uid)
         out = list_cards(con, uid)
-    return {"lists": out}
+        shared = shared_list_cards(con, uid)
+    return {"lists": out, "shared": shared}
 
 
 @app.get("/api/user/{username}/lists")
