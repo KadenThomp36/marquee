@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260712c";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260712d";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1545,13 +1545,11 @@ function renderLists(d) {
       <button class="btn pri" data-v="save">Create list</button>
       <button class="btn ghost" data-v="cancel">Cancel</button>`, { cls: "editor listnew" });
     setTimeout(() => $("#ln", s.el)?.focus(), 60);
-    const nlMembers = async () => {
+    let nlPicked = [];
+    const nlMembers = () => {
       const box = $("#nlaudpick", s.el);
       if (box.dataset.done) return;
-      const { members } = await api("/members");
-      box.innerHTML = members.filter(m => !m.is_me).map(m => `
-        <label class="aud-m"><input type="checkbox" data-id="${m.id}">
-          ${avatarHTML(m, "sm")}<span>${esc(m.display_name)}</span></label>`).join("");
+      audChips(box, nlPicked, ids => { nlPicked = ids; });
       box.dataset.done = 1;
     };
     $("#nlaudsel", s.el).onchange = e => {
@@ -1574,7 +1572,7 @@ function renderLists(d) {
         if (!name) return;
         const visibility = $(".vis-opt.on", s.el)?.dataset.vis || "private";
         const shared_with = visibility !== "private" && $("#nlaudsel", s.el).value === "some"
-          ? $$("#nlaudpick input:checked", s.el).map(c => +c.dataset.id) : [];
+          ? nlPicked : [];
         await api("/lists", { body: { name, visibility, shared_with } });
         delete CACHE["/lists"]; s.close(); routes.lists();
       }
@@ -1628,6 +1626,24 @@ function listAddSheet(listId, onDone) {
     if (e.target.closest('[data-v="done"]')) { s.close(); if (added) onDone && onDone(); }
   });
   setTimeout(() => q.focus(), 80);
+}
+
+// Compact toggle chips for the shared-list audience picker (avatar + name in a
+// wrapping row; tap to include/exclude). `wire` gets the array of selected ids
+// after each toggle. Members are cached so re-opening the picker is instant.
+let _membersCache = null;
+async function audChips(box, selected, wire) {
+  if (!_membersCache) _membersCache = (await api("/members")).members;
+  const sel = new Set(selected || []);
+  const others = _membersCache.filter(m => !m.is_me);
+  box.innerHTML = `<div class="aud-chips">${others.map(m =>
+    `<button type="button" class="aud-chip ${sel.has(m.id) ? "on" : ""}" data-id="${m.id}">
+       ${avatarHTML(m, "xs")}<span>${esc(m.display_name)}</span></button>`).join("")}</div>
+    <i class="aud-hint">No one picked = everyone.</i>`;
+  $$(".aud-chip", box).forEach(c => c.onclick = () => {
+    c.classList.toggle("on");
+    wire($$(".aud-chip.on", box).map(x => +x.dataset.id));
+  });
 }
 
 // list sorting (client-side; keys survive across list navigations)
@@ -1759,16 +1775,9 @@ routes.list = async (id, quiet) => {
       routes.list(id);
     } catch {}
   });
-  const renderAudPick = async () => {
+  const renderAudPick = () => {
     const box = $("#audpick"); if (!box) return;
-    const { members } = await api("/members");
-    const cur = new Set(l.shared_with || []);
-    box.innerHTML = members.filter(m => !m.is_me).map(m => `
-      <label class="aud-m"><input type="checkbox" data-id="${m.id}" ${cur.has(m.id) ? "checked" : ""}>
-        ${avatarHTML(m, "sm")}<span>${esc(m.display_name)}</span></label>`).join("")
-      + `<i class="aud-hint">Nobody picked = visible to everyone.</i>`;
-    $$("input", box).forEach(c => c.onchange = async () => {
-      const ids = $$("input:checked", box).map(x => +x.dataset.id);
+    audChips(box, l.shared_with, async ids => {
       await api(`/list/${id}/visibility`, { body: { visibility: vis, shared_with: ids } });
       l.shared_with = ids; delete CACHE["/lists"];
     });
