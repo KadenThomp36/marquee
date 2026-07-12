@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260711a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260712c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -572,6 +572,7 @@ function seg() { return location.hash.replace(/^#\/?/, "").split("/"); }
 function parseHash() {
   const p = seg();
   if (!ME) return routes.login();
+  $$(".sheetwrap").forEach(el => el.remove());   // navigating away dismisses any open sheet
   window.scrollTo(0, 0);
   if (p[0] === "show" && p[2] === "e") routes.episode(p[1], p[3], p[4]);
   else if (p[0] === "show") routes.show(p[1]);
@@ -1535,13 +1536,36 @@ function renderLists(d) {
           <span class="vis-dot"></span>
         </button>
       </div>
+      <div class="aud-row" id="nlaud" hidden><span class="aud-lbl">Shared with</span>
+        <select id="nlaudsel" class="aud-sel">
+          <option value="all">Everyone in the household</option>
+          <option value="some">Specific people…</option>
+        </select></div>
+      <div id="nlaudpick" class="aud-pick" hidden></div>
       <button class="btn pri" data-v="save">Create list</button>
       <button class="btn ghost" data-v="cancel">Cancel</button>`, { cls: "editor listnew" });
     setTimeout(() => $("#ln", s.el)?.focus(), 60);
+    const nlMembers = async () => {
+      const box = $("#nlaudpick", s.el);
+      if (box.dataset.done) return;
+      const { members } = await api("/members");
+      box.innerHTML = members.filter(m => !m.is_me).map(m => `
+        <label class="aud-m"><input type="checkbox" data-id="${m.id}">
+          ${avatarHTML(m, "sm")}<span>${esc(m.display_name)}</span></label>`).join("");
+      box.dataset.done = 1;
+    };
+    $("#nlaudsel", s.el).onchange = e => {
+      const some = e.target.value === "some";
+      $("#nlaudpick", s.el).hidden = !some;
+      if (some) nlMembers();
+    };
     s.el.addEventListener("click", async e => {
       const opt = e.target.closest(".vis-opt");
       if (opt) {
         $$(".vis-opt", s.el).forEach(o => o.classList.toggle("on", o === opt));
+        const shared = opt.dataset.vis !== "private";
+        $("#nlaud", s.el).hidden = !shared;
+        $("#nlaudpick", s.el).hidden = !shared || $("#nlaudsel", s.el).value !== "some";
         return;
       }
       if (e.target.closest('[data-v="cancel"]')) return s.close();
@@ -1549,7 +1573,9 @@ function renderLists(d) {
         const name = $("#ln", s.el).value.trim();
         if (!name) return;
         const visibility = $(".vis-opt.on", s.el)?.dataset.vis || "private";
-        await api("/lists", { body: { name, visibility } });
+        const shared_with = visibility !== "private" && $("#nlaudsel", s.el).value === "some"
+          ? $$("#nlaudpick input:checked", s.el).map(c => +c.dataset.id) : [];
+        await api("/lists", { body: { name, visibility, shared_with } });
         delete CACHE["/lists"]; s.close(); routes.lists();
       }
     });
@@ -1686,7 +1712,14 @@ routes.list = async (id, quiet) => {
       ? `<div class="vis-seg" id="visseg" role="group" aria-label="List visibility">
            ${VIS.map(([v, lab, ic]) => `<button class="vs-opt ${vis === v ? "on" : ""}" data-vis="${v}">${ic}<span>${lab}</span></button>`).join("")}
          </div>
-         <div class="vis-note">${visNote[vis]}</div>`
+         <div class="vis-note">${visNote[vis]}</div>
+         ${vis !== "private" ? `
+         <div class="aud-row"><span class="aud-lbl">Shared with</span>
+           <select id="audsel" class="aud-sel">
+             <option value="all"${l.shared_with?.length ? "" : " selected"}>Everyone in the household</option>
+             <option value="some"${l.shared_with?.length ? " selected" : ""}>Specific people…</option>
+           </select></div>
+         <div id="audpick" class="aud-pick" ${l.shared_with?.length ? "" : "hidden"}></div>` : ""}`
       : `<div class="list-owner">${avatarHTML(l.owner, "sm")}
            <span class="lo-txt">Shared by <b>@${esc(l.owner.username)}</b></span>
            <span class="vis-pill ${vis}">${vis === "collab" ? `${I.users} Collaborative` : `${I.globe} Public`}</span></div>
@@ -1726,6 +1759,31 @@ routes.list = async (id, quiet) => {
       routes.list(id);
     } catch {}
   });
+  const renderAudPick = async () => {
+    const box = $("#audpick"); if (!box) return;
+    const { members } = await api("/members");
+    const cur = new Set(l.shared_with || []);
+    box.innerHTML = members.filter(m => !m.is_me).map(m => `
+      <label class="aud-m"><input type="checkbox" data-id="${m.id}" ${cur.has(m.id) ? "checked" : ""}>
+        ${avatarHTML(m, "sm")}<span>${esc(m.display_name)}</span></label>`).join("")
+      + `<i class="aud-hint">Nobody picked = visible to everyone.</i>`;
+    $$("input", box).forEach(c => c.onchange = async () => {
+      const ids = $$("input:checked", box).map(x => +x.dataset.id);
+      await api(`/list/${id}/visibility`, { body: { visibility: vis, shared_with: ids } });
+      l.shared_with = ids; delete CACHE["/lists"];
+    });
+  };
+  if ($("#audsel")) {
+    if (!$("#audpick").hidden) renderAudPick();
+    $("#audsel").onchange = async e => {
+      if (e.target.value === "all") {
+        $("#audpick").hidden = true;
+        await api(`/list/${id}/visibility`, { body: { visibility: vis, shared_with: [] } });
+        l.shared_with = []; delete CACHE["/lists"];
+        toast("Shared with everyone");
+      } else { $("#audpick").hidden = false; renderAudPick(); }
+    };
+  }
   wireItems();
 };
 

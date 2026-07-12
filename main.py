@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260711a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260712c"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS lists(
 CREATE TABLE IF NOT EXISTS list_items(
   list_id INTEGER, item_type TEXT, item_id INTEGER, added_at TEXT,
   PRIMARY KEY(list_id, item_type, item_id));
+CREATE TABLE IF NOT EXISTS list_shares(
+  list_id INTEGER, user_id INTEGER, PRIMARY KEY(list_id, user_id));
 CREATE TABLE IF NOT EXISTS reviews(
   id INTEGER PRIMARY KEY, user_id INTEGER, item_type TEXT, item_id INTEGER,
   rating INTEGER, body TEXT, created_at TEXT, updated_at TEXT,
@@ -613,6 +615,29 @@ def norm_vis(v):
 # lists that other household members are allowed to *see*
 SHARED_VIS = ("public", "collab")
 
+# a shared list with no list_shares rows is shared with the whole household;
+# with rows, only the listed members (plus the owner) may see it
+AUDIENCE_SQL = """(NOT EXISTS(SELECT 1 FROM list_shares s WHERE s.list_id=l.id)
+                   OR EXISTS(SELECT 1 FROM list_shares s WHERE s.list_id=l.id AND s.user_id=?))"""
+
+
+def list_audience_ok(con, list_id, uid):
+    """May uid see this shared list? Yes when it's household-wide (no explicit
+    audience) or uid is on its share list."""
+    rows = con.execute("SELECT user_id FROM list_shares WHERE list_id=?", (list_id,)).fetchall()
+    return not rows or uid in {r["user_id"] for r in rows}
+
+
+def set_list_shares(con, list_id, owner_id, shared_with):
+    """Replace a list's explicit audience. None = leave untouched; [] = everyone."""
+    if shared_with is None:
+        return
+    valid = {r["id"] for r in con.execute("SELECT id FROM users").fetchall()}
+    ids = ({int(x) for x in shared_with} & valid) - {owner_id}
+    con.execute("DELETE FROM list_shares WHERE list_id=?", (list_id,))
+    con.executemany("INSERT INTO list_shares(list_id,user_id) VALUES(?,?)",
+                    [(list_id, i) for i in sorted(ids)])
+
 
 def list_card(con, r):
     """One list-card summary (name, count, up-to-4 cover posters, visibility) from a
@@ -629,22 +654,26 @@ def list_card(con, r):
             "count": r["n"], "posters": posters, "visibility": list_visibility(r)}
 
 
-def list_cards(con, uid, public_only=False):
-    """One user's list cards. public_only hides that user's private lists (for other viewers)."""
+def list_cards(con, uid, viewer=None):
+    """One user's list cards. A different viewer only sees shared lists whose
+    audience includes them."""
     q = ("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n
             FROM lists l WHERE l.user_id=?""")
-    if public_only:
-        q += " AND l.visibility IN ('public','collab')"
+    args = [uid]
+    if viewer is not None and viewer != uid:
+        q += f" AND l.visibility IN ('public','collab') AND {AUDIENCE_SQL}"
+        args.append(viewer)
     q += " ORDER BY l.is_default DESC, l.created_at"
-    return [list_card(con, r) for r in con.execute(q, (uid,)).fetchall()]
+    return [list_card(con, r) for r in con.execute(q, args).fetchall()]
 
 
 def shared_list_cards(con, uid):
-    """Other members' collab lists — jointly editable, so they appear in everyone's Lists tab."""
-    rows = con.execute("""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n,
+    """Other members' collab lists (whose audience includes uid) — jointly
+    editable, so they appear in everyone's Lists tab."""
+    rows = con.execute(f"""SELECT l.*, (SELECT COUNT(*) FROM list_items li WHERE li.list_id=l.id) n,
             (SELECT COALESCE(display_name, username) FROM users u WHERE u.id=l.user_id) owner
-            FROM lists l WHERE l.user_id!=? AND l.visibility='collab'
-            ORDER BY l.created_at""", (uid,)).fetchall()
+            FROM lists l WHERE l.user_id!=? AND l.visibility='collab' AND {AUDIENCE_SQL}
+            ORDER BY l.created_at""", (uid, uid)).fetchall()
     return [dict(list_card(con, r), owner=r["owner"]) for r in rows]
 
 
@@ -668,7 +697,7 @@ def user_lists(username: str, user=Depends(current_user)):
         is_me = u["id"] == user["id"]
         if is_me:
             ensure_default_list(con, u["id"])
-        out = list_cards(con, u["id"], public_only=not is_me)
+        out = list_cards(con, u["id"], viewer=user["id"])
     return {"user": user_public(u), "is_me": is_me, "lists": out}
 
 
@@ -682,6 +711,7 @@ async def create_list(request: Request, user=Depends(current_user)):
     with db() as con:
         cur = con.execute("INSERT INTO lists(user_id,name,visibility,created_at) VALUES(?,?,?,?)",
                           (user["id"], name, visibility, datetime.utcnow().isoformat()))
+        set_list_shares(con, cur.lastrowid, user["id"], body.get("shared_with"))
     return {"id": cur.lastrowid, "name": name, "visibility": visibility}
 
 
@@ -694,7 +724,10 @@ async def set_list_visibility(list_id: int, request: Request, user=Depends(curre
                            (list_id, user["id"])).fetchone():
             raise HTTPException(404)
         con.execute("UPDATE lists SET visibility=? WHERE id=?", (visibility, list_id))
-    return {"ok": True, "visibility": visibility}
+        set_list_shares(con, list_id, user["id"], body.get("shared_with"))
+        shared = [r["user_id"] for r in con.execute(
+            "SELECT user_id FROM list_shares WHERE list_id=?", (list_id,)).fetchall()]
+    return {"ok": True, "visibility": visibility, "shared_with": shared}
 
 
 @app.delete("/api/list/{list_id}")
@@ -707,6 +740,7 @@ def delete_list(list_id: int, user=Depends(current_user)):
         if r["is_default"]:
             raise HTTPException(400, "can't delete the default list")
         con.execute("DELETE FROM list_items WHERE list_id=?", (list_id,))
+        con.execute("DELETE FROM list_shares WHERE list_id=?", (list_id,))
         con.execute("DELETE FROM lists WHERE id=?", (list_id,))
     return {"ok": True}
 
@@ -719,18 +753,23 @@ def get_list(list_id: int, user=Depends(current_user)):
             raise HTTPException(404)
         visibility = list_visibility(l)
         is_owner = l["user_id"] == user["id"]
-        # owner sees any of their lists; others may see shared (public/collab) ones (404 hides the rest)
-        if not is_owner and visibility not in SHARED_VIS:
+        # owner sees any of their lists; others may see shared (public/collab) ones
+        # whose audience includes them (404 hides the rest)
+        if not is_owner and (visibility not in SHARED_VIS
+                             or not list_audience_ok(con, list_id, user["id"])):
             raise HTTPException(404)
         owner = con.execute("SELECT * FROM users WHERE id=?", (l["user_id"],)).fetchone()
         items = con.execute("SELECT * FROM list_items WHERE list_id=? ORDER BY added_at DESC",
                             (list_id,)).fetchall()
         out = [x for x in (list_item_row(con, it, user["id"]) for it in items) if x]
-    # collab lists: any signed-in member can add/remove; only the owner can rename/delete/reshare
+        shared_with = ([r["user_id"] for r in con.execute(
+            "SELECT user_id FROM list_shares WHERE list_id=?", (list_id,)).fetchall()]
+            if is_owner else None)
+    # collab lists: any member in the audience can add/remove; only the owner can rename/delete/reshare
     can_edit = is_owner or visibility == "collab"
     return {"id": l["id"], "name": l["name"], "is_default": bool(l["is_default"]),
             "visibility": visibility, "is_owner": is_owner, "can_edit": can_edit,
-            "owner": user_public(owner), "items": out}
+            "shared_with": shared_with, "owner": user_public(owner), "items": out}
 
 
 @app.post("/api/list/{list_id}/item")
@@ -741,8 +780,9 @@ async def list_item_toggle(list_id: int, request: Request, user=Depends(current_
         l = con.execute("SELECT user_id, visibility FROM lists WHERE id=?", (list_id,)).fetchone()
         if not l:
             raise HTTPException(404)
-        # owner always; on a collab list any signed-in member may add/remove
-        if l["user_id"] != user["id"] and list_visibility(l) != "collab":
+        # owner always; on a collab list any member in its audience may add/remove
+        if l["user_id"] != user["id"] and (list_visibility(l) != "collab"
+                                           or not list_audience_ok(con, list_id, user["id"])):
             raise HTTPException(403, "not allowed to edit this list")
         if body.get("remove"):
             con.execute("DELETE FROM list_items WHERE list_id=? AND item_type=? AND item_id=?",
@@ -762,12 +802,12 @@ def item_lists(item_type: str, item_id: int, user=Depends(current_user)):
     """Which of my lists contain this item (for the add-to-list menu)."""
     with db() as con:
         ensure_default_list(con, user["id"])
-        rows = con.execute("""SELECT l.id, l.name, l.is_default, l.user_id, l.visibility,
+        rows = con.execute(f"""SELECT l.id, l.name, l.is_default, l.user_id, l.visibility,
             (SELECT 1 FROM list_items li WHERE li.list_id=l.id AND li.item_type=? AND li.item_id=?) has,
             (SELECT COALESCE(display_name, username) FROM users u WHERE u.id=l.user_id) owner
-            FROM lists l WHERE l.user_id=? OR l.visibility='collab'
+            FROM lists l WHERE l.user_id=? OR (l.visibility='collab' AND {AUDIENCE_SQL})
             ORDER BY (l.user_id!=?), l.is_default DESC, l.created_at""",
-            (item_type, item_id, user["id"], user["id"])).fetchall()
+            (item_type, item_id, user["id"], user["id"], user["id"])).fetchall()
     out = []
     for r in rows:
         mine = r["user_id"] == user["id"]
