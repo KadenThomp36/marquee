@@ -1256,28 +1256,31 @@ a.h-row:hover{border-color:var(--line-2)}
 .prof-hero .prof-sub{color:var(--mut);font-size:13px;margin:3px 0 16px}
 .prof-hero .btn{margin-top:2px}
 /* full-bleed profile banner behind the whole hero, with a scrim so text stays legible */
-/* profile banner: a widescreen strip across the top of the hero (Discord-style),
-   with the avatar overlapping its lower edge. A fixed strip height keeps 16:9 art
-   from being crushed into a near-square crop in the tall hero. */
-/* ambient wash: a blurred, darkened copy of the banner that bleeds down the page
-   behind the hero and dissolves into the background — so the art fills further down,
-   getting softer and darker toward the content below */
-.prof-ambient{position:absolute;top:0;left:50%;margin-left:-50vw;width:100vw;height:480px;z-index:-1;
-  background-size:cover;background-position:center 22%;pointer-events:none;transform:translateZ(0);
-  filter:blur(28px) saturate(1.12) brightness(.42);
-  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 130px,rgba(0,0,0,.72) 44%,transparent 100%);
-  mask-image:linear-gradient(180deg,transparent 0,#000 130px,rgba(0,0,0,.72) 44%,transparent 100%)}
-.prof-hero:not(.has-banner) .prof-ambient{display:none}
-@media(min-width:701px){.prof-ambient{height:560px}}
-.prof-banner{position:absolute;top:0;left:50%;margin-left:-50vw;width:100vw;height:152px;
-  overflow:hidden;z-index:0;pointer-events:none}
-@media(min-width:701px){.prof-banner{height:220px}}
-.prof-banner img{width:100%;height:100%;object-fit:cover;object-position:center 35%}
-.pb-scrim{position:absolute;inset:0;
-  background:linear-gradient(180deg,rgba(15,13,10,.14),transparent 32%,rgba(15,13,10,.38) 80%,var(--bg))}
+/* profile banner: a full-bleed image behind the hero with a TRUE progressive blur —
+   sharp at the top, blurring + darkening down through the content and dissolving into
+   the page. Built from stepped-blur copies (.pb-l0..4) revealed by feathered gradient
+   masks that crossfade, since one filter:blur() can only do a single uniform radius. */
+.prof-banner{position:absolute;top:0;left:50%;margin-left:-50vw;width:100vw;height:460px;z-index:-1;
+  overflow:hidden;pointer-events:none;contain:paint}
+@media(min-width:701px){.prof-banner{height:580px}}
 .prof-hero:not(.has-banner) .prof-banner{display:none}
-.prof-hero.has-banner{padding-top:152px}
-@media(min-width:701px){.prof-hero.has-banner{padding-top:220px}}
+.pb-stack{position:absolute;inset:0}
+.pb-l{position:absolute;inset:0;background-image:var(--img);background-size:cover;background-position:center 30%;
+  transform:translateZ(0)}
+.pb-l0{-webkit-mask-image:linear-gradient(180deg,#000 0,#000 28%,transparent 44%);
+  mask-image:linear-gradient(180deg,#000 0,#000 28%,transparent 44%)}
+.pb-l1{filter:blur(4px);-webkit-mask-image:linear-gradient(180deg,transparent 26%,#000 40%,#000 46%,transparent 60%);
+  mask-image:linear-gradient(180deg,transparent 26%,#000 40%,#000 46%,transparent 60%)}
+.pb-l2{filter:blur(10px);-webkit-mask-image:linear-gradient(180deg,transparent 42%,#000 56%,#000 62%,transparent 76%);
+  mask-image:linear-gradient(180deg,transparent 42%,#000 56%,#000 62%,transparent 76%)}
+.pb-l3{filter:blur(20px);-webkit-mask-image:linear-gradient(180deg,transparent 58%,#000 72%,#000 78%,transparent 90%);
+  mask-image:linear-gradient(180deg,transparent 58%,#000 72%,#000 78%,transparent 90%)}
+.pb-l4{filter:blur(34px);-webkit-mask-image:linear-gradient(180deg,transparent 74%,#000 88%,transparent 100%);
+  mask-image:linear-gradient(180deg,transparent 74%,#000 88%,transparent 100%)}
+.pb-tint{position:absolute;inset:0;background:linear-gradient(180deg,transparent 0,transparent 22%,
+  rgba(15,13,10,.28) 44%,rgba(15,13,10,.6) 70%,var(--bg) 100%)}
+.prof-hero.has-banner{padding-top:150px}
+@media(min-width:701px){.prof-hero.has-banner{padding-top:210px}}
 .prof-hero.has-banner .prof-av{margin-top:-54px}
 .prof-hero.has-banner .prof-av .avatar{box-shadow:0 0 0 4px var(--bg)}
 .prof-hero .prof-av{z-index:1}
@@ -1300,7 +1303,8 @@ a.h-row:hover{border-color:var(--line-2)}
 .bn-hint{color:var(--mut);font-size:10.5px;font-weight:600}
 /* vertical Rolodex: cards stacked/shingled; the focused one pops open to full art */
 .stack{display:flex;flex-direction:column;max-height:62vh;overflow-y:auto;overscroll-behavior:contain;
-  padding:6px 2px 2px;margin:0 -2px;scrollbar-width:none}
+  padding:6px 2px 2px;margin:0 -2px;scrollbar-width:none;
+  touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 .stack::-webkit-scrollbar{display:none}
 .stack-card{position:relative;display:block;width:100%;flex:none;height:54px;margin-top:-12px;
   border-radius:13px;overflow:hidden;background:var(--panel-2);border:1px solid var(--line);

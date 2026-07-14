@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713i";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713j";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2127,6 +2127,18 @@ async function loadProfileStats(statsPath, advPath, host) {
   } catch { /* advanced is best-effort */ }
 }
 
+// Profile banner as a *true* progressive blur: several copies of the same image at
+// stepped blur radii, each revealed by a feathered gradient mask so neighbouring
+// blur levels crossfade into one continuous ramp — sharp at the top, dissolving
+// (blur + dark) into the page by the bottom. A uniform filter:blur() can't do this.
+function bannerLayers(url) {
+  if (!url) return "";
+  const u = `url('${esc(url)}')`;
+  return `<div class="pb-stack" style="--img:${u}">
+    <div class="pb-l pb-l0"></div><div class="pb-l pb-l1"></div><div class="pb-l pb-l2"></div>
+    <div class="pb-l pb-l3"></div><div class="pb-l pb-l4"></div><div class="pb-tint"></div></div>`;
+}
+
 routes.profile = async (username) => {
   const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
   const ppath = me ? "/profile" : "/profile/" + encodeURIComponent(username);
@@ -2138,8 +2150,7 @@ routes.profile = async (username) => {
     view.innerHTML = `
       ${me ? "" : `<div class="page-head"><a class="crumb" href="#/profile">${backIcon} Your profile</a></div>`}
       <div class="prof-hero reveal${p.banner ? " has-banner" : ""}">
-        <div class="prof-ambient" id="bannerAmbient"${p.banner ? ` style="background-image:url('${esc(p.banner)}')"` : ""}></div>
-        <div class="prof-banner" id="banner">${p.banner ? `<img src="${esc(p.banner)}" alt="">` : ""}<div class="pb-scrim"></div></div>
+        <div class="prof-banner" id="banner">${bannerLayers(p.banner)}</div>
         ${me ? `<a class="prof-gear" href="#/settings" title="Settings & Plex" aria-label="Settings">${gearIcon()}</a>
         <button class="banner-edit" id="banneredit" title="Change banner" aria-label="Change banner">${I.image}</button>` : ""}
         <div class="prof-av" id="avwrap">${avatarHTML(p, "xl")}
@@ -2188,9 +2199,7 @@ routes.profile = async (username) => {
       $("#banneredit").onclick = () => bannerSheet(p, url => {
         p.banner = url; delete CACHE[ppath];
         const bn = $("#banner");
-        if (bn) bn.innerHTML = (url ? `<img src="${esc(url)}" alt="">` : "") + `<div class="pb-scrim"></div>`;
-        const amb = $("#bannerAmbient");
-        if (amb) amb.style.backgroundImage = url ? `url('${url}')` : "";
+        if (bn) bn.innerHTML = bannerLayers(url);
         $(".prof-hero")?.classList.toggle("has-banner", !!url);
       });
       $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
@@ -2270,15 +2279,39 @@ async function bannerSheet(p, onSet) {
     stack.innerHTML = opts.map((o, i) => `<button class="stack-card" data-i="${i}" data-title="${esc(o.title)}">
       <img loading="lazy" src="${esc(o.backdrop)}" alt="" draggable="false"><span class="sc-bar"><span class="sc-t">${esc(o.title)}</span></span></button>`).join("");
     cards = $$(".stack-card", stack);
-    const hoverable = matchMedia("(hover:hover)").matches;
-    cards.forEach(c => {
-      if (hoverable) c.addEventListener("pointerenter", () => setActive(c, false));  // desktop: hover pops it
-      c.addEventListener("click", () => {                                             // tap opens; tap the open one to use it
-        if (c.classList.contains("active")) pick(opts[+c.dataset.i]);
-        else setActive(c, true);
-      });
-    });
+    if (matchMedia("(hover:hover)").matches)                    // desktop: hover pops a card open
+      cards.forEach(c => c.addEventListener("pointerenter", () => setActive(c, false)));
     setActive(cards[0], false);
+
+    // Press-and-drag scrub: the card under your finger opens as you slide up/down,
+    // buzzing on every change, until you lift. A tap on the already-open card selects it.
+    let scrub = null;
+    const cardAt = (x, y) => document.elementFromPoint(x, y)?.closest?.(".stack-card");
+    stack.addEventListener("pointerdown", e => {
+      const c = cardAt(e.clientX, e.clientY) || active; if (!c) return;
+      scrub = { y: e.clientY, i: cards.indexOf(c), moved: false, wasActive: c === active };
+      setActive(c, false);
+      try { stack.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
+    });
+    stack.addEventListener("pointermove", e => {
+      if (!scrub) return;
+      const dy = e.clientY - scrub.y;
+      if (Math.abs(dy) < 30) return;                            // one card per ~30px of travel
+      const ni = Math.max(0, Math.min(cards.length - 1, scrub.i + (dy > 0 ? 1 : -1)));
+      scrub.y = e.clientY;
+      if (ni === scrub.i) return;
+      scrub.i = ni; scrub.moved = true;
+      setActive(cards[ni], true);
+      hapticTick();
+    });
+    const endScrub = () => {
+      if (!scrub) return;
+      const sc = scrub; scrub = null;
+      if (!sc.moved && sc.wasActive) pick(opts[sc.i]);          // tapped the open card = choose it
+    };
+    stack.addEventListener("pointerup", endScrub);
+    stack.addEventListener("pointercancel", endScrub);
+
     const use = $("#duse", s.el);
     use.hidden = false;
     use.onclick = () => { if (active) pick(opts[+active.dataset.i]); };
@@ -2619,19 +2652,21 @@ function vtipHide() { if (_vtip) _vtip.hidden = true; }
 // on a <label> bound to a hidden <input switch> fires the system haptic (iOS 17.4+).
 let _hapticLabel;
 function hapticTick() {
-  if (navigator.vibrate) { navigator.vibrate(7); return; }   // Android / desktop
-  // iOS Safari (17.4+) exposes no navigator.vibrate; clicking a <label> bound to a
-  // hidden <input switch> triggers the system haptic. Must be display:none (not
-  // off-screen) and fired synchronously inside the touch handler.
+  if (navigator.vibrate) { try { navigator.vibrate(8); } catch { /* denied */ } return; }  // Android / desktop
+  // iOS Safari has no Vibration API. The only known trigger: toggle a hidden
+  // <input type="checkbox" switch> via a *rendered* <label>. Key detail — hide the
+  // INPUT (display:none), never the label, or no haptic fires. Works iOS 17.4–26.4
+  // only (Apple patched it in 26.5). Must be clicked inside a user gesture.
   if (!_hapticLabel) {
     const label = document.createElement("label");
     label.setAttribute("aria-hidden", "true");
-    label.style.display = "none";
+    label.style.cssText = "position:fixed;bottom:0;left:0;pointer-events:none";
     const input = document.createElement("input");
     input.type = "checkbox";
     input.setAttribute("switch", "");
+    input.setAttribute("style", "display:none!important");
     label.appendChild(input);
-    document.head.appendChild(label);
+    document.body.appendChild(label);
     _hapticLabel = label;
   }
   _hapticLabel.click();
