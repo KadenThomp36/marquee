@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713f";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713h";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2138,6 +2138,7 @@ routes.profile = async (username) => {
     view.innerHTML = `
       ${me ? "" : `<div class="page-head"><a class="crumb" href="#/profile">${backIcon} Your profile</a></div>`}
       <div class="prof-hero reveal${p.banner ? " has-banner" : ""}">
+        <div class="prof-ambient" id="bannerAmbient"${p.banner ? ` style="background-image:url('${esc(p.banner)}')"` : ""}></div>
         <div class="prof-banner" id="banner">${p.banner ? `<img src="${esc(p.banner)}" alt="">` : ""}<div class="pb-scrim"></div></div>
         ${me ? `<a class="prof-gear" href="#/settings" title="Settings & Plex" aria-label="Settings">${gearIcon()}</a>
         <button class="banner-edit" id="banneredit" title="Change banner" aria-label="Change banner">${I.image}</button>` : ""}
@@ -2188,6 +2189,8 @@ routes.profile = async (username) => {
         p.banner = url; delete CACHE[ppath];
         const bn = $("#banner");
         if (bn) bn.innerHTML = (url ? `<img src="${esc(url)}" alt="">` : "") + `<div class="pb-scrim"></div>`;
+        const amb = $("#bannerAmbient");
+        if (amb) amb.style.backgroundImage = url ? `url('${url}')` : "";
         $(".prof-hero")?.classList.toggle("has-banner", !!url);
       });
       $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
@@ -2230,8 +2233,9 @@ function editProfile(p) {
     }
   });
 }
-// Banner picker — upload your own, or a curated widescreen still from a show you watch.
-// onSet(urlOrNull) applies the choice (null clears).
+// Banner picker — upload your own, or riffle a Rolodex-style deck of curated
+// widescreen stills from shows you watch. Drag/flick the top card to flip through
+// on mobile; the deck fans open on hover on desktop. onSet(urlOrNull) applies.
 async function bannerSheet(p, onSet) {
   const s = sheet(`<div class="sh-t">Profile banner</div>
     <div class="bn-actions">
@@ -2239,19 +2243,83 @@ async function bannerSheet(p, onSet) {
       ${p.banner ? `<button class="btn ghost" id="bnclear">Remove banner</button>` : ""}
     </div>
     <input type="file" id="bnfile" accept="image/png,image/jpeg,image/webp" hidden>
-    <div class="bn-cap">From shows you watch <span class="bn-hint">swipe →</span></div>
-    <div class="bn-rail" id="bngrid"><div class="bn-load">Loading suggestions…</div></div>`,
+    <div class="bn-cap">From shows you watch</div>
+    <div class="deck-wrap">
+      <div class="deck" id="deck"><div class="bn-load">Loading suggestions…</div></div>
+    </div>
+    <div class="deck-foot" id="deckfoot" hidden>
+      <button class="deck-arrow" id="dprev" aria-label="Previous">${I.chevS}</button>
+      <div class="deck-mid"><span class="deck-title" id="dtitle"></span><span class="deck-pos" id="dpos"></span></div>
+      <button class="deck-arrow" id="dnext" aria-label="Next">${I.chevR}</button>
+    </div>
+    <button class="btn pri deck-use" id="duse" hidden>Use this banner</button>`,
     { cls: "editor bannersheet" });
-  api("/profile/banner/options").then(({ options }) => {
-    const g = $("#bngrid", s.el); if (!g) return;
-    if (!options.length) { g.innerHTML = `<div class="bn-empty">Watch a few shows and their artwork will show up here.</div>`; return; }
-    g.innerHTML = options.map(o => `<button class="bn-opt" data-url="${esc(o.backdrop)}" title="${esc(o.title)}">
-      <img loading="lazy" src="${esc(o.backdrop)}" alt=""><span class="bn-ttl">${esc(o.title)}</span></button>`).join("");
-    $$(".bn-opt", g).forEach(b => b.onclick = async () => {
-      try { await api("/profile/banner", { body: { url: b.dataset.url } }); onSet(b.dataset.url); s.close(); }
-      catch { toast("Couldn't set banner"); }
+
+  const deck = $("#deck", s.el);
+  let opts = [], cards = [], idx = 0, drag = null;
+
+  const pick = async o => {
+    try { await api("/profile/banner", { body: { url: o.backdrop } }); onSet(o.backdrop); s.close(); }
+    catch { toast("Couldn't set banner"); }
+  };
+  const place = () => {
+    const n = opts.length;
+    cards.forEach((c, i) => {
+      const depth = (i - idx + n) % n;
+      c.style.setProperty("--d", Math.min(depth, 4));
+      c.style.transform = ""; c.style.opacity = ""; c.style.transition = "";
+      c.style.zIndex = n - Math.min(depth, n);
+      c.classList.toggle("front", depth === 0);
+      c.classList.toggle("buried", depth > 3);
     });
-  }).catch(() => { const g = $("#bngrid", s.el); if (g) g.innerHTML = `<div class="bn-empty">Couldn't load suggestions.</div>`; });
+    $("#dtitle", s.el).textContent = opts[idx].title;
+    $("#dpos", s.el).textContent = `${idx + 1} / ${n}`;
+  };
+  const advance = dir => { idx = (idx + dir + opts.length) % opts.length; place(); };
+
+  const onDown = e => {
+    const front = cards[idx];
+    if (!front || !front.contains(e.target)) return;
+    drag = { x0: e.clientX, dx: 0, f: front };
+    front.style.transition = "none";
+    try { deck.setPointerCapture(e.pointerId); } catch { /* no active pointer (synthetic) */ }
+  };
+  const onMove = e => {
+    if (!drag) return;
+    drag.dx = e.clientX - drag.x0;
+    drag.f.style.transform = `translate(${drag.dx}px, ${Math.abs(drag.dx) * 0.03}px) rotate(${drag.dx * 0.04}deg)`;
+  };
+  const onUp = () => {
+    if (!drag) return;
+    const { dx, f } = drag; drag = null;
+    if (Math.abs(dx) < 8) { pick(opts[idx]); return; }            // a tap = choose it
+    if (Math.abs(dx) > 66) {                                       // flung far enough = flip
+      const dir = dx < 0 ? 1 : -1;
+      f.style.transition = "transform .22s ease, opacity .22s ease";
+      f.style.transform = `translate(${dx < 0 ? -520 : 520}px, 30px) rotate(${dx < 0 ? -22 : 22}deg)`;
+      f.style.opacity = 0;
+      setTimeout(() => advance(dir), 190);
+    } else { place(); }                                            // spring back
+  };
+  deck.addEventListener("pointerdown", onDown);
+  deck.addEventListener("pointermove", onMove);
+  deck.addEventListener("pointerup", onUp);
+  deck.addEventListener("pointercancel", onUp);
+
+  api("/profile/banner/options").then(({ options }) => {
+    if (!deck.isConnected) return;
+    opts = options;
+    if (!opts.length) { deck.innerHTML = `<div class="bn-empty">Watch a few shows and their artwork shows up here.</div>`; return; }
+    deck.innerHTML = opts.map(o => `<div class="deck-card"><img loading="lazy" src="${esc(o.backdrop)}" alt="" draggable="false"><span class="bn-ttl">${esc(o.title)}</span></div>`).join("");
+    cards = $$(".deck-card", deck);
+    place();
+    $("#deckfoot", s.el).hidden = false;
+    $("#duse", s.el).hidden = false;
+    $("#dprev", s.el).onclick = () => advance(-1);
+    $("#dnext", s.el).onclick = () => advance(1);
+    $("#duse", s.el).onclick = () => pick(opts[idx]);
+  }).catch(() => { if (deck.isConnected) deck.innerHTML = `<div class="bn-empty">Couldn't load suggestions.</div>`; });
+
   $("#bnupload", s.el).onclick = () => $("#bnfile", s.el).click();
   $("#bnfile", s.el).onchange = async () => {
     const f = $("#bnfile", s.el).files[0]; if (!f) return;

@@ -1243,7 +1243,7 @@ a.h-row:hover{border-color:var(--line-2)}
 }
 
 /* ── profile hub v2 (identity · favorites · recap · members · advanced stats) ── */
-.prof-hero{position:relative;text-align:center;padding:16px 0 20px}
+.prof-hero{position:relative;text-align:center;padding:16px 0 20px;isolation:isolate}
 .prof-hero .prof-gear{position:absolute;top:2px;right:0;width:40px;height:40px;border-radius:50%;
   display:grid;place-items:center;color:var(--ink-2);border:1px solid var(--line);background:var(--panel)}
 .prof-hero .prof-gear:hover{color:var(--amber);border-color:var(--amber-dim)}
@@ -1259,6 +1259,16 @@ a.h-row:hover{border-color:var(--line-2)}
 /* profile banner: a widescreen strip across the top of the hero (Discord-style),
    with the avatar overlapping its lower edge. A fixed strip height keeps 16:9 art
    from being crushed into a near-square crop in the tall hero. */
+/* ambient wash: a blurred, darkened copy of the banner that bleeds down the page
+   behind the hero and dissolves into the background — so the art fills further down,
+   getting softer and darker toward the content below */
+.prof-ambient{position:absolute;top:0;left:50%;margin-left:-50vw;width:100vw;height:480px;z-index:-1;
+  background-size:cover;background-position:center 22%;pointer-events:none;transform:translateZ(0);
+  filter:blur(28px) saturate(1.12) brightness(.42);
+  -webkit-mask-image:linear-gradient(180deg,transparent 0,#000 130px,rgba(0,0,0,.72) 44%,transparent 100%);
+  mask-image:linear-gradient(180deg,transparent 0,#000 130px,rgba(0,0,0,.72) 44%,transparent 100%)}
+.prof-hero:not(.has-banner) .prof-ambient{display:none}
+@media(min-width:701px){.prof-ambient{height:560px}}
 .prof-banner{position:absolute;top:0;left:50%;margin-left:-50vw;width:100vw;height:152px;
   overflow:hidden;z-index:0;pointer-events:none}
 @media(min-width:701px){.prof-banner{height:220px}}
@@ -1285,19 +1295,34 @@ a.h-row:hover{border-color:var(--line-2)}
 /* banner picker sheet */
 .bannersheet .bn-actions{display:flex;gap:8px}
 .bannersheet .bn-actions .btn{flex:1;justify-content:center}
-.bn-cap{display:flex;align-items:baseline;justify-content:space-between;color:var(--ink-2);
-  font-size:12.5px;font-weight:650;margin:14px 2px 10px}
-.bn-hint{color:var(--mut);font-size:11px;font-weight:600}
-/* horizontal swipe rail — cards snap so you can flick through every backdrop */
-.bn-rail{display:flex;gap:11px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding:2px;
-  padding:2px 2px 10px;margin:0 -2px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
-.bn-rail::-webkit-scrollbar{display:none}
-.bn-opt{position:relative;flex:0 0 78%;max-width:340px;aspect-ratio:16/9;scroll-snap-align:center;
-  border-radius:11px;overflow:hidden;background:var(--panel-2);border:1px solid var(--line);
-  cursor:pointer;-webkit-tap-highlight-color:transparent;transition:border-color .12s,transform .12s}
-.bn-opt img{width:100%;height:100%;object-fit:cover;display:block}
-.bn-opt:hover{border-color:var(--amber);transform:translateY(-2px)}
-.bn-opt:active{transform:scale(.985)}
+.bn-cap{color:var(--ink-2);font-size:12.5px;font-weight:650;margin:14px 2px 4px}
+/* Rolodex card deck — flick the top card to riffle through; fans open on hover (desktop) */
+.deck-wrap{position:relative;width:100%;margin:2px 0 12px;padding-bottom:34px}
+.deck{position:relative;width:100%;aspect-ratio:16/9;perspective:1200px;touch-action:pan-y}
+.deck-card{position:absolute;inset:0;border-radius:13px;overflow:hidden;background:var(--panel-2);
+  border:1px solid var(--line);box-shadow:0 12px 32px rgba(0,0,0,.55);--d:0;
+  transform:translateY(calc(var(--d)*12px)) scale(calc(1 - var(--d)*0.05));
+  opacity:calc(1 - var(--d)*0.22);pointer-events:none;will-change:transform;
+  user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
+  transition:transform .34s cubic-bezier(.2,.85,.25,1),opacity .3s,box-shadow .2s,border-color .15s}
+.deck-card img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;-webkit-user-drag:none}
+.deck-card.buried{opacity:0}
+.deck-card.front{pointer-events:auto;cursor:grab;border-color:var(--line-2)}
+.deck-card.front:active{cursor:grabbing}
+@media(hover:hover){
+  .deck-card.front:hover{border-color:var(--amber);box-shadow:0 16px 44px rgba(0,0,0,.6),0 0 0 1px var(--amber-dim)}
+  .deck:hover .deck-card{transform:translateY(calc(var(--d)*21px)) scale(calc(1 - var(--d)*0.042)) rotate(calc(var(--d)*-2.4deg));opacity:calc(1 - var(--d)*0.15)}
+}
+.deck-foot{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.deck-mid{flex:1;min-width:0;text-align:center}
+.deck-title{display:block;font-weight:750;font-size:14px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.deck-pos{display:block;font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums;margin-top:1px}
+.deck-arrow{flex:none;width:40px;height:40px;border-radius:50%;display:grid;place-items:center;
+  color:var(--ink-2);border:1px solid var(--line-2);background:var(--panel-2);-webkit-tap-highlight-color:transparent}
+.deck-arrow:hover{color:var(--amber);border-color:var(--amber-dim)}
+.deck-arrow svg{width:20px;height:20px}
+#dprev svg{transform:rotate(180deg)}
+.deck-use{width:100%}
 .bn-ttl{position:absolute;left:0;right:0;bottom:0;padding:20px 11px 8px;font-size:12px;font-weight:700;
   color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.85));
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 4px rgba(0,0,0,.6)}
