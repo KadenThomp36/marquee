@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260713c"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260713e"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -378,7 +378,8 @@ async def register(request: Request, response: Response):
 def user_public(u):
     return {"id": u["id"], "username": u["username"],
             "display_name": (u["display_name"] if "display_name" in u.keys() else None) or u["username"],
-            "avatar": (u["avatar"] if "avatar" in u.keys() else None)}
+            "avatar": (u["avatar"] if "avatar" in u.keys() else None),
+            "banner": (u["banner"] if "banner" in u.keys() else None)}
 
 
 @app.get("/api/me")
@@ -560,6 +561,68 @@ async def upload_avatar(file: UploadFile, user=Depends(current_user)):
 @app.get("/avatars/{fn}")
 def serve_avatar(fn: str):
     path = os.path.join(DATA, "avatars", os.path.basename(fn))
+    if not os.path.exists(path):
+        raise HTTPException(404)
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=3600"})
+
+
+# ---- profile banner (custom upload OR a curated widescreen still from a watched show) ----
+
+@app.get("/api/profile/banner/options")
+def banner_options(user=Depends(current_user)):
+    """Curated 16:9 backdrops drawn from the shows this user actually watches,
+    most-watched first — the pick-a-banner grid."""
+    with db() as con:
+        rows = con.execute("""SELECT s.title, s.backdrop, COUNT(*) n
+            FROM watches w JOIN shows s ON s.id=w.show_id
+            WHERE w.user_id=? AND s.backdrop IS NOT NULL AND s.backdrop!=''
+            GROUP BY s.id ORDER BY n DESC, s.title LIMIT 40""", (user["id"],)).fetchall()
+    seen, out = set(), []
+    for r in rows:
+        if r["backdrop"] in seen:
+            continue
+        seen.add(r["backdrop"])
+        out.append({"title": r["title"], "backdrop": r["backdrop"]})
+    return {"options": out}
+
+
+@app.post("/api/profile/banner")
+async def set_banner(request: Request, user=Depends(current_user)):
+    """Set the banner to a curated image URL, or clear it. Custom uploads use
+    /api/profile/banner/upload."""
+    body = await request.json()
+    if body.get("clear"):
+        banner = None
+    else:
+        url = (body.get("url") or "").strip()
+        if not url.startswith("https://image.tmdb.org/"):
+            raise HTTPException(400, "banner must be a TMDB image url")
+        banner = url
+    with db() as con:
+        con.execute("UPDATE users SET banner=? WHERE id=?", (banner, user["id"]))
+    return {"banner": banner}
+
+
+@app.post("/api/profile/banner/upload")
+async def upload_banner(file: UploadFile, user=Depends(current_user)):
+    data = await file.read()
+    if len(data) > 6_000_000:
+        raise HTTPException(413, "image too large (max 6MB)")
+    ext = {"image/jpeg": ".jpg", "image/webp": ".webp", "image/png": ".png"}.get(file.content_type)
+    if not ext:
+        raise HTTPException(400, "png, jpg or webp only")
+    fn = f"b{user['id']}{ext}"
+    with open(os.path.join(DATA, "banners", fn), "wb") as f:
+        f.write(data)
+    url = f"/banners/{fn}?v={int(time.time())}"
+    with db() as con:
+        con.execute("UPDATE users SET banner=? WHERE id=?", (url, user["id"]))
+    return {"banner": url}
+
+
+@app.get("/banners/{fn}")
+def serve_banner(fn: str):
+    path = os.path.join(DATA, "banners", os.path.basename(fn))
     if not os.path.exists(path):
         raise HTTPException(404)
     return FileResponse(path, headers={"Cache-Control": "public, max-age=3600"})
@@ -2131,6 +2194,22 @@ def biggest_binge(con, uid, lo=None, hi=None):
     return {"date": row["d"], "count": row["c"], "top": top["title"] if top else None}
 
 
+def _heat_by_year(rows):
+    """Fold the (year, dow, hour, count) rows into {'all': [[dow,hour,count]…],
+    '<year>': [...], …} — the all-time grid plus one grid per year, for the
+    watch-clock year selector."""
+    years, allc = {}, {}
+    for r in rows:
+        key = (int(r["d"]), int(r["h"]))
+        years.setdefault(r["y"], {})
+        years[r["y"]][key] = years[r["y"]].get(key, 0) + r["c"]
+        allc[key] = allc.get(key, 0) + r["c"]
+    flat = lambda m: [[d, h, c] for (d, h), c in m.items()]
+    out = {y: flat(m) for y, m in years.items()}
+    out["all"] = flat(allc)
+    return out
+
+
 def compute_stats(uid):
     with db() as con:
         eps_total = con.execute("SELECT COUNT(*) c FROM watches WHERE user_id=?", (uid,)).fetchone()["c"]
@@ -2208,9 +2287,10 @@ def compute_stats(uid):
 
         yearly = con.execute("""SELECT substr(watched_at,1,4) y, COUNT(*) c FROM watches
             WHERE user_id=? GROUP BY y ORDER BY y""", (uid,)).fetchall()
-        heat = con.execute("""SELECT strftime('%w', watched_at, 'localtime') d,
+        heat = con.execute("""SELECT strftime('%Y', watched_at, 'localtime') y,
+              strftime('%w', watched_at, 'localtime') d,
               strftime('%H', watched_at, 'localtime') h, COUNT(*) c
-            FROM watches WHERE user_id=? GROUP BY d, h""", (uid,)).fetchall()
+            FROM watches WHERE user_id=? GROUP BY y, d, h""", (uid,)).fetchall()
 
         # completion buckets over followed shows
         comp = {"finished": 0, "in_progress": 0, "up_to_date": 0, "dropped": 0, "not_started": 0}
@@ -2245,6 +2325,7 @@ def compute_stats(uid):
             ORDER BY rating DESC, title LIMIT 8""", (uid, uid)).fetchall()
 
     days_active = max((date.today() - date.fromisoformat(dates[0])).days, 1) if dates else 1
+    heat_years = _heat_by_year(heat)
     return {
         "episodes": eps_total, "tv_minutes": minutes, "movies": mov["c"],
         "movie_minutes": mov["m"], "shows": shows_n,
@@ -2255,7 +2336,8 @@ def compute_stats(uid):
         "top_shows": [dict(r) for r in top],
         "genres": sorted(({"name": k, "count": v} for k, v in gcount.items()),
                          key=lambda x: -x["count"])[:8],
-        "heatmap": [[int(r["d"]), int(r["h"]), r["c"]] for r in heat],
+        "heatmap": heat_years.get("all", []),
+        "heat_years": heat_years,
         "streak": {"current": current_streak, "longest": longest, "longest_end": longest_end},
         "big_day": big_day,
         "first_watch": dict(first) if first else None,
@@ -3255,6 +3337,7 @@ def startup():
                      "ALTER TABLE users ADD COLUMN avatar TEXT",
                      "ALTER TABLE users ADD COLUMN display_name TEXT",
                      "ALTER TABLE movies ADD COLUMN details TEXT",
+                     "ALTER TABLE users ADD COLUMN banner TEXT",
                      "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
             try:
                 con.execute(stmt)
@@ -3263,6 +3346,7 @@ def startup():
         for u in con.execute("SELECT id FROM users").fetchall():
             ensure_default_list(con, u["id"])
     os.makedirs(os.path.join(DATA, "avatars"), exist_ok=True)
+    os.makedirs(os.path.join(DATA, "banners"), exist_ok=True)
     ensure_vapid()
     threading.Thread(target=refresh_loop, daemon=True).start()
     threading.Thread(target=plex_poll_loop, daemon=True).start()

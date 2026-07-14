@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713c";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713e";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -24,6 +24,7 @@ const I = {
   edit: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M14.5 5.5l4 4M4 20l1-4L16 5a1.5 1.5 0 0 1 2 0l1 1a1.5 1.5 0 0 1 0 2L8 19z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   trash: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M5 7h14M10 7V5h4v2M6.5 7l.8 12h9.4l.8-12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   camera: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg>`,
+  image: `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="5" width="17" height="14" rx="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="8.5" cy="10" r="1.7" fill="currentColor"/><path d="m5 17 4.5-4.5 3.5 3.5 3-2.5 3 3" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   chevR: `<svg viewBox="0 0 24 24" fill="none"><path d="m9 5.5 7 6.5-7 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   eye: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg>`,
   flag: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M5 21V4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M5 4.5h13l-2.4 4 2.4 4H5z" fill="currentColor" opacity=".55"/></svg>`,
@@ -2136,8 +2137,10 @@ routes.profile = async (username) => {
     const advPath = me ? "/stats/advanced" : `/profile/${encodeURIComponent(username)}/stats/advanced`;
     view.innerHTML = `
       ${me ? "" : `<div class="page-head"><a class="crumb" href="#/profile">${backIcon} Your profile</a></div>`}
-      <div class="prof-hero reveal">
-        ${me ? `<a class="prof-gear" href="#/settings" title="Settings & Plex" aria-label="Settings">${gearIcon()}</a>` : ""}
+      <div class="prof-hero reveal${p.banner ? " has-banner" : ""}">
+        <div class="prof-banner" id="banner">${p.banner ? `<img src="${esc(p.banner)}" alt="">` : ""}<div class="pb-scrim"></div></div>
+        ${me ? `<a class="prof-gear" href="#/settings" title="Settings & Plex" aria-label="Settings">${gearIcon()}</a>
+        <button class="banner-edit" id="banneredit" title="Change banner" aria-label="Change banner">${I.image}</button>` : ""}
         <div class="prof-av" id="avwrap">${avatarHTML(p, "xl")}
           ${me ? `<button class="av-edit" id="avedit" title="Change photo">${I.camera}</button>
           <input type="file" id="avfile" accept="image/png,image/jpeg,image/webp" hidden>` : ""}</div>
@@ -2181,6 +2184,12 @@ routes.profile = async (username) => {
         paintAvatars(); toast("Photo updated");
       };
       $("#editprof").onclick = () => editProfile(p);
+      $("#banneredit").onclick = () => bannerSheet(p, url => {
+        p.banner = url; delete CACHE[ppath];
+        const bn = $("#banner");
+        if (bn) bn.innerHTML = (url ? `<img src="${esc(url)}" alt="">` : "") + `<div class="pb-scrim"></div>`;
+        $(".prof-hero")?.classList.toggle("has-banner", !!url);
+      });
       $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
     }
     wireFavorites(view, me);
@@ -2221,6 +2230,43 @@ function editProfile(p) {
     }
   });
 }
+// Banner picker — upload your own, or a curated widescreen still from a show you watch.
+// onSet(urlOrNull) applies the choice (null clears).
+async function bannerSheet(p, onSet) {
+  const s = sheet(`<div class="sh-t">Profile banner</div>
+    <div class="bn-actions">
+      <button class="btn" id="bnupload">${I.camera} Upload your own</button>
+      ${p.banner ? `<button class="btn ghost" id="bnclear">Remove banner</button>` : ""}
+    </div>
+    <input type="file" id="bnfile" accept="image/png,image/jpeg,image/webp" hidden>
+    <div class="bn-cap">From shows you watch</div>
+    <div class="bn-grid" id="bngrid"><div class="bn-load">Loading suggestions…</div></div>`,
+    { cls: "editor bannersheet" });
+  api("/profile/banner/options").then(({ options }) => {
+    const g = $("#bngrid", s.el); if (!g) return;
+    g.innerHTML = options.length
+      ? options.map(o => `<button class="bn-opt" data-url="${esc(o.backdrop)}" title="${esc(o.title)}">
+          <img loading="lazy" src="${esc(o.backdrop)}" alt=""><span class="bn-ttl">${esc(o.title)}</span></button>`).join("")
+      : `<div class="bn-empty">Watch a few shows and their artwork will show up here.</div>`;
+    $$(".bn-opt", g).forEach(b => b.onclick = async () => {
+      try { await api("/profile/banner", { body: { url: b.dataset.url } }); onSet(b.dataset.url); s.close(); }
+      catch { toast("Couldn't set banner"); }
+    });
+  }).catch(() => { const g = $("#bngrid", s.el); if (g) g.innerHTML = `<div class="bn-empty">Couldn't load suggestions.</div>`; });
+  $("#bnupload", s.el).onclick = () => $("#bnfile", s.el).click();
+  $("#bnfile", s.el).onchange = async () => {
+    const f = $("#bnfile", s.el).files[0]; if (!f) return;
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const r = await api("/profile/banner/upload", { method: "POST", body: fd });
+      onSet(r.banner); s.close(); toast("Banner updated");
+    } catch (e) { toast(e.message || "Upload failed"); }
+  };
+  if ($("#bnclear", s.el)) $("#bnclear", s.el).onclick = async () => {
+    try { await api("/profile/banner", { body: { clear: true } }); onSet(null); s.close(); } catch {}
+  };
+}
+
 const statsIcon = () => `<svg class="ico" viewBox="0 0 24 24"><path d="M5 20V11M12 20V4.5M19 20v-6.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>`;
 const gearIcon = () => `<svg class="ico" viewBox="0 0 24 24"><path d="M12 8.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8Zm8.6 3.4c0 .6-.05 1.1-.15 1.65l2 1.55-2 3.45-2.35-.95c-.85.7-1.5 1.1-2.5 1.45L15.2 21.7H8.8l-.4-2.55c-1-.35-1.65-.75-2.5-1.45l-2.35.95-2-3.45 2-1.55A9.2 9.2 0 0 1 3.4 12c0-.6.05-1.1.15-1.65l-2-1.55 2-3.45 2.35.95c.85-.7 1.5-1.1 2.5-1.45L8.8 2.3h6.4l.4 2.55c1 .35 1.65.75 2.5 1.45l2.35-.95 2 3.45-2 1.55c.1.55.15 1.05.15 1.65Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 
@@ -2660,6 +2706,15 @@ function colBar(rows) {
    are read back via dataset, so untrusted titles never touch innerHTML. */
 function wireStats(box) {
   box.querySelectorAll(".linechart").forEach(wireLineChart);
+  // watch-clock year selector: swap the grid + caption for the picked year (no refetch)
+  const ysel = box.querySelector("#heatyr");
+  if (ysel) ysel.onchange = () => {
+    const hb = box.querySelector("#heatbox"); if (!hb) return;
+    let years; try { years = JSON.parse(hb.dataset.heat); } catch { return; }
+    const { grid, caption } = heatInner(years[ysel.value] || []);
+    hb.innerHTML = grid;
+    const cap = box.querySelector("#heatcap"); if (cap) cap.textContent = caption;
+  };
   if (box._statsWired) return;
   box._statsWired = true;
   const marks = ".heat-c[data-tip-title],.rbar[data-tip-title],.seg[data-tip-title],.colbar[data-tip-title]";
@@ -2714,6 +2769,30 @@ const RATE_RAMP = ["#e0524a", "#e2664a", "#e58248", "#e89c46", "#ecb544",
   "#d8c13f", "#a9c247", "#7dc157", "#57c06a", "#3fbf6f"];
 const rateColor = s => RATE_RAMP[Math.max(1, Math.min(10, Math.round(s))) - 1];
 const hourLbl = c => c === 0 ? "12 AM" : c < 12 ? c + " AM" : c === 12 ? "12 PM" : (c - 12) + " PM";
+const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WD_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+// Build the watch-clock grid + a "busiest…" caption for one set of [dow,hour,count]
+// cells (one year or all-time). Reused on every year-selector change.
+function heatInner(cells) {
+  const hm = Array.from({ length: 7 }, () => Array(24).fill(0));
+  (cells || []).forEach(([dow, h, c]) => { hm[dow][h] = c; });
+  const total = hm.flat().reduce((a, b) => a + b, 0);
+  const max = Math.max(...hm.flat(), 1);
+  let peak = { d: 0, h: 0, c: 0 };
+  hm.forEach((row, r) => row.forEach((v, c) => { if (v > peak.c) peak = { d: r, h: c, c: v }; }));
+  const grid = `<div class="heat"><div class="heat-grid">
+      ${WD.map((n, r) => `<div class="heat-lbl">${n}</div>` + hm[r].map((v, c) =>
+        `<div class="heat-c${r === peak.d && c === peak.h && v ? " peak" : ""}" style="--a:${v ? (0.12 + 0.88 * v / max).toFixed(2) : 0}"
+          data-tip-title="${WD_FULL[r]} · ${hourLbl(c)}" data-tip-val="${v} watched · ${total ? Math.round(100 * v / total) : 0}% of the total"></div>`).join("")).join("")}
+      <div></div>${[0, 6, 12, 18].map(h => `<div class="heat-h" style="grid-column:${h + 2} / span 6">${hourLbl(h)}</div>`).join("")}
+    </div>
+    <div class="heat-legend"><span>quieter</span><i style="--a:.16"></i><i style="--a:.42"></i><i style="--a:.7"></i><i style="--a:1"></i><span>busier</span></div></div>`;
+  const caption = total
+    ? `when you watch${peak.c ? ` · busiest ${WD_FULL[peak.d]} around ${hourLbl(peak.h)}` : ""} · hover a square`
+    : "no watches recorded for this range";
+  return { grid, caption };
+}
 
 function statsSection(d) {
   const months = [];
@@ -2727,22 +2806,9 @@ function statsSection(d) {
   const monLabel = ym => { const [y, mo] = ym.split("-"); return MONTHS[+mo - 1] + " " + y; };
   const peakM = months[mVals.indexOf(Math.max(...mVals))];
 
-  const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const wdFull = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const hm = Array.from({ length: 7 }, () => Array(24).fill(0));
-  (d.heatmap || []).forEach(([dow, h, c]) => { hm[dow][h] = c; });
-  const hmTotal = hm.flat().reduce((a, b) => a + b, 0) || 1;
-  const hmMax = Math.max(...hm.flat(), 1);
-  let peak = { d: 0, h: 0, c: 0 };
-  hm.forEach((row, r) => row.forEach((v, c) => { if (v > peak.c) peak = { d: r, h: c, c: v }; }));
-  const heat = `<div class="heat">
-    <div class="heat-grid">
-      ${wd.map((n, r) => `<div class="heat-lbl">${n}</div>` + hm[r].map((v, c) =>
-        `<div class="heat-c${r === peak.d && c === peak.h && v ? " peak" : ""}" style="--a:${v ? (0.12 + 0.88 * v / hmMax).toFixed(2) : 0}"
-          data-tip-title="${wdFull[r]} · ${hourLbl(c)}" data-tip-val="${v} watched · ${Math.round(100 * v / hmTotal)}% of the week"></div>`).join("")).join("")}
-      <div></div>${[0, 6, 12, 18].map(h => `<div class="heat-h" style="grid-column:${h + 2} / span 6">${hourLbl(h)}</div>`).join("")}
-    </div>
-    <div class="heat-legend"><span>quieter</span><i style="--a:.16"></i><i style="--a:.42"></i><i style="--a:.7"></i><i style="--a:1"></i><span>busier</span></div></div>`;
+  const heatYears = d.heat_years || { all: d.heatmap || [] };
+  const hYears = Object.keys(heatYears).filter(y => y !== "all").sort().reverse();
+  const h0 = heatInner(heatYears.all || d.heatmap || []);
 
   const totalMin = d.tv_minutes + d.movie_minutes;
   const comp = d.completion || {};
@@ -2791,9 +2857,12 @@ function statsSection(d) {
       <div class="sub">episodes per year, all time · drag to read a year</div>
       ${lineChart(d.yearly.map(y => y.y), d.yearly.map(y => y.c), { series: "episodes", valFmt: v => v.toLocaleString() + " episodes" })}</div>
 
-    <div class="chart reveal"><h3>The watch clock</h3>
-      <div class="sub">when you actually watch${peak.c ? ` · busiest ${wdFull[peak.d]} around ${hourLbl(peak.h)}` : ""} · hover a square</div>
-      ${heat}</div>
+    <div class="chart reveal"><div class="ch-head"><h3>The watch clock</h3>
+      ${hYears.length ? `<select class="yr-sel" id="heatyr" aria-label="Year">
+        <option value="all">All time</option>
+        ${hYears.map(y => `<option value="${y}">${y}</option>`).join("")}</select>` : ""}</div>
+      <div class="sub" id="heatcap">${h0.caption}</div>
+      <div id="heatbox" data-heat='${esc(JSON.stringify(heatYears))}'>${h0.grid}</div></div>
 
     <div class="charts2 reveal">
       <div class="chart"><h3>Top shows by time</h3><div class="sub">your biggest commitments</div>

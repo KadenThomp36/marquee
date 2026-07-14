@@ -1253,6 +1253,44 @@ a.h-row:hover{border-color:var(--line-2)}
 .prof-hero .prof-name{font-weight:800;font-size:23px;letter-spacing:-.01em}
 .prof-hero .prof-sub{color:var(--mut);font-size:13px;margin:3px 0 16px}
 .prof-hero .btn{margin-top:2px}
+/* full-bleed profile banner behind the whole hero, with a scrim so text stays legible */
+.prof-banner{position:absolute;top:0;left:50%;transform:translateX(-50%);width:100vw;height:100%;
+  overflow:hidden;z-index:0;pointer-events:none}
+.prof-banner img{width:100%;height:100%;object-fit:cover;object-position:center 30%}
+.pb-scrim{position:absolute;inset:0;background:
+  linear-gradient(90deg,rgba(15,13,10,.5),rgba(15,13,10,0) 28% 72%,rgba(15,13,10,.5)),
+  linear-gradient(180deg,rgba(15,13,10,.34) 0%,rgba(15,13,10,.68) 46%,rgba(15,13,10,.9) 72%,var(--bg) 100%)}
+.prof-hero:not(.has-banner) .prof-banner{display:none}
+.prof-hero.has-banner{padding-top:30px}
+.prof-hero.has-banner .prof-name{text-shadow:0 1px 10px rgba(0,0,0,.7)}
+.prof-hero.has-banner .prof-sub{color:var(--ink-2);text-shadow:0 1px 8px rgba(0,0,0,.75)}
+.prof-hero > :not(.prof-banner){position:relative;z-index:1}
+.prof-hero .banner-edit{position:absolute;top:2px;left:0;z-index:2;width:40px;height:40px;border-radius:50%;
+  display:grid;place-items:center;color:var(--ink-2);border:1px solid var(--line);
+  background:rgba(15,13,10,.5);backdrop-filter:blur(6px)}
+.prof-hero .banner-edit:hover{color:var(--amber);border-color:var(--amber-dim)}
+.prof-hero .banner-edit svg{width:20px;height:20px}
+.prof-hero.has-banner .prof-gear{background:rgba(15,13,10,.5);backdrop-filter:blur(6px)}
+/* banner picker sheet */
+.bannersheet .bn-actions{display:flex;gap:8px}
+.bannersheet .bn-actions .btn{flex:1;justify-content:center}
+.bn-cap{color:var(--ink-2);font-size:12.5px;font-weight:650;margin:14px 0 9px}
+.bn-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:50vh;overflow-y:auto;
+  margin:0 -2px;padding:2px}
+.bn-opt{position:relative;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background:var(--panel-2);
+  border:1px solid var(--line);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.bn-opt img{width:100%;height:100%;object-fit:cover;display:block}
+.bn-opt:hover{border-color:var(--amber)}
+.bn-opt:active{transform:scale(.98)}
+.bn-ttl{position:absolute;left:0;right:0;bottom:0;padding:14px 7px 5px;font-size:10.5px;font-weight:650;
+  color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.82));
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bn-empty,.bn-load{grid-column:1 / -1;color:var(--mut);font-size:13px;text-align:center;padding:26px 8px}
+/* year selector (watch clock) — mirrors the audience select */
+.yr-sel{flex:none;appearance:none;-webkit-appearance:none;padding:5px 26px 5px 10px;border-radius:8px;
+  border:1px solid var(--line-2);color:var(--ink);font:inherit;font-size:12px;font-weight:700;
+  font-variant-numeric:tabular-nums;
+  background:var(--panel-2) url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23988f80" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>') no-repeat right 8px center/11px}
 .headrow{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
   border:1px solid var(--line);border-radius:var(--r-s);overflow:hidden;max-width:460px;margin:0 auto 18px}
 .headrow .hp{background:var(--panel);padding:13px 6px}
