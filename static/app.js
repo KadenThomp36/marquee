@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713h";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713i";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2243,82 +2243,46 @@ async function bannerSheet(p, onSet) {
       ${p.banner ? `<button class="btn ghost" id="bnclear">Remove banner</button>` : ""}
     </div>
     <input type="file" id="bnfile" accept="image/png,image/jpeg,image/webp" hidden>
-    <div class="bn-cap">From shows you watch</div>
-    <div class="deck-wrap">
-      <div class="deck" id="deck"><div class="bn-load">Loading suggestions…</div></div>
-    </div>
-    <div class="deck-foot" id="deckfoot" hidden>
-      <button class="deck-arrow" id="dprev" aria-label="Previous">${I.chevS}</button>
-      <div class="deck-mid"><span class="deck-title" id="dtitle"></span><span class="deck-pos" id="dpos"></span></div>
-      <button class="deck-arrow" id="dnext" aria-label="Next">${I.chevR}</button>
-    </div>
+    <div class="bn-cap">From shows you watch <span class="bn-hint">tap to open · again to use</span></div>
+    <div class="stack" id="stack"><div class="bn-load">Loading suggestions…</div></div>
     <button class="btn pri deck-use" id="duse" hidden>Use this banner</button>`,
     { cls: "editor bannersheet" });
 
-  const deck = $("#deck", s.el);
-  let opts = [], cards = [], idx = 0, drag = null;
+  const stack = $("#stack", s.el);
+  let opts = [], cards = [], active = null;
 
   const pick = async o => {
     try { await api("/profile/banner", { body: { url: o.backdrop } }); onSet(o.backdrop); s.close(); }
     catch { toast("Couldn't set banner"); }
   };
-  const place = () => {
-    const n = opts.length;
-    cards.forEach((c, i) => {
-      const depth = (i - idx + n) % n;
-      c.style.setProperty("--d", Math.min(depth, 4));
-      c.style.transform = ""; c.style.opacity = ""; c.style.transition = "";
-      c.style.zIndex = n - Math.min(depth, n);
-      c.classList.toggle("front", depth === 0);
-      c.classList.toggle("buried", depth > 3);
-    });
-    $("#dtitle", s.el).textContent = opts[idx].title;
-    $("#dpos", s.el).textContent = `${idx + 1} / ${n}`;
+  const setActive = (c, scroll) => {
+    if (c === active) return;
+    active?.classList.remove("active");
+    active = c; c.classList.add("active");
+    const use = $("#duse", s.el); if (use) use.textContent = `Use ${c.dataset.title}`;
+    if (scroll) c.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
-  const advance = dir => { idx = (idx + dir + opts.length) % opts.length; place(); };
-
-  const onDown = e => {
-    const front = cards[idx];
-    if (!front || !front.contains(e.target)) return;
-    drag = { x0: e.clientX, dx: 0, f: front };
-    front.style.transition = "none";
-    try { deck.setPointerCapture(e.pointerId); } catch { /* no active pointer (synthetic) */ }
-  };
-  const onMove = e => {
-    if (!drag) return;
-    drag.dx = e.clientX - drag.x0;
-    drag.f.style.transform = `translate(${drag.dx}px, ${Math.abs(drag.dx) * 0.03}px) rotate(${drag.dx * 0.04}deg)`;
-  };
-  const onUp = () => {
-    if (!drag) return;
-    const { dx, f } = drag; drag = null;
-    if (Math.abs(dx) < 8) { pick(opts[idx]); return; }            // a tap = choose it
-    if (Math.abs(dx) > 66) {                                       // flung far enough = flip
-      const dir = dx < 0 ? 1 : -1;
-      f.style.transition = "transform .22s ease, opacity .22s ease";
-      f.style.transform = `translate(${dx < 0 ? -520 : 520}px, 30px) rotate(${dx < 0 ? -22 : 22}deg)`;
-      f.style.opacity = 0;
-      setTimeout(() => advance(dir), 190);
-    } else { place(); }                                            // spring back
-  };
-  deck.addEventListener("pointerdown", onDown);
-  deck.addEventListener("pointermove", onMove);
-  deck.addEventListener("pointerup", onUp);
-  deck.addEventListener("pointercancel", onUp);
 
   api("/profile/banner/options").then(({ options }) => {
-    if (!deck.isConnected) return;
-    opts = options;
-    if (!opts.length) { deck.innerHTML = `<div class="bn-empty">Watch a few shows and their artwork shows up here.</div>`; return; }
-    deck.innerHTML = opts.map(o => `<div class="deck-card"><img loading="lazy" src="${esc(o.backdrop)}" alt="" draggable="false"><span class="bn-ttl">${esc(o.title)}</span></div>`).join("");
-    cards = $$(".deck-card", deck);
-    place();
-    $("#deckfoot", s.el).hidden = false;
-    $("#duse", s.el).hidden = false;
-    $("#dprev", s.el).onclick = () => advance(-1);
-    $("#dnext", s.el).onclick = () => advance(1);
-    $("#duse", s.el).onclick = () => pick(opts[idx]);
-  }).catch(() => { if (deck.isConnected) deck.innerHTML = `<div class="bn-empty">Couldn't load suggestions.</div>`; });
+    if (!stack.isConnected) return;
+    opts = options.slice(0, 20);
+    if (!opts.length) { stack.innerHTML = `<div class="bn-empty">Watch a few shows and their artwork shows up here.</div>`; return; }
+    stack.innerHTML = opts.map((o, i) => `<button class="stack-card" data-i="${i}" data-title="${esc(o.title)}">
+      <img loading="lazy" src="${esc(o.backdrop)}" alt="" draggable="false"><span class="sc-bar"><span class="sc-t">${esc(o.title)}</span></span></button>`).join("");
+    cards = $$(".stack-card", stack);
+    const hoverable = matchMedia("(hover:hover)").matches;
+    cards.forEach(c => {
+      if (hoverable) c.addEventListener("pointerenter", () => setActive(c, false));  // desktop: hover pops it
+      c.addEventListener("click", () => {                                             // tap opens; tap the open one to use it
+        if (c.classList.contains("active")) pick(opts[+c.dataset.i]);
+        else setActive(c, true);
+      });
+    });
+    setActive(cards[0], false);
+    const use = $("#duse", s.el);
+    use.hidden = false;
+    use.onclick = () => { if (active) pick(opts[+active.dataset.i]); };
+  }).catch(() => { if (stack.isConnected) stack.innerHTML = `<div class="bn-empty">Couldn't load suggestions.</div>`; });
 
   $("#bnupload", s.el).onclick = () => $("#bnfile", s.el).click();
   $("#bnfile", s.el).onchange = async () => {
