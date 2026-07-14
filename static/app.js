@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713e";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713f";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2239,15 +2239,14 @@ async function bannerSheet(p, onSet) {
       ${p.banner ? `<button class="btn ghost" id="bnclear">Remove banner</button>` : ""}
     </div>
     <input type="file" id="bnfile" accept="image/png,image/jpeg,image/webp" hidden>
-    <div class="bn-cap">From shows you watch</div>
-    <div class="bn-grid" id="bngrid"><div class="bn-load">Loading suggestions…</div></div>`,
+    <div class="bn-cap">From shows you watch <span class="bn-hint">swipe →</span></div>
+    <div class="bn-rail" id="bngrid"><div class="bn-load">Loading suggestions…</div></div>`,
     { cls: "editor bannersheet" });
   api("/profile/banner/options").then(({ options }) => {
     const g = $("#bngrid", s.el); if (!g) return;
-    g.innerHTML = options.length
-      ? options.map(o => `<button class="bn-opt" data-url="${esc(o.backdrop)}" title="${esc(o.title)}">
-          <img loading="lazy" src="${esc(o.backdrop)}" alt=""><span class="bn-ttl">${esc(o.title)}</span></button>`).join("")
-      : `<div class="bn-empty">Watch a few shows and their artwork will show up here.</div>`;
+    if (!options.length) { g.innerHTML = `<div class="bn-empty">Watch a few shows and their artwork will show up here.</div>`; return; }
+    g.innerHTML = options.map(o => `<button class="bn-opt" data-url="${esc(o.backdrop)}" title="${esc(o.title)}">
+      <img loading="lazy" src="${esc(o.backdrop)}" alt=""><span class="bn-ttl">${esc(o.title)}</span></button>`).join("");
     $$(".bn-opt", g).forEach(b => b.onclick = async () => {
       try { await api("/profile/banner", { body: { url: b.dataset.url } }); onSet(b.dataset.url); s.close(); }
       catch { toast("Couldn't set banner"); }
@@ -2586,19 +2585,24 @@ function vtipHide() { if (_vtip) _vtip.hidden = true; }
 
 // Light haptic tick. iOS Safari exposes no navigator.vibrate; a programmatic click
 // on a <label> bound to a hidden <input switch> fires the system haptic (iOS 17.4+).
-let _hapticSwitch;
+let _hapticLabel;
 function hapticTick() {
-  if (navigator.vibrate) { navigator.vibrate(7); return; }
-  if (!_hapticSwitch) {
-    const l = document.createElement("label");
-    l.setAttribute("aria-hidden", "true");
-    l.style.cssText = "position:absolute;left:-9999px;width:0;height:0;overflow:hidden;pointer-events:none";
-    const i = document.createElement("input");
-    i.type = "checkbox"; i.setAttribute("switch", "");
-    l.appendChild(i); document.body.appendChild(l);
-    _hapticSwitch = l;
+  if (navigator.vibrate) { navigator.vibrate(7); return; }   // Android / desktop
+  // iOS Safari (17.4+) exposes no navigator.vibrate; clicking a <label> bound to a
+  // hidden <input switch> triggers the system haptic. Must be display:none (not
+  // off-screen) and fired synchronously inside the touch handler.
+  if (!_hapticLabel) {
+    const label = document.createElement("label");
+    label.setAttribute("aria-hidden", "true");
+    label.style.display = "none";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.setAttribute("switch", "");
+    label.appendChild(input);
+    document.head.appendChild(label);
+    _hapticLabel = label;
   }
-  _hapticSwitch.click();
+  _hapticLabel.click();
 }
 
 let _chartSeq = 0;

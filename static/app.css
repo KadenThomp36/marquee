@@ -754,6 +754,8 @@ a.up-row:hover{border-color:var(--line-2)}
 .pcard .have svg{width:15px;height:15px}
 
 /* ── stats ── */
+/* dashboard, not prose — dragging the charts must never long-press-select text or pop the iOS callout */
+.stats-wrap{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
 @media(max-width:700px){.tiles{grid-template-columns:1fr 1fr}}
 /* jewel-box stat tile: colored accent edge + tinted value, faint corner glow */
@@ -1254,38 +1256,52 @@ a.h-row:hover{border-color:var(--line-2)}
 .prof-hero .prof-sub{color:var(--mut);font-size:13px;margin:3px 0 16px}
 .prof-hero .btn{margin-top:2px}
 /* full-bleed profile banner behind the whole hero, with a scrim so text stays legible */
-.prof-banner{position:absolute;top:0;left:50%;transform:translateX(-50%);width:100vw;height:100%;
+/* profile banner: a widescreen strip across the top of the hero (Discord-style),
+   with the avatar overlapping its lower edge. A fixed strip height keeps 16:9 art
+   from being crushed into a near-square crop in the tall hero. */
+.prof-banner{position:absolute;top:0;left:50%;margin-left:-50vw;width:100vw;height:152px;
   overflow:hidden;z-index:0;pointer-events:none}
-.prof-banner img{width:100%;height:100%;object-fit:cover;object-position:center 30%}
-.pb-scrim{position:absolute;inset:0;background:
-  linear-gradient(90deg,rgba(15,13,10,.5),rgba(15,13,10,0) 28% 72%,rgba(15,13,10,.5)),
-  linear-gradient(180deg,rgba(15,13,10,.34) 0%,rgba(15,13,10,.68) 46%,rgba(15,13,10,.9) 72%,var(--bg) 100%)}
+@media(min-width:701px){.prof-banner{height:220px}}
+.prof-banner img{width:100%;height:100%;object-fit:cover;object-position:center 35%}
+.pb-scrim{position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(15,13,10,.14),transparent 32%,rgba(15,13,10,.38) 80%,var(--bg))}
 .prof-hero:not(.has-banner) .prof-banner{display:none}
-.prof-hero.has-banner{padding-top:30px}
-.prof-hero.has-banner .prof-name{text-shadow:0 1px 10px rgba(0,0,0,.7)}
-.prof-hero.has-banner .prof-sub{color:var(--ink-2);text-shadow:0 1px 8px rgba(0,0,0,.75)}
-.prof-hero > :not(.prof-banner){position:relative;z-index:1}
-.prof-hero .banner-edit{position:absolute;top:2px;left:0;z-index:2;width:40px;height:40px;border-radius:50%;
-  display:grid;place-items:center;color:var(--ink-2);border:1px solid var(--line);
-  background:rgba(15,13,10,.5);backdrop-filter:blur(6px)}
-.prof-hero .banner-edit:hover{color:var(--amber);border-color:var(--amber-dim)}
+.prof-hero.has-banner{padding-top:152px}
+@media(min-width:701px){.prof-hero.has-banner{padding-top:220px}}
+.prof-hero.has-banner .prof-av{margin-top:-54px}
+.prof-hero.has-banner .prof-av .avatar{box-shadow:0 0 0 4px var(--bg)}
+.prof-hero .prof-av{z-index:1}
+/* corner buttons sit above the banner (absolute, not clobbered by content stacking) */
+.prof-hero .prof-gear,.prof-hero .banner-edit{position:absolute;top:10px;z-index:3;width:40px;height:40px;
+  border-radius:50%;display:grid;place-items:center;color:var(--ink-2);border:1px solid var(--line);
+  background:var(--panel)}
+.prof-hero .prof-gear{right:8px}
+.prof-hero .banner-edit{left:8px}
+.prof-hero .prof-gear svg{width:21px;height:21px}
 .prof-hero .banner-edit svg{width:20px;height:20px}
-.prof-hero.has-banner .prof-gear{background:rgba(15,13,10,.5);backdrop-filter:blur(6px)}
+.prof-hero .prof-gear:hover,.prof-hero .banner-edit:hover{color:var(--amber);border-color:var(--amber-dim)}
+.prof-hero.has-banner .prof-gear,.prof-hero.has-banner .banner-edit{color:#fff;
+  border-color:rgba(255,255,255,.28);background:rgba(15,13,10,.5);backdrop-filter:blur(6px)}
 /* banner picker sheet */
 .bannersheet .bn-actions{display:flex;gap:8px}
 .bannersheet .bn-actions .btn{flex:1;justify-content:center}
-.bn-cap{color:var(--ink-2);font-size:12.5px;font-weight:650;margin:14px 0 9px}
-.bn-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-height:50vh;overflow-y:auto;
-  margin:0 -2px;padding:2px}
-.bn-opt{position:relative;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background:var(--panel-2);
-  border:1px solid var(--line);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.bn-cap{display:flex;align-items:baseline;justify-content:space-between;color:var(--ink-2);
+  font-size:12.5px;font-weight:650;margin:14px 2px 10px}
+.bn-hint{color:var(--mut);font-size:11px;font-weight:600}
+/* horizontal swipe rail — cards snap so you can flick through every backdrop */
+.bn-rail{display:flex;gap:11px;overflow-x:auto;scroll-snap-type:x mandatory;scroll-padding:2px;
+  padding:2px 2px 10px;margin:0 -2px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.bn-rail::-webkit-scrollbar{display:none}
+.bn-opt{position:relative;flex:0 0 78%;max-width:340px;aspect-ratio:16/9;scroll-snap-align:center;
+  border-radius:11px;overflow:hidden;background:var(--panel-2);border:1px solid var(--line);
+  cursor:pointer;-webkit-tap-highlight-color:transparent;transition:border-color .12s,transform .12s}
 .bn-opt img{width:100%;height:100%;object-fit:cover;display:block}
-.bn-opt:hover{border-color:var(--amber)}
-.bn-opt:active{transform:scale(.98)}
-.bn-ttl{position:absolute;left:0;right:0;bottom:0;padding:14px 7px 5px;font-size:10.5px;font-weight:650;
-  color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.82));
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bn-empty,.bn-load{grid-column:1 / -1;color:var(--mut);font-size:13px;text-align:center;padding:26px 8px}
+.bn-opt:hover{border-color:var(--amber);transform:translateY(-2px)}
+.bn-opt:active{transform:scale(.985)}
+.bn-ttl{position:absolute;left:0;right:0;bottom:0;padding:20px 11px 8px;font-size:12px;font-weight:700;
+  color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.85));
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 4px rgba(0,0,0,.6)}
+.bn-empty,.bn-load{color:var(--mut);font-size:13px;text-align:center;padding:26px 8px;flex:1}
 /* year selector (watch clock) — mirrors the audience select */
 .yr-sel{flex:none;appearance:none;-webkit-appearance:none;padding:5px 26px 5px 10px;border-radius:8px;
   border:1px solid var(--line-2);color:var(--ink);font:inherit;font-size:12px;font-weight:700;
