@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260712d";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2115,14 +2115,14 @@ async function loadMembers(host) {
 async function loadProfileStats(statsPath, advPath, host) {
   const box = $("#prof-stats", host); if (!box) return;
   const c = cached(statsPath);
-  const paint = d => { if ($("#prof-stats", host)) box.innerHTML = statsSection(d); };
+  const paint = d => { if ($("#prof-stats", host)) { box.innerHTML = statsSection(d); wireStats(box); } };
   if (c.stale) paint(c.stale);
   c.refresh(() => !!$("#prof-stats", host), paint);
   /* advanced stats stream in under the core numbers */
   try {
     const a = await api(advPath);
     const adv = $("#prof-adv", host);
-    if (adv && a) adv.innerHTML = advancedSection(a);
+    if (adv && a) { adv.innerHTML = advancedSection(a); wireStats(adv); }
   } catch { /* advanced is best-effort */ }
 }
 
@@ -2510,7 +2510,51 @@ routes.history = (tab = "tv") => {
 };
 
 /* ---------- stats ---------- */
-/* ---------- data viz primitives (axis · grid · area fill · emphasized endpoint) ---------- */
+/* ---------- data viz primitives (axis · grid · area fill · interactive hover) ---------- */
+// Shared floating tooltip. Labels can be untrusted (show titles, genre names from
+// TMDB) so every string goes in via textContent, never innerHTML concatenation.
+let _vtip;
+function vtipEl() {
+  if (!_vtip) { _vtip = document.createElement("div"); _vtip.className = "viztip"; _vtip.hidden = true; document.body.appendChild(_vtip); }
+  return _vtip;
+}
+function vtipShow(x, y, title, rows) {
+  const t = vtipEl(); t.textContent = "";
+  const h = document.createElement("div"); h.className = "vt-h"; h.textContent = title; t.appendChild(h);
+  (rows || []).forEach(r => {
+    const row = document.createElement("div"); row.className = "vt-r";
+    if (r.color) { const k = document.createElement("span"); k.className = "vt-k"; k.style.background = r.color; row.appendChild(k); }
+    const l = document.createElement("span"); l.className = "vt-l"; l.textContent = r.label; row.appendChild(l);
+    const v = document.createElement("span"); v.className = "vt-v"; v.textContent = r.value; row.appendChild(v);
+    t.appendChild(row);
+  });
+  t.hidden = false;
+  const w = t.offsetWidth, hh = t.offsetHeight, pad = 8;
+  let px = x + 14, py = y - hh - 14;
+  if (px + w + pad > innerWidth) px = x - w - 14;
+  px = Math.max(pad, Math.min(px, innerWidth - w - pad));
+  if (py < pad) py = y + 20;
+  t.style.left = px + "px"; t.style.top = py + "px";
+}
+function vtipHide() { if (_vtip) _vtip.hidden = true; }
+
+// Light haptic tick. iOS Safari exposes no navigator.vibrate; a programmatic click
+// on a <label> bound to a hidden <input switch> fires the system haptic (iOS 17.4+).
+let _hapticSwitch;
+function hapticTick() {
+  if (navigator.vibrate) { navigator.vibrate(7); return; }
+  if (!_hapticSwitch) {
+    const l = document.createElement("label");
+    l.setAttribute("aria-hidden", "true");
+    l.style.cssText = "position:absolute;left:-9999px;width:0;height:0;overflow:hidden;pointer-events:none";
+    const i = document.createElement("input");
+    i.type = "checkbox"; i.setAttribute("switch", "");
+    l.appendChild(i); document.body.appendChild(l);
+    _hapticSwitch = l;
+  }
+  _hapticSwitch.click();
+}
+
 let _chartSeq = 0;
 const niceStep = x => {
   const e = Math.floor(Math.log10(x || 1)), f = (x || 1) / Math.pow(10, e);
@@ -2521,53 +2565,155 @@ function niceTicks(max, count = 3) {
   for (let t = step; t <= max + step * 0.01; t += step) out.push(Math.round(t));
   return out.length ? out : [max];
 }
-/* area/line chart: baseline axis, faint gridlines w/ value labels, gradient fill, bright endpoint */
-function areaSVG(labels, vals, { yearMarks = false, unit = "" } = {}) {
+/* Interactive area/line chart: gridlines, gradient fill, amber line, and a
+   crosshair + tooltip that snaps to the nearest point on hover/drag (wired by
+   wireLineChart after mount). labelFmt/valFmt shape the tooltip readout. */
+function lineChart(labels, vals, { yearMarks = false, series = "watches", labelFmt = null, valFmt = null } = {}) {
   const n = vals.length || 1;
   const max = Math.max(...vals, 1);
-  const W = 720, H = 210, padL = 34, padR = 14, padT = 16, padB = 26;
+  const W = 720, H = 224, padL = 36, padR = 16, padT = 18, padB = 32;
   const iw = W - padL - padR, ih = H - padT - padB;
   const X = i => padL + (n <= 1 ? iw / 2 : iw * i / (n - 1));
   const Y = v => padT + ih * (1 - v / max);
   const ticks = niceTicks(max, 3);
   const grid = [0, ...ticks].map(t => `<line class="grid-l" x1="${padL}" x2="${W - padR}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}"/>`
-    + (t ? `<text class="axis" x="${padL - 7}" y="${(Y(t) + 3.4).toFixed(1)}" text-anchor="end">${t}</text>` : "")).join("");
+    + (t ? `<text class="axis" x="${padL - 8}" y="${(Y(t) + 3.4).toFixed(1)}" text-anchor="end">${t}</text>` : "")).join("");
   const line = vals.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ");
   const area = `M${X(0).toFixed(1)} ${Y(0).toFixed(1)} `
     + vals.map((v, i) => `L${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ")
     + ` L${X(n - 1).toFixed(1)} ${Y(0).toFixed(1)} Z`;
   const lbls = labels.map((m, i) => {
     const show = yearMarks ? String(m).endsWith("-01") : (n <= 12 || i % Math.ceil(n / 12) === 0 || i === n - 1);
-    return show ? `<text class="axis" x="${X(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${yearMarks ? String(m).slice(0, 4) : m}</text>` : "";
+    return show ? `<text class="axis" x="${X(i).toFixed(1)}" y="${H - 10}" text-anchor="middle">${yearMarks ? String(m).slice(0, 4) : m}</text>` : "";
   }).join("");
   const e = n - 1, gid = "ag" + (++_chartSeq);
-  const cap = `<circle class="pt-halo" cx="${X(e).toFixed(1)}" cy="${Y(vals[e]).toFixed(1)}" r="6"/>`
-    + `<circle class="pt-end" cx="${X(e).toFixed(1)}" cy="${Y(vals[e]).toFixed(1)}" r="3.4"/>`
-    + `<text class="val" x="${X(e).toFixed(1)}" y="${(Y(vals[e]) - 11).toFixed(1)}" text-anchor="${e > n - 2 ? "end" : "middle"}">${vals[e]}${unit}</text>`;
-  return `<svg viewBox="0 0 ${W} ${H}"><defs>
+  const peakI = vals.indexOf(max);
+  // peak marker (bright dot at the all-time high) — the one point worth calling out
+  const peak = `<circle class="pt-peak" cx="${X(peakI).toFixed(1)}" cy="${Y(max).toFixed(1)}" r="3.2"/>`;
+  const pts = JSON.stringify(vals.map((v, i) => ({
+    x: +X(i).toFixed(1), y: +Y(v).toFixed(1),
+    label: labelFmt ? labelFmt(labels[i]) : String(labels[i]),
+    disp: valFmt ? valFmt(v) : String(v),
+  })));
+  return `<svg class="linechart" viewBox="0 0 ${W} ${H}" data-pts='${esc(pts)}' data-series="${esc(series)}"><defs>
     <linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="var(--amber)" stop-opacity=".34"/>
       <stop offset="1" stop-color="var(--amber)" stop-opacity="0"/></linearGradient></defs>
     ${grid}<path class="area" d="${area}" fill="url(#${gid})"/>
-    <path class="aline" d="${line}"/>${cap}${lbls}</svg>`;
+    <path class="aline" d="${line}"/>${peak}${lbls}
+    <line class="xhair" x1="0" x2="0" y1="${padT}" y2="${padT + ih}" style="display:none"/>
+    <circle class="xdot" r="4.4" style="display:none"/></svg>`;
 }
-/* horizontal ranked bars — optional rank + face image, gradient track, tabular numbers */
-function rankBars(rows, { face = false } = {}) {
+function wireLineChart(svg) {
+  let pts; try { pts = JSON.parse(svg.dataset.pts); } catch { return; }
+  if (!pts.length) return;
+  const xhair = svg.querySelector(".xhair"), dot = svg.querySelector(".xdot");
+  const series = svg.dataset.series || "";
+  let lastX = null;
+  const move = ev => {
+    const rect = svg.getBoundingClientRect();
+    const vx = (ev.clientX - rect.left) / rect.width * 720;
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(p.x - vx) < Math.abs(best.x - vx)) best = p;
+    if (best.x !== lastX) {
+      if (lastX !== null && ev.pointerType !== "mouse") hapticTick();  // buzz when the drag snaps to a new point
+      lastX = best.x;
+    }
+    xhair.setAttribute("x1", best.x); xhair.setAttribute("x2", best.x); xhair.style.display = "";
+    dot.setAttribute("cx", best.x); dot.setAttribute("cy", best.y); dot.style.display = "";
+    vtipShow(ev.clientX, ev.clientY, best.label, [{ label: series, value: best.disp, color: "var(--amber)" }]);
+  };
+  const hide = () => { xhair.style.display = "none"; dot.style.display = "none"; lastX = null; vtipHide(); };
+  svg.addEventListener("pointermove", move);
+  svg.addEventListener("pointerdown", move);
+  svg.addEventListener("pointerleave", hide);
+  svg.addEventListener("pointercancel", hide);
+  svg.addEventListener("pointerup", e => { if (e.pointerType !== "mouse") hide(); });
+}
+
+/* One segmented horizontal bar — a "shelf" of colored states (finished / dropped …),
+   each carrying its own hover tooltip; legend rows sit below. */
+function segBar(segments) {
+  const total = segments.reduce((a, s) => a + s.v, 0) || 1;
+  const bar = segments.filter(s => s.v).map(s =>
+    `<span class="seg" data-tip-title="${esc(s.label)}" data-tip-val="${s.v} of ${total} · ${Math.round(100 * s.v / total)}%"
+       data-tip-color="${s.color}" style="flex:${s.v};background:${s.color}"></span>`).join("");
+  const legend = segments.map(s =>
+    `<span class="seg-lg ${s.v ? "" : "off"}"><span class="seg-dot" style="background:${s.color}"></span>
+       <span class="seg-nm">${esc(s.label)}</span><span class="seg-ct">${s.v}</span></span>`).join("");
+  return `<div class="segbar">${bar}</div><div class="seg-legend">${legend}</div>`;
+}
+
+/* Vertical column chart with a per-column color ramp — used for the ratings
+   histogram so score maps to a red→amber→green quality color. */
+function colBar(rows) {
   const max = Math.max(...rows.map(r => r.v), 1);
-  return `<div class="rbars">${rows.map((r, i) => `
-    <div class="rbar" title="${esc(r.name)}">
-      <span class="rb-rank">${i + 1}</span>
+  return `<div class="colbars">${rows.map(r =>
+    `<div class="colbar" data-tip-title="${esc(r.label)}" data-tip-val="${r.v} rated" data-tip-color="${r.color}">
+       <span class="col-track"><i style="height:${Math.max(3, Math.round(100 * r.v / max))}%;background:${r.color}"></i></span>
+       <span class="col-x">${esc(r.xlabel ?? r.label)}</span></div>`).join("")}</div>`;
+}
+
+/* Wire interactivity onto a freshly-rendered stats container: crosshair line charts
+   plus one delegated hover handler for the mark-based charts (heat cells, ranked
+   bars, shelf segments, rating columns). Data/labels ride in data-* attributes and
+   are read back via dataset, so untrusted titles never touch innerHTML. */
+function wireStats(box) {
+  box.querySelectorAll(".linechart").forEach(wireLineChart);
+  if (box._statsWired) return;
+  box._statsWired = true;
+  const marks = ".heat-c[data-tip-title],.rbar[data-tip-title],.seg[data-tip-title],.colbar[data-tip-title]";
+  let hot = null;
+  const onMove = ev => {
+    // line charts run their own crosshair tooltip; this bubbles up to the box, so
+    // bail before the vtipHide() below clobbers the tooltip the chart just set.
+    if (ev.target.closest(".linechart")) return;
+    const el = ev.target.closest(marks);
+    if (!el) { if (hot) { hot.classList.remove("hot"); hot = null; } vtipHide(); return; }
+    if (el !== hot) { if (hot) hot.classList.remove("hot"); hot = el; el.classList.add("hot"); }
+    const c = el.dataset.tipColor;
+    vtipShow(ev.clientX, ev.clientY, el.dataset.tipTitle,
+      [{ label: "", value: el.dataset.tipVal, color: c }]);
+  };
+  const leave = () => { if (hot) { hot.classList.remove("hot"); hot = null; } vtipHide(); };
+  box.addEventListener("pointermove", onMove);
+  box.addEventListener("pointerdown", onMove);
+  box.addEventListener("pointerleave", leave);
+  box.addEventListener("pointercancel", leave);
+  box.addEventListener("pointerup", e => { if (e.pointerType !== "mouse") leave(); });
+}
+/* horizontal ranked bars — optional rank + face image, hover tooltip. A single
+   `hue` tints the whole list (one series = one color); pass `colors` to give each
+   bar its own categorical hue (identity, e.g. genres). tipUnit names the value. */
+function rankBars(rows, { face = false, hue = "amber", colors = null, tipUnit = "" } = {}) {
+  const max = Math.max(...rows.map(r => r.v), 1);
+  return `<div class="rbars" style="--barc:var(--c-${hue})">${rows.map((r, i) => {
+    const c = colors ? colors[i % colors.length] : null;
+    const disp = r.label ?? String(r.v);
+    return `<div class="rbar" data-tip-title="${esc(r.name)}" data-tip-val="${esc(disp)}${tipUnit ? " " + esc(tipUnit) : ""}"${c ? ` data-tip-color="${c}"` : ""}>
+      <span class="rb-rank"${c ? ` style="color:${c}"` : ""}>${i + 1}</span>
       ${face ? `<span class="rb-face">${r.img ? `<img loading="lazy" src="${r.img}" alt="">` : personGlyph()}</span>` : ""}
       <span class="rb-body">
-        <span class="rb-top"><span class="rb-name">${esc(r.name)}</span><span class="rb-num">${r.label ?? r.v}</span></span>
-        <span class="rb-track"><i style="width:${Math.max(4, Math.round(100 * r.v / max))}%"></i></span>
-      </span></div>`).join("")}</div>`;
+        <span class="rb-top"><span class="rb-name">${esc(r.name)}</span><span class="rb-num">${esc(disp)}</span></span>
+        <span class="rb-track"><i style="width:${Math.max(4, Math.round(100 * r.v / max))}%${c ? `;background:${c}` : ""}"></i></span>
+      </span></div>`;
+  }).join("")}</div>`;
 }
 
 function statsSkeleton() {
   return `<div class="tiles">${Array.from({ length: 4 }, () => `<div class="sk tile-sk"></div>`).join("")}</div>
     <div class="sk" style="height:210px;border-radius:var(--r-s);margin-bottom:16px"></div>`;
 }
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+// fixed categorical hue order (identity charts, e.g. genres) — matches CVD-validated slots
+const CAT_HUES = ["var(--c-blue)", "var(--c-aqua)", "var(--c-yellow)", "var(--c-green)",
+  "var(--c-violet)", "var(--c-red)", "var(--c-pink)", "var(--c-orange)"];
+// red→amber→green quality ramp for a 1–10 score
+const RATE_RAMP = ["#e0524a", "#e2664a", "#e58248", "#e89c46", "#ecb544",
+  "#d8c13f", "#a9c247", "#7dc157", "#57c06a", "#3fbf6f"];
+const rateColor = s => RATE_RAMP[Math.max(1, Math.min(10, Math.round(s))) - 1];
+const hourLbl = c => c === 0 ? "12 AM" : c < 12 ? c + " AM" : c === 12 ? "12 PM" : (c - 12) + " PM";
 
 function statsSection(d) {
   const months = [];
@@ -2576,81 +2722,100 @@ function statsSection(d) {
     months.push(dt.toISOString().slice(0, 7));
   }
   const byM = Object.fromEntries(d.monthly.map(m => [m.ym, m.count]));
+  const mVals = months.map(m => byM[m] || 0);
+  const m24 = mVals.reduce((a, b) => a + b, 0);
+  const monLabel = ym => { const [y, mo] = ym.split("-"); return MONTHS[+mo - 1] + " " + y; };
+  const peakM = months[mVals.indexOf(Math.max(...mVals))];
+
   const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const wdFull = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const hm = Array.from({ length: 7 }, () => Array(24).fill(0));
   (d.heatmap || []).forEach(([dow, h, c]) => { hm[dow][h] = c; });
+  const hmTotal = hm.flat().reduce((a, b) => a + b, 0) || 1;
   const hmMax = Math.max(...hm.flat(), 1);
-  const hourLbl = c => c === 0 ? "12am" : c < 12 ? c + "am" : c === 12 ? "12pm" : (c - 12) + "pm";
+  let peak = { d: 0, h: 0, c: 0 };
+  hm.forEach((row, r) => row.forEach((v, c) => { if (v > peak.c) peak = { d: r, h: c, c: v }; }));
   const heat = `<div class="heat">
     <div class="heat-grid">
       ${wd.map((n, r) => `<div class="heat-lbl">${n}</div>` + hm[r].map((v, c) =>
-        `<div class="heat-c" style="--a:${v ? (0.14 + 0.86 * v / hmMax).toFixed(2) : 0}"
-          title="${n} ${hourLbl(c)} — ${v} watched"></div>`).join("")).join("")}
+        `<div class="heat-c${r === peak.d && c === peak.h && v ? " peak" : ""}" style="--a:${v ? (0.12 + 0.88 * v / hmMax).toFixed(2) : 0}"
+          data-tip-title="${wdFull[r]} · ${hourLbl(c)}" data-tip-val="${v} watched · ${Math.round(100 * v / hmTotal)}% of the week"></div>`).join("")).join("")}
       <div></div>${[0, 6, 12, 18].map(h => `<div class="heat-h" style="grid-column:${h + 2} / span 6">${hourLbl(h)}</div>`).join("")}
     </div>
-    <div class="heat-legend"><span>less</span><i style="--a:.16"></i><i style="--a:.4"></i><i style="--a:.66"></i><i style="--a:1"></i><span>more</span></div></div>`;
+    <div class="heat-legend"><span>quieter</span><i style="--a:.16"></i><i style="--a:.42"></i><i style="--a:.7"></i><i style="--a:1"></i><span>busier</span></div></div>`;
 
   const totalMin = d.tv_minutes + d.movie_minutes;
   const comp = d.completion || {};
   const compTotal = Object.values(comp).reduce((a, b) => a + b, 0) || 1;
-  const compRow = (label, key) => comp[key] ? `
-    <div class="hbar-row"><span class="name">${label}</span>
-      <span class="track"><i style="width:${Math.round(100 * comp[key] / compTotal)}%"></i></span>
-      <span class="num">${comp[key]}</span></div>` : "";
+  const compSegs = [
+    { label: "Finished", v: comp.finished || 0, color: "var(--c-green)" },
+    { label: "Up to date", v: comp.up_to_date || 0, color: "var(--c-blue)" },
+    { label: "In progress", v: comp.in_progress || 0, color: "var(--c-amber)" },
+    { label: "Dropped", v: comp.dropped || 0, color: "var(--c-red)" },
+    { label: "Not started", v: comp.not_started || 0, color: "var(--c-neutral)" },
+  ];
+  const ratings = Object.entries(d.rating_hist || {});
+  const ratedTotal = ratings.reduce((a, [, c]) => a + c, 0);
+  const ratedAvg = ratedTotal ? (ratings.reduce((a, [r, c]) => a + r * c, 0) / ratedTotal) : 0;
 
-  return `
+  const tile = (cls, hue, v, l, sub) =>
+    `<div class="tile ${cls}" style="--tc:var(--c-${hue})"><div class="v">${v}</div>
+      <div class="l">${l}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+
+  return `<div class="stats-wrap">
     <div class="tiles reveal">
-      <div class="tile big"><div class="v">${fmtHours(totalMin)}</div><div class="l">in front of the screen</div>
-        <div class="sub">${Math.round(totalMin / 60).toLocaleString()} hours all told</div></div>
-      <div class="tile"><div class="v">${d.episodes.toLocaleString()}</div><div class="l">episodes</div>
-        <div class="sub">${fmtHours(d.tv_minutes)} of TV</div></div>
-      <div class="tile"><div class="v">${d.movies.toLocaleString()}</div><div class="l">movies</div>
-        <div class="sub">${fmtHours(d.movie_minutes)} of film</div></div>
-      <div class="tile"><div class="v">${d.shows}</div><div class="l">shows followed</div>
-        <div class="sub">${comp.finished || 0} finished</div></div>
+      ${tile("big", "amber", fmtHours(totalMin), "in front of the screen", `${Math.round(totalMin / 60).toLocaleString()} hours all told`)}
+      ${tile("", "blue", d.episodes.toLocaleString(), "episodes", `${fmtHours(d.tv_minutes)} of TV`)}
+      ${tile("", "violet", d.movies.toLocaleString(), "movies", `${fmtHours(d.movie_minutes)} of film`)}
+      ${tile("", "aqua", d.shows, "shows followed", `${comp.finished || 0} finished`)}
     </div>
 
     <div class="statcols reveal">
-      <div class="tile stat-rec"><div class="v">${d.streak.current || 0}<small class="unit">days</small></div>
-        <div class="l">current streak</div>
-        <div class="sub">best ${d.streak.longest} days${d.streak.longest_end ? " · ended " + fmtDate(d.streak.longest_end) : ""}</div></div>
-      ${d.big_day ? `<div class="tile stat-rec"><div class="v">${d.big_day.count}<small class="unit">eps</small></div>
-        <div class="l">biggest binge day</div>
-        <div class="sub">${fmtDate(d.big_day.date)}${d.big_day.top ? " · mostly " + esc(d.big_day.top) : ""}</div></div>` : ""}
-      <div class="tile stat-rec"><div class="v">${d.per_day}</div><div class="l">watches / day</div>
-        <div class="sub">since ${d.first_watch ? fmtDate(d.first_watch.watched_at) : "the start"}</div></div>
-      ${d.first_watch ? `<div class="tile stat-rec"><div class="v tt">${esc(d.first_watch.title)}</div>
+      ${tile("stat-rec", "green", `${d.streak.current || 0}<small class="unit">days</small>`, "current streak",
+        `best ${d.streak.longest} days${d.streak.longest_end ? " · ended " + fmtDate(d.streak.longest_end) : ""}`)}
+      ${d.big_day ? tile("stat-rec", "orange", `${d.big_day.count}<small class="unit">eps</small>`, "biggest binge day",
+        `${fmtDate(d.big_day.date)}${d.big_day.top ? " · mostly " + esc(d.big_day.top) : ""}`) : ""}
+      ${tile("stat-rec", "blue", d.per_day, "watches / day",
+        `since ${d.first_watch ? fmtDate(d.first_watch.watched_at) : "the start"}`)}
+      ${d.first_watch ? `<div class="tile stat-rec" style="--tc:var(--c-pink)"><div class="v tt">${esc(d.first_watch.title)}</div>
         <div class="l">first ever watch</div><div class="sub">${fmtDate(d.first_watch.watched_at)}</div></div>` : ""}
     </div>
 
-    <div class="chart reveal"><h3>Month by month</h3>
-      <div class="sub">episodes + movies · last 24 months</div>
-      ${areaSVG(months, months.map(m => byM[m] || 0), { yearMarks: true })}</div>
+    <div class="chart reveal"><div class="ch-head"><h3>Month by month</h3>
+      <span class="ch-badge">${m24.toLocaleString()} in 24 mo</span></div>
+      <div class="sub">episodes + movies · ${peakM ? "busiest was " + monLabel(peakM) : "last 24 months"} · drag across to read any month</div>
+      ${lineChart(months, mVals, { yearMarks: true, series: "watched", labelFmt: monLabel, valFmt: v => v + (v === 1 ? " watch" : " watches") })}</div>
 
-    <div class="chart reveal"><h3>Your watching life</h3><div class="sub">episodes per year, all time</div>
-      ${areaSVG(d.yearly.map(y => y.y), d.yearly.map(y => y.c))}</div>
+    <div class="chart reveal"><div class="ch-head"><h3>Your watching life</h3>
+      ${d.yearly.length ? `<span class="ch-badge">since ${d.yearly[0].y}</span>` : ""}</div>
+      <div class="sub">episodes per year, all time · drag to read a year</div>
+      ${lineChart(d.yearly.map(y => y.y), d.yearly.map(y => y.c), { series: "episodes", valFmt: v => v.toLocaleString() + " episodes" })}</div>
 
-    <div class="chart reveal"><h3>The watch clock</h3><div class="sub">when you actually watch — brighter is more</div>
+    <div class="chart reveal"><h3>The watch clock</h3>
+      <div class="sub">when you actually watch${peak.c ? ` · busiest ${wdFull[peak.d]} around ${hourLbl(peak.h)}` : ""} · hover a square</div>
       ${heat}</div>
 
     <div class="charts2 reveal">
       <div class="chart"><h3>Top shows by time</h3><div class="sub">your biggest commitments</div>
-        ${rankBars(d.top_shows.map(s => ({ name: s.title, v: s.mins, label: fmtHours(s.mins) })))}</div>
-      <div class="chart"><h3>Genres</h3><div class="sub">by episodes watched</div>
-        ${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div>
-      <div class="chart"><h3>Show shelf</h3><div class="sub">where your ${compTotal} shows stand</div>
-        ${compRow("Finished", "finished")}${compRow("Up to date", "up_to_date")}
-        ${compRow("In progress", "in_progress")}${compRow("Dropped", "dropped")}
-        ${compRow("Not started", "not_started")}</div>
-      <div class="chart"><h3>Movies by decade</h3><div class="sub">release decade of what you've watched</div>
-        ${rankBars((d.movie_decades || []).map(x => ({ name: x.dec + "s", v: x.c })))}</div>
-      ${Object.keys(d.rating_hist || {}).length ? `
-      <div class="chart"><h3>Your ratings</h3><div class="sub">how you score things</div>
-        ${rankBars(Object.entries(d.rating_hist).sort((a, b) => b[0] - a[0]).map(([r, c]) => ({ name: r + "/10", v: c })))}</div>
+        ${rankBars(d.top_shows.map(s => ({ name: s.title, v: s.mins, label: fmtHours(s.mins) })), { hue: "amber" })}</div>
+      <div class="chart"><h3>Genres</h3><div class="sub">episodes watched, by genre</div>
+        ${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })), { colors: CAT_HUES, tipUnit: "episodes" })}</div>
+      <div class="chart wide"><h3>Show shelf</h3><div class="sub">where your ${compTotal} followed shows stand</div>
+        ${segBar(compSegs)}</div>
+      <div class="chart"><h3>Movies by decade</h3><div class="sub">release decade of what you've seen</div>
+        ${rankBars((d.movie_decades || []).map(x => ({ name: x.dec + "s", v: x.c })), { hue: "orange", tipUnit: "movies" })}</div>
+      ${ratings.length ? `
+      <div class="chart"><div class="ch-head"><h3>Your ratings</h3><span class="ch-badge">avg ${ratedAvg.toFixed(1)}</span></div>
+        <div class="sub">${ratedTotal} scored · red low → green high</div>
+        ${colBar(Array.from({ length: 10 }, (_, i) => {
+          const s = i + 1, c = (d.rating_hist[s] || 0);
+          return { label: s + "/10", xlabel: s, v: c, color: rateColor(s) };
+        }))}</div>
       <div class="chart"><h3>All-timers</h3><div class="sub">your highest-rated</div>
-        ${(d.top_rated || []).map(t => `<div class="hbar-row" style="grid-template-columns:1fr 48px">
-          <span class="name">${esc(t.title)}</span><span class="num rate">${t.rating}/10</span></div>`).join("")}</div>` : ""}
-    </div>`;
+        <div class="alltimers">${(d.top_rated || []).map(t => `<div class="at-row">
+          <span class="at-name">${esc(t.title)}</span>
+          <span class="at-score" style="color:${rateColor(t.rating)}">${t.rating}<small>/10</small></span></div>`).join("")}</div></div>` : ""}
+    </div></div>`;
 }
 
 function advancedSection(a) {
@@ -2661,23 +2826,23 @@ function advancedSection(a) {
   const netStudio = (has("networks") || has("studios")) ? `
     <div class="charts2">
       ${has("networks") ? `<div class="chart"><h3>Networks</h3><div class="sub">TV homes, by episodes watched</div>
-        ${rankBars(a.networks.map(n => ({ name: n.name, v: n.count })))}</div>` : ""}
+        ${rankBars(a.networks.map(n => ({ name: n.name, v: n.count })), { hue: "blue", tipUnit: "episodes" })}</div>` : ""}
       ${has("studios") ? `<div class="chart"><h3>Studios</h3><div class="sub">film production companies, by titles</div>
-        ${rankBars(a.studios.map(n => ({ name: n.name, v: n.count })))}</div>` : ""}
+        ${rankBars(a.studios.map(n => ({ name: n.name, v: n.count })), { hue: "violet", tipUnit: "movies" })}</div>` : ""}
     </div>` : "";
   const people = (has("actors") || has("directors")) ? `
     <div class="charts2">
       ${has("actors") ? `<div class="chart"><h3>Most-watched faces</h3><div class="sub">actors across your shows &amp; films</div>
         ${rankBars(a.actors.map(p => ({ name: p.name, img: p.img, v: p.shows + p.movies,
-          label: [p.shows ? p.shows + " show" + (p.shows > 1 ? "s" : "") : "", p.movies ? p.movies + " film" + (p.movies > 1 ? "s" : "") : ""].filter(Boolean).join(" · ") })), { face: true })}</div>` : ""}
+          label: [p.shows ? p.shows + " show" + (p.shows > 1 ? "s" : "") : "", p.movies ? p.movies + " film" + (p.movies > 1 ? "s" : "") : ""].filter(Boolean).join(" · ") })), { face: true, hue: "pink" })}</div>` : ""}
       ${has("directors") ? `<div class="chart"><h3>Creators &amp; directors</h3><div class="sub">whose work you keep coming back to</div>
-        ${rankBars(a.directors.map(n => ({ name: n.name, v: n.count, label: n.count + " title" + (n.count > 1 ? "s" : "") })))}</div>` : ""}
+        ${rankBars(a.directors.map(n => ({ name: n.name, v: n.count, label: n.count + " title" + (n.count > 1 ? "s" : "") })), { hue: "aqua" })}</div>` : ""}
     </div>` : "";
   const country = has("countries") ? `
     <div class="chart"><h3>Around the world</h3><div class="sub">where your stories are made</div>
-      ${rankBars(a.countries.map(c => ({ name: c.name, v: c.count })))}</div>` : "";
-  return `<div class="section reveal"><h2>Deeper cuts</h2><div class="rule"></div></div>
-    ${enrichNote}${netStudio}${people}${country}`;
+      ${rankBars(a.countries.map(c => ({ name: c.name, v: c.count })), { hue: "green", tipUnit: "titles" })}</div>` : "";
+  return `<div class="stats-wrap"><div class="section reveal"><h2>Deeper cuts</h2><div class="rule"></div></div>
+    ${enrichNote}${netStudio}${people}${country}</div>`;
 }
 
 /* stats now live on the profile — keep old #/stats links working */
