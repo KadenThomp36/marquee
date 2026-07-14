@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713j";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260713m";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2252,7 +2252,7 @@ async function bannerSheet(p, onSet) {
       ${p.banner ? `<button class="btn ghost" id="bnclear">Remove banner</button>` : ""}
     </div>
     <input type="file" id="bnfile" accept="image/png,image/jpeg,image/webp" hidden>
-    <div class="bn-cap">From shows you watch <span class="bn-hint">tap to open · again to use</span></div>
+    <div class="bn-cap">From shows you watch <span class="bn-hint">hold &amp; slide · tap to use</span></div>
     <div class="stack" id="stack"><div class="bn-load">Loading suggestions…</div></div>
     <button class="btn pri deck-use" id="duse" hidden>Use this banner</button>`,
     { cls: "editor bannersheet" });
@@ -2264,24 +2264,45 @@ async function bannerSheet(p, onSet) {
     try { await api("/profile/banner", { body: { url: o.backdrop } }); onSet(o.backdrop); s.close(); }
     catch { toast("Couldn't set banner"); }
   };
-  const setActive = (c, scroll) => {
+  const setActive = c => {
     if (c === active) return;
     active?.classList.remove("active");
     active = c; c.classList.add("active");
     const use = $("#duse", s.el); if (use) use.textContent = `Use ${c.dataset.title}`;
-    if (scroll) c.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+
+  // Size the stack so N cards fill the fixed height exactly — no scroll. --ah is the
+  // open card, --ch the shingled strips; N is capped so strips stay tappable/readable.
+  const OV = 12;
+  const sizeStack = render => {
+    const H = Math.max(200, (stack.clientHeight || Math.round(innerHeight * 0.5)) - 20);  // 18px pad + 2px slack
+    const ah = Math.max(128, Math.min(220, Math.round(H * 0.42)));
+    if (render) {
+      const maxN = Math.max(4, Math.floor((H - ah) / 26) + 1);
+      opts = opts.slice(0, Math.min(opts.length, maxN, 16));
+    }
+    const n = opts.length;
+    const ch = n > 1 ? OV + (H - ah) / (n - 1) : ah;
+    stack.style.setProperty("--ov", OV + "px");
+    stack.style.setProperty("--ah", ah + "px");
+    stack.style.setProperty("--ch", ch.toFixed(1) + "px");
   };
 
   api("/profile/banner/options").then(({ options }) => {
     if (!stack.isConnected) return;
-    opts = options.slice(0, 20);
+    opts = options;
     if (!opts.length) { stack.innerHTML = `<div class="bn-empty">Watch a few shows and their artwork shows up here.</div>`; return; }
-    stack.innerHTML = opts.map((o, i) => `<button class="stack-card" data-i="${i}" data-title="${esc(o.title)}">
-      <img loading="lazy" src="${esc(o.backdrop)}" alt="" draggable="false"><span class="sc-bar"><span class="sc-t">${esc(o.title)}</span></span></button>`).join("");
-    cards = $$(".stack-card", stack);
-    if (matchMedia("(hover:hover)").matches)                    // desktop: hover pops a card open
-      cards.forEach(c => c.addEventListener("pointerenter", () => setActive(c, false)));
-    setActive(cards[0], false);
+    $("#duse", s.el).hidden = false;                            // unhide first so it's in the layout we measure
+    requestAnimationFrame(() => {
+      if (!stack.isConnected) return;
+      sizeStack(true);                                          // decides how many fit + sets sizes
+      stack.innerHTML = opts.map((o, i) => `<button class="stack-card" data-i="${i}" data-title="${esc(o.title)}">
+        <img loading="lazy" src="${esc(o.backdrop)}" alt="" draggable="false"><span class="sc-bar"><span class="sc-t">${esc(o.title)}</span></span></button>`).join("");
+      cards = $$(".stack-card", stack);
+      if (matchMedia("(hover:hover)").matches)                  // desktop: hover pops a card open
+        cards.forEach(c => c.addEventListener("pointerenter", () => setActive(c)));
+      setActive(cards[0]);
+    });
 
     // Press-and-drag scrub: the card under your finger opens as you slide up/down,
     // buzzing on every change, until you lift. A tap on the already-open card selects it.
@@ -2290,7 +2311,7 @@ async function bannerSheet(p, onSet) {
     stack.addEventListener("pointerdown", e => {
       const c = cardAt(e.clientX, e.clientY) || active; if (!c) return;
       scrub = { y: e.clientY, i: cards.indexOf(c), moved: false, wasActive: c === active };
-      setActive(c, false);
+      setActive(c);
       try { stack.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
     });
     stack.addEventListener("pointermove", e => {
@@ -2301,7 +2322,7 @@ async function bannerSheet(p, onSet) {
       scrub.y = e.clientY;
       if (ni === scrub.i) return;
       scrub.i = ni; scrub.moved = true;
-      setActive(cards[ni], true);
+      setActive(cards[ni]);
       hapticTick();
     });
     const endScrub = () => {
@@ -2313,8 +2334,12 @@ async function bannerSheet(p, onSet) {
     stack.addEventListener("pointercancel", endScrub);
 
     const use = $("#duse", s.el);
-    use.hidden = false;
     use.onclick = () => { if (active) pick(opts[+active.dataset.i]); };
+    const onResize = () => {                                     // keep it fitting on rotate/resize
+      if (!stack.isConnected) return removeEventListener("resize", onResize);
+      if (cards.length) sizeStack(false);
+    };
+    addEventListener("resize", onResize);
   }).catch(() => { if (stack.isConnected) stack.innerHTML = `<div class="bn-empty">Couldn't load suggestions.</div>`; });
 
   $("#bnupload", s.el).onclick = () => $("#bnfile", s.el).click();
