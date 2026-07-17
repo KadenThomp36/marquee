@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260717a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260717b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -701,6 +701,32 @@ function pastStrip(recent) {
     g.items.reverse().map(x => watchedCard(x, { past: true })).join("") +
     `<div class="tdiv"><b>${g.label}</b></div>`).join("");
 }
+/* park the Up Next rail so the first queue card sits at the gutter and history is
+   off-screen left. iOS Safari clobbers programmatic scrollLeft on scroll-snap
+   containers back to 0 after layout, so: snap off while positioning, then re-assert
+   over a few frames — backing off forever once the user touches the rail. */
+function anchorUpRail() {
+  const up = $(".hrail.up");
+  if (!up) return;
+  const place = () => {
+    if (up._touched || !up.isConnected) return;
+    const first = $(".bcard", up);
+    const target = first
+      ? first.getBoundingClientRect().left - up.getBoundingClientRect().left
+        + up.scrollLeft - parseFloat(getComputedStyle(up).paddingLeft)
+      : up.scrollWidth;
+    if (Math.abs(up.scrollLeft - target) < 1) return;
+    up.style.scrollSnapType = "none";
+    up.scrollLeft = target;
+    requestAnimationFrame(() => { up.style.scrollSnapType = ""; });
+  };
+  ["pointerdown", "touchstart", "wheel"].forEach(ev =>
+    up.addEventListener(ev, () => { up._touched = true; }, { passive: true, once: true }));
+  place();
+  requestAnimationFrame(place);
+  setTimeout(place, 150);
+  setTimeout(place, 500);
+}
 function calCard(e) {
   return `<a class="wcard" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
     <div class="wc-shot"><img loading="lazy" src="${POSTER(e.poster)}" alt="">
@@ -733,15 +759,7 @@ function renderHome(d, animate = true) {
             <div class="hrev-t">${esc(r.title)}</div>
             ${r.body ? `<div class="hrev-x">${esc(r.body)}</div>` : ""}</div></a>`).join("")}</div>` : ""}`;
 
-  // park the rail so Up Next starts at the left edge and history sits off-screen left
-  const up = $(".hrail.up");
-  if (up) {
-    const first = $(".bcard", up);
-    up.scrollLeft = first
-      ? first.getBoundingClientRect().left - up.getBoundingClientRect().left
-        - parseFloat(getComputedStyle(up).paddingLeft)
-      : up.scrollWidth;
-  }
+  anchorUpRail();
 
   homePunchHandler();
   // lazy Recommended rail from discover
@@ -3426,4 +3444,8 @@ async function boot() {
    won't re-create the old stale-cache trap. */
 if ("serviceWorker" in navigator)
   addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+// a long-lived PWA never re-runs boot(), so it'd stay on old code until relaunched —
+// re-check the build whenever the app returns to the foreground (or from bfcache)
+document.addEventListener("visibilitychange", () => { if (!document.hidden && ME) checkBuild(); });
+addEventListener("pageshow", e => { if (e.persisted) checkBuild(); });
 boot();
