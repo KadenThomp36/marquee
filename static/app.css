@@ -119,14 +119,14 @@ h1 .cnt{color:var(--mut);font-weight:500;font-size:14px;letter-spacing:0}
 .rail-more{color:var(--amber);font-size:12.5px;font-weight:700;display:inline-flex;align-items:center;gap:2px;flex:none}
 .rail-more svg{width:13px;height:13px}
 .hrail{display:flex;gap:13px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x proximity;
-  scrollbar-width:thin;margin:0 -18px;padding-left:18px;padding-right:18px}
+  scrollbar-width:thin;margin:0 -18px;padding-left:18px;padding-right:18px;scroll-padding-left:18px}
 .hrail::-webkit-scrollbar{height:0}
 .hrail>*{scroll-snap-align:start}
 .hrail.up .bcard{width:172px;flex:none}
 .hrail .bcard{width:158px;flex:none}
 .hrail .pcard{width:124px;flex:none}
 @media(max-width:700px){
-  .hrail{margin:0 -13px;padding-left:13px;padding-right:13px;gap:11px}
+  .hrail{margin:0 -13px;padding-left:13px;padding-right:13px;gap:11px;scroll-padding-left:13px}
   .hrail.up .bcard{width:150px}.hrail .bcard{width:140px}.hrail .pcard{width:112px}
 }
 /* watched / calendar mini cards */
@@ -142,6 +142,17 @@ h1 .cnt{color:var(--mut);font-weight:500;font-size:14px;letter-spacing:0}
 .wc-t{font-size:12px;font-weight:650;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wc-s{color:var(--amber-2);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .wc-who{color:var(--mut);font-size:10.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* history strip hiding off-screen left of Up Next */
+.hrail.up .wcard{align-self:center}
+.wcard.past{opacity:.72}
+.wcard.past .wc-shot img{filter:grayscale(.5) brightness(.85) saturate(.72)}
+.wcard.past .wc-t{color:var(--ink-2)}
+@media(hover:hover){.wcard.past:hover{opacity:1}.wcard.past:hover .wc-shot img{filter:none}}
+.hrail .tdiv{flex:none;width:26px;align-self:stretch;display:flex;flex-direction:column;
+  align-items:center;gap:8px;padding:6px 0 14px;scroll-snap-align:none}
+.hrail .tdiv::before,.hrail .tdiv::after{content:"";width:1px;flex:1;background:var(--line)}
+.hrail .tdiv b{writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;font-weight:750;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--mut);white-space:nowrap}
 /* fresh reviews on home */
 .home-revs{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:700px){.home-revs{grid-template-columns:1fr}}

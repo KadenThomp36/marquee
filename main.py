@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260713m"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260717a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -1521,7 +1521,7 @@ def dashboard(user=Depends(current_user)):
           SELECT w.show_id, w.season, w.number, w.watched_at, s.title, s.poster, e.title AS ep_title
           FROM watches w JOIN shows s ON s.id=w.show_id
           LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
-          WHERE w.user_id=? ORDER BY w.watched_at DESC LIMIT 30""", (uid,)).fetchall()
+          WHERE w.user_id=? ORDER BY w.watched_at DESC LIMIT 60""", (uid,)).fetchall()
         # household activity: what OTHER users watched recently
         social = con.execute("""
           SELECT w.user_id, u.username, u.display_name, u.avatar, w.show_id, w.season, w.number,
@@ -1570,7 +1570,7 @@ def dashboard(user=Depends(current_user)):
         "up_next": home_data["watch_next"],
         "stale": home_data["stale"],
         "calendar": calendar,
-        "recent": collapse(recent)[:12],
+        "recent": collapse(recent)[:24],
         "social": collapse(social)[:12],
         "reviews": rev_out,
         "counts": {"up_to_date": len(home_data["up_to_date"]),

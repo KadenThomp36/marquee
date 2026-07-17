@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260713m";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260717a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -667,15 +667,39 @@ function railHead(title, more) {
   return `<div class="rail-head"><h2>${title}</h2>${more
     ? `<a class="rail-more" href="${more}">All ${I.chevR}</a>` : ""}</div>`;
 }
-function watchedCard(it, { by = false } = {}) {
-  return `<a class="wcard" href="#/show/${it.show_id}">
+function watchedCard(it, { by = false, past = false } = {}) {
+  const shortDate = d => new Date(d.slice(0, 10) + "T00:00")
+    .toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `<a class="wcard${past ? " past" : ""}" href="#/show/${it.show_id}">
     <div class="wc-shot"><img loading="lazy" src="${POSTER(it.poster)}" alt="">
       ${by && it.by ? `<span class="wc-by">${avatarHTML(it.by, "tiny")}</span>` : ""}
-      ${it.count > 1 ? `<span class="wc-count">${it.count}</span>` : ""}</div>
+      ${it.count > 1 ? `<span class="wc-count">${it.count}</span>` : ""}
+      ${past ? `<span class="wc-date">${shortDate(it.watched_at)}</span>` : ""}</div>
     <div class="wc-t">${esc(it.title)}</div>
     <div class="wc-s">${it.season ? sxe(it.season, it.number) : ""}${it.count > 1 ? ` +${it.count - 1}` : ""}</div>
     ${by && it.by ? `<div class="wc-who">${esc(it.by.display_name)} · ${fmtDate(it.watched_at.slice(0,10))}</div>` : ""}
   </a>`;
+}
+/* history strip that lives off-screen to the LEFT of Up Next: oldest → newest in DOM
+   order, each time-bucket capped on its right by a vertical divider naming it, so
+   scrolling back (leftward) reads "Today ‹ Yesterday ‹ Last week ‹ Last month" */
+function pastStrip(recent) {
+  if (!recent || !recent.length) return "";
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const bucket = it => {
+    const days = Math.round((today - new Date(it.watched_at.slice(0, 10) + "T00:00")) / 864e5);
+    return days <= 0 ? "Today" : days === 1 ? "Yesterday" : days < 7 ? "This week"
+      : days < 14 ? "Last week" : days < 31 ? "Last month" : "Earlier";
+  };
+  const groups = [];          // recent arrives newest→oldest
+  for (const it of recent) {
+    const b = bucket(it);
+    if (!groups.length || groups[groups.length - 1].label !== b) groups.push({ label: b, items: [] });
+    groups[groups.length - 1].items.push(it);
+  }
+  return groups.reverse().map(g =>
+    g.items.reverse().map(x => watchedCard(x, { past: true })).join("") +
+    `<div class="tdiv"><b>${g.label}</b></div>`).join("");
 }
 function calCard(e) {
   return `<a class="wcard" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
@@ -693,13 +717,12 @@ function renderHome(d, animate = true) {
     return h < 5 ? "Late show" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Tonight’s feature"; })();
   view.innerHTML = `
     <div class="home-hi"><h1>${greeting}, ${esc((ME.display_name || ME.username).split(" ")[0])}</h1></div>
-    ${d.up_next.length ? `${railHead("Up Next")}
-      <div class="hrail up ${rv}">${d.up_next.map(x => bigCard(x)).join("")}</div>`
-      : `<div class="empty">Nothing in the queue — everything is crossed off.</div>`}
+    ${d.up_next.length || (d.recent || []).length ? `${railHead("Up Next")}
+      <div class="hrail up ${rv}">${pastStrip(d.recent)}${d.up_next.map(x => bigCard(x)).join("")}</div>` : ""}
+    ${d.up_next.length ? "" : `<div class="empty">Nothing in the queue — everything is crossed off.</div>`}
     ${railOf("Haven’t watched in a while", d.stale, x => bigCard(x))}
     ${railOf("On the calendar", d.calendar, calCard, "#/upcoming")}
     <div id="home-recs"></div>
-    ${railOf("Recently watched", d.recent, x => watchedCard(x), "#/history")}
     ${railOf("Around the house", d.social, x => watchedCard(x, { by: true }))}
     ${d.reviews && d.reviews.length ? `${railHead("Fresh reviews")}
       <div class="home-revs ${rv}">${d.reviews.slice(0, 4).map(r => `
@@ -709,6 +732,16 @@ function renderHome(d, animate = true) {
             <b>${esc(r.by.display_name)}</b>${r.rating ? `<span class="hrev-rate">${I.star}${r.rating}</span>` : ""}</div>
             <div class="hrev-t">${esc(r.title)}</div>
             ${r.body ? `<div class="hrev-x">${esc(r.body)}</div>` : ""}</div></a>`).join("")}</div>` : ""}`;
+
+  // park the rail so Up Next starts at the left edge and history sits off-screen left
+  const up = $(".hrail.up");
+  if (up) {
+    const first = $(".bcard", up);
+    up.scrollLeft = first
+      ? first.getBoundingClientRect().left - up.getBoundingClientRect().left
+        - parseFloat(getComputedStyle(up).paddingLeft)
+      : up.scrollWidth;
+  }
 
   homePunchHandler();
   // lazy Recommended rail from discover
