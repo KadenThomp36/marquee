@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260717b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260717c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -670,7 +670,9 @@ function railHead(title, more) {
 function watchedCard(it, { by = false, past = false } = {}) {
   const shortDate = d => new Date(d.slice(0, 10) + "T00:00")
     .toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return `<a class="wcard${past ? " past" : ""}" href="#/show/${it.show_id}">
+  const href = past && it.season != null
+    ? `#/show/${it.show_id}/e/${it.season}/${it.number}` : `#/show/${it.show_id}`;
+  return `<a class="wcard${past ? " past" : ""}" href="${href}">
     <div class="wc-shot"><img loading="lazy" src="${POSTER(it.poster)}" alt="">
       ${by && it.by ? `<span class="wc-by">${avatarHTML(it.by, "tiny")}</span>` : ""}
       ${it.count > 1 ? `<span class="wc-count">${it.count}</span>` : ""}
@@ -726,6 +728,19 @@ function anchorUpRail() {
   requestAnimationFrame(place);
   setTimeout(place, 150);
   setTimeout(place, 500);
+}
+/* redraw the history strip in place after a punch, shifting scrollLeft by the width
+   delta so whatever is on screen doesn't move */
+function refreshPastStrip() {
+  const up = $(".hrail.up");
+  const rec = (CACHE["/dashboard"] || {}).recent;
+  if (!up || !rec) return;
+  const before = up.scrollWidth;
+  $$(".wcard.past,.tdiv", up).forEach(n => n.remove());
+  up.insertAdjacentHTML("afterbegin", pastStrip(rec));
+  up.style.scrollSnapType = "none";
+  up.scrollLeft += up.scrollWidth - before;
+  requestAnimationFrame(() => { up.style.scrollSnapType = ""; });
 }
 function calCard(e) {
   return `<a class="wcard" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
@@ -801,6 +816,22 @@ function homePunchHandler() {
         const i = arr.findIndex(x => x.id === s.id);
         if (i >= 0) { if (s.next_ep) arr[i] = s; else arr.splice(i, 1); }
       });
+      // fold this watch into the cached recent feed so the history strip updates live
+      const rec = (CACHE["/dashboard"] || {}).recent;
+      if (rec) {
+        const ts = new Date().toISOString().slice(0, 19);   // matches server UTC stamps
+        let h = rec.find(x => String(x.show_id) === String(showId)
+          && x.watched_at.slice(0, 10) === ts.slice(0, 10));
+        if (h) { h.count++; h.season = mS; h.number = mN; h.watched_at = ts;
+                 h.ep_title = item?.next_ep?.title || h.ep_title; }
+        else if (item) h = { show_id: +showId, title: item.title, poster: item.poster,
+          season: mS, number: mN, ep_title: item.next_ep?.title || "", watched_at: ts, count: 1 };
+        if (h) {
+          const i = rec.indexOf(h); if (i > -1) rec.splice(i, 1);
+          rec.unshift(h);
+          refreshPastStrip();
+        }
+      }
       if (s.next_ep) {
         const info = $(".info", card);
         const tmp = document.createElement("div");
