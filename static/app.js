@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260717c";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260718a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -100,8 +100,11 @@ function episodeDoneToast(showId, season, number, title, img) {
   clearTimeout(_etT); _etT = setTimeout(() => el.classList.remove("show"), 5500);
   $(".et-card", el).onclick = () => { clearTimeout(_etT); el.classList.remove("show"); };
 }
-const fmtDate = d => d ? new Date(d + (d.length <= 10 ? "T00:00" : "Z"))
+const fmtDate = d => d ? new Date(d.length <= 10 ? d + "T00:00" : d)
   .toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+// naive local-time stamp "YYYY-MM-DDTHH:MM:SS" — the DB convention (household tz, not UTC)
+const nowStamp = () => { const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; };
 const fmtHours = m => m >= 6000 ? `${(m / 1440).toFixed(1)} days` : `${Math.round(m / 60)} hrs`;
 const sxe = (s, n) => `S${s} · E${n}`;
 const POSTER = p => p || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 3'%3E%3Crect width='2' height='3' fill='%231f1a13'/%3E%3C/svg%3E";
@@ -819,7 +822,7 @@ function homePunchHandler() {
       // fold this watch into the cached recent feed so the history strip updates live
       const rec = (CACHE["/dashboard"] || {}).recent;
       if (rec) {
-        const ts = new Date().toISOString().slice(0, 19);   // matches server UTC stamps
+        const ts = nowStamp();
         let h = rec.find(x => String(x.show_id) === String(showId)
           && x.watched_at.slice(0, 10) === ts.slice(0, 10));
         if (h) { h.count++; h.season = mS; h.number = mN; h.watched_at = ts;
@@ -882,7 +885,7 @@ function renderUpcoming(d, animate = true) {
   if (!items.length) { view.innerHTML = `<h1>Upcoming</h1><div class="empty">Nothing scheduled in the next 90 days.</div>`; return; }
   const days = {};
   items.forEach(i => (days[i.date] = days[i.date] || []).push(i.html));
-  const today = new Date().toISOString().slice(0, 10);
+  const today = nowStamp().slice(0, 10);
   const label = d0 => {
     const diff = Math.round((new Date(d0) - new Date(today)) / 864e5);
     if (diff <= 0) return "Tonight"; if (diff === 1) return "Tomorrow";
@@ -1104,7 +1107,7 @@ routes.show = async id => {
   const s = await api(`/show/${id}`);
   stop();
   s.seasons = s.seasons.filter(se => se.episodes.length);   // hide empty (unproduced) seasons
-  const today = new Date().toISOString().slice(0, 10);
+  const today = nowStamp().slice(0, 10);
   const watchable = s.seasons.flatMap(se => se.episodes)
     .filter(e => e.season > 0 && e.air_date && e.air_date <= today);
   let watched = watchable.filter(e => e.watched).length;
@@ -1260,7 +1263,7 @@ routes.show = async id => {
     if (row) { const d = setRow(row, on); patchTotals(d); patchSeasonHeader(row.closest(".season")); }
     else {
       const e = epIndex.get(`${season}:${number}`);
-      if (e && e.watched !== on) { e.watched = on; if (on && !e.watched_at) e.watched_at = new Date().toISOString(); patchTotals(on ? 1 : -1); }
+      if (e && e.watched !== on) { e.watched = on; if (on && !e.watched_at) e.watched_at = nowStamp(); patchTotals(on ? 1 : -1); }
       const box = view.querySelector(`.season[data-season="${season}"]`); if (box) patchSeasonHeader(box);
     }
     delete CACHE["/dashboard"];
@@ -1311,7 +1314,7 @@ routes.show = async id => {
   }
   const setRow = (row, on) => {
     const e = epIndex.get(`${+row.dataset.s}:${+row.dataset.n}`);
-    if (e) { e.watched = on; if (on && !e.watched_at) e.watched_at = new Date().toISOString(); }
+    if (e) { e.watched = on; if (on && !e.watched_at) e.watched_at = nowStamp(); }
     const ews = $(".ews", row);
     if (ews) ews.textContent = on && e?.watched_at ? "Watched " + fmtDate(e.watched_at.slice(0, 10)) : "";
     if (row.classList.contains("w") === on) return 0;
@@ -1325,7 +1328,7 @@ routes.show = async id => {
     const s = sheet(`<div class="sh-t">${sxe(season, number)} · ${esc(e?.title || "Episode " + number)}</div>
       <button class="btn" data-a="toggle">${watched ? "Mark unwatched" : "Mark watched"}</button>
       ${watched ? `<label>Watched on</label>
-        <input type="date" id="wd" value="${(e?.watched_at || "").slice(0, 10)}" max="${new Date().toISOString().slice(0,10)}">
+        <input type="date" id="wd" value="${(e?.watched_at || "").slice(0, 10)}" max="${nowStamp().slice(0,10)}">
         <button class="btn pri" data-a="savedate">Save date</button>` : ""}
       <a class="btn" href="#/show/${id}/e/${season}/${number}" data-a="open">Episode details</a>
       <button class="btn ghost" data-a="cancel">Close</button>`, { cls: "editor" });
@@ -1567,7 +1570,7 @@ function renderMovies(d, tab, animate = true) {
     const card = b.closest(".pcard");
     const idx = d[tab].findIndex(m => m.id === +card.dataset.id);
     const [m] = d[tab].splice(idx, 1);
-    if (b.dataset.a === "watched") { m.state = "watched"; m.watched_at = new Date().toISOString(); d.watched.unshift(m); sparks(b); }
+    if (b.dataset.a === "watched") { m.state = "watched"; m.watched_at = nowStamp(); d.watched.unshift(m); sparks(b); }
     api(`/movie/${card.dataset.id}/state`, { body: { state: b.dataset.a } }).catch(() => routes.movies(tab));
     renderMovies(d, tab);
   });

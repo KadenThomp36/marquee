@@ -33,7 +33,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260717c"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260718a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -115,7 +115,7 @@ def ensure_default_list(con, uid):
     if r:
         return r["id"]
     cur = con.execute("INSERT INTO lists(user_id,name,is_default,created_at) VALUES(?,?,1,?)",
-                      (uid, "Want to Watch", datetime.utcnow().isoformat()))
+                      (uid, "Want to Watch", datetime.now().isoformat()))
     return cur.lastrowid
 
 
@@ -218,7 +218,7 @@ def upsert_show(con, tmdb_id, fetch_episodes=True):
          int(d["first_air_date"][:4]) if d.get("first_air_date") else None,
          d.get("status"), ",".join(g["name"] for g in d.get("genres", [])),
          (d.get("episode_run_time") or [30])[0] if d.get("episode_run_time") else 30,
-         datetime.utcnow().isoformat(), json.dumps(details)))
+         datetime.now().isoformat(), json.dumps(details)))
     if fetch_episodes:
         for s in d.get("seasons", []):
             sd = tmdb(f"/tv/{tmdb_id}/season/{s['season_number']}")
@@ -327,7 +327,7 @@ async def login(request: Request, response: Response):
             raise HTTPException(401, "wrong username or password")
         tok = secrets.token_urlsafe(32)
         con.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)",
-                    (tok, u["id"], datetime.utcnow().isoformat()))
+                    (tok, u["id"], datetime.now().isoformat()))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
     return {"username": u["username"], "is_admin": bool(u["is_admin"])}
 
@@ -365,12 +365,12 @@ async def register(request: Request, response: Response):
             raise HTTPException(409, "that username is taken")
         cur = con.execute("""INSERT INTO users(username,pass,is_admin,created_at)
             VALUES(?,?,?,?)""", (username, hash_pw(password), 1 if first else 0,
-                                 datetime.utcnow().isoformat()))
+                                 datetime.now().isoformat()))
         uid = cur.lastrowid
         ensure_default_list(con, uid)
         tok = secrets.token_urlsafe(32)
         con.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)",
-                    (tok, uid, datetime.utcnow().isoformat()))
+                    (tok, uid, datetime.now().isoformat()))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
     return {"username": username, "is_admin": first}
 
@@ -493,7 +493,7 @@ async def favorites_add(request: Request, user=Depends(current_user)):
         n = con.execute("SELECT COALESCE(MAX(position),-1)+1 p FROM favorites WHERE user_id=?",
                         (user["id"],)).fetchone()["p"]
         con.execute("""INSERT OR IGNORE INTO favorites(user_id,item_type,item_id,position,created_at)
-            VALUES(?,?,?,?,?)""", (user["id"], it, iid, n, datetime.utcnow().isoformat()))
+            VALUES(?,?,?,?,?)""", (user["id"], it, iid, n, datetime.now().isoformat()))
         return {"favorites": get_favorites(con, user["id"])}
 
 
@@ -773,7 +773,7 @@ async def create_list(request: Request, user=Depends(current_user)):
     visibility = norm_vis(body.get("visibility"))
     with db() as con:
         cur = con.execute("INSERT INTO lists(user_id,name,visibility,created_at) VALUES(?,?,?,?)",
-                          (user["id"], name, visibility, datetime.utcnow().isoformat()))
+                          (user["id"], name, visibility, datetime.now().isoformat()))
         set_list_shares(con, cur.lastrowid, user["id"], body.get("shared_with"))
     return {"id": cur.lastrowid, "name": name, "visibility": visibility}
 
@@ -856,7 +856,7 @@ async def list_item_toggle(list_id: int, request: Request, user=Depends(current_
             elif it_type == "movie" and not con.execute("SELECT 1 FROM movies WHERE id=?", (it_id,)).fetchone():
                 upsert_movie(con, it_id)
             con.execute("""INSERT OR IGNORE INTO list_items(list_id,item_type,item_id,added_at)
-                VALUES(?,?,?,?)""", (list_id, it_type, it_id, datetime.utcnow().isoformat()))
+                VALUES(?,?,?,?)""", (list_id, it_type, it_id, datetime.now().isoformat()))
     return {"ok": True}
 
 
@@ -1041,7 +1041,7 @@ async def post_review(item_type: str, item_id: int, request: Request, user=Depen
     text = (body.get("body") or "").strip()
     if not text and not rating:
         raise HTTPException(400, "a rating or some words, please")
-    now = datetime.utcnow().isoformat()
+    now = datetime.now().isoformat()
     with db() as con:
         is_new = not con.execute("SELECT 1 FROM reviews WHERE user_id=? AND item_type=? AND item_id=?",
                                  (user["id"], item_type, item_id)).fetchone()
@@ -1068,7 +1068,7 @@ async def post_reply(review_id: int, request: Request, user=Depends(current_user
     text = ((await request.json()).get("body") or "").strip()
     if not text:
         raise HTTPException(400, "write something")
-    now = datetime.utcnow().isoformat()
+    now = datetime.now().isoformat()
     with db() as con:
         rv = con.execute("SELECT user_id, item_type, item_id FROM reviews WHERE id=?",
                          (review_id,)).fetchone()
@@ -1123,7 +1123,7 @@ def push_notif(con, user_id, ntype, title, body, link, dedup=None, seed=False):
     if seed:
         if dedup:
             con.execute("INSERT OR IGNORE INTO notif_sent(user_id,dedup,created_at) VALUES(?,?,?)",
-                        (user_id, dedup, datetime.utcnow().isoformat()))
+                        (user_id, dedup, datetime.now().isoformat()))
         return False
     en, _ = notif_pref(con, user_id, ntype)
     if not en:
@@ -1131,7 +1131,7 @@ def push_notif(con, user_id, ntype, title, body, link, dedup=None, seed=False):
     if dedup and con.execute("SELECT 1 FROM notif_sent WHERE user_id=? AND dedup=?",
                              (user_id, dedup)).fetchone():
         return False
-    now = datetime.utcnow().isoformat()
+    now = datetime.now().isoformat()
     con.execute("INSERT INTO notifications(user_id,type,title,body,link,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id, ntype, title, body, link, now))
     if dedup:
@@ -1302,7 +1302,7 @@ def list_notifications(user=Depends(current_user)):
 @app.post("/api/notifications/read")
 async def mark_notifications_read(request: Request, user=Depends(current_user)):
     nid = (await request.json()).get("id")
-    now = datetime.utcnow().isoformat()
+    now = datetime.now().isoformat()
     with db() as con:
         if nid:
             con.execute("UPDATE notifications SET read_at=? WHERE id=? AND user_id=? AND read_at IS NULL",
@@ -1425,7 +1425,7 @@ async def push_subscribe(request: Request, user=Depends(current_user)):
         con.execute("""INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth,created_at)
             VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET
               user_id=excluded.user_id, p256dh=excluded.p256dh, auth=excluded.auth""",
-            (user["id"], ep, keys["p256dh"], keys["auth"], datetime.utcnow().isoformat()))
+            (user["id"], ep, keys["p256dh"], keys["auth"], datetime.now().isoformat()))
     return {"ok": True}
 
 
@@ -1454,6 +1454,21 @@ def today():
     return date.today().isoformat()
 
 
+def utc_to_local(ts):
+    """Naive-UTC ISO string → naive local ISO (all DB timestamps are household-local
+    since the 2026-07-18 tz migration; external sources like TV Time exports are UTC
+    and must pass through here). Date-only strings and None pass through untouched."""
+    if not ts or len(ts) <= 10:
+        return ts
+    try:
+        d = datetime.fromisoformat(ts)
+    except ValueError:
+        return ts
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone().replace(tzinfo=None).isoformat()
+
+
 @app.get("/api/home")
 def home(user=Depends(current_user)):
     uid, t = user["id"], today()
@@ -1469,7 +1484,7 @@ def home(user=Depends(current_user)):
                AND e.air_date>?) AS next_air
           FROM follows f JOIN shows s ON s.id=f.show_id WHERE f.user_id=?""",
           (t, uid, uid, t, uid)).fetchall()
-        stale_cut = (datetime.utcnow() - timedelta(days=STALE_DAYS)).isoformat()
+        stale_cut = (datetime.now() - timedelta(days=STALE_DAYS)).isoformat()
         fresh_cut = (date.today() - timedelta(days=STALE_DAYS)).isoformat()  # "recently aired"
         for r in rows:
             nxt = con.execute("""
@@ -1807,7 +1822,7 @@ async def mark_episode(show_id: int, request: Request, user=Depends(current_user
     body = await request.json()
     uid = user["id"]
     season, number = int(body["season"]), int(body["number"])
-    now = datetime.utcnow().isoformat()
+    now = datetime.now().isoformat()
     with db() as con:
         if body.get("set_date"):
             # update (or create) the watch's date without toggling
@@ -1843,7 +1858,7 @@ async def mark_episode(show_id: int, request: Request, user=Depends(current_user
 @app.post("/api/show/{show_id}/season/{season}/watch")
 async def mark_season(show_id: int, season: int, request: Request, user=Depends(current_user)):
     body = await request.json()
-    uid, now = user["id"], datetime.utcnow().isoformat()
+    uid, now = user["id"], datetime.now().isoformat()
     with db() as con:
         if body.get("unwatch"):
             con.execute("DELETE FROM watches WHERE user_id=? AND show_id=? AND season=?",
@@ -1871,7 +1886,7 @@ async def follow(show_id: int, request: Request, user=Depends(current_user)):
                         (body["rating"], user["id"], show_id))
         else:
             con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
-                        (user["id"], show_id, datetime.utcnow().isoformat()))
+                        (user["id"], show_id, datetime.now().isoformat()))
     return {"ok": True}
 
 
@@ -1955,7 +1970,7 @@ def watch_providers(item_type: str, item_id: int, user=Depends(current_user)):
                           (item_type, item_id)).fetchone()
     if row and row["fetched_at"]:
         try:
-            age = (datetime.utcnow() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
+            age = (datetime.now() - datetime.fromisoformat(row["fetched_at"])).total_seconds()
             if age < WATCH_TTL:
                 return json.loads(row["data"])
         except (ValueError, json.JSONDecodeError):
@@ -1989,7 +2004,7 @@ def watch_providers(item_type: str, item_id: int, user=Depends(current_user)):
             VALUES(?,?,'US',?,?)
             ON CONFLICT(item_type,item_id,region)
               DO UPDATE SET data=excluded.data, fetched_at=excluded.fetched_at""",
-            (item_type, item_id, json.dumps(result), datetime.utcnow().isoformat()))
+            (item_type, item_id, json.dumps(result), datetime.now().isoformat()))
     return result
 
 
@@ -2003,7 +2018,7 @@ async def movie_state(movie_id: int, request: Request, user=Depends(current_user
         if state == "none":
             con.execute("DELETE FROM movie_states WHERE user_id=? AND movie_id=?", (user["id"], movie_id))
         else:
-            watched_at = datetime.utcnow().isoformat() if state == "watched" else None
+            watched_at = datetime.now().isoformat() if state == "watched" else None
             con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating)
                 VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state,
                 watched_at=COALESCE(excluded.watched_at, movie_states.watched_at),
@@ -2046,7 +2061,7 @@ async def add(request: Request, user=Depends(current_user)):
                 if not upsert_show(con, tmdb_id):
                     raise HTTPException(404, "show not found on TMDB")
             con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
-                        (user["id"], tmdb_id, datetime.utcnow().isoformat()))
+                        (user["id"], tmdb_id, datetime.now().isoformat()))
         else:
             if not con.execute("SELECT 1 FROM movies WHERE id=?", (tmdb_id,)).fetchone():
                 if not upsert_movie(con, tmdb_id):
@@ -2055,7 +2070,7 @@ async def add(request: Request, user=Depends(current_user)):
             con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at)
                 VALUES(?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state""",
                 (user["id"], tmdb_id, state,
-                 datetime.utcnow().isoformat() if state == "watched" else None))
+                 datetime.now().isoformat() if state == "watched" else None))
     return {"ok": True}
 
 
@@ -2297,7 +2312,7 @@ def compute_stats(uid):
         for r in con.execute("""
             SELECT f.archived, s.status,
               (SELECT COUNT(*) FROM episodes e WHERE e.show_id=s.id AND e.season>0
-                 AND e.air_date IS NOT NULL AND e.air_date<=date('now')) aired,
+                 AND e.air_date IS NOT NULL AND e.air_date<=date('now','localtime')) aired,
               (SELECT COUNT(*) FROM watches w WHERE w.user_id=f.user_id AND w.show_id=s.id
                  AND w.season>0) watched
             FROM follows f JOIN shows s ON s.id=f.show_id WHERE f.user_id=?""", (uid,)):
@@ -2576,7 +2591,7 @@ def recap(year: int, user=Depends(current_user)):
 def recap_seen_mark(year: int, user=Depends(current_user)):
     with db() as con:
         con.execute("INSERT OR IGNORE INTO recap_seen(user_id,year,seen_at) VALUES(?,?,?)",
-                    (user["id"], year, datetime.utcnow().isoformat()))
+                    (user["id"], year, datetime.now().isoformat()))
     return {"ok": True}
 
 
@@ -2683,7 +2698,7 @@ def _import_tvtime(uid, zbytes):
                     st["errors"].append(f"movie not matched: {m.get('title')}")
                     continue
                 upsert_movie(con, found["id"])
-                w = (m.get("watched_at") or "").rstrip("Z").split(".")[0] or None
+                w = utc_to_local((m.get("watched_at") or "").rstrip("Z").split(".")[0] or None)
                 con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating)
                     VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO NOTHING""",
                     (uid, found["id"], "watched" if m.get("is_watched") else "watchlist", w,
@@ -2709,14 +2724,14 @@ def _import_tvtime(uid, zbytes):
                     upsert_show(con, sid)
                 archived = 1 if meta.get("status") == "stopped" else 0
                 con.execute("""INSERT OR IGNORE INTO follows(user_id,show_id,added_at,archived,rating)
-                    VALUES(?,?,?,?,?)""", (uid, sid, datetime.utcnow().isoformat(), archived,
+                    VALUES(?,?,?,?,?)""", (uid, sid, datetime.now().isoformat(), archived,
                                            int(meta["rating"]) if meta.get("rating") else None))
                 rows = []
                 for se in sh.get("seasons", []):
                     for e in se.get("episodes", []):
                         if e.get("is_watched"):
-                            w = (e.get("watched_at") or "").rstrip("Z").split(".")[0] or \
-                                datetime.utcnow().isoformat()
+                            w = utc_to_local((e.get("watched_at") or "").rstrip("Z").split(".")[0]) \
+                                or datetime.now().isoformat()
                             rows.append((uid, sid, se["number"], e["number"], w))
                 con.executemany("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
                     VALUES(?,?,?,?,?)""", rows)
@@ -2878,7 +2893,7 @@ def plex_tmdb_id(rating_key, token):
 
 def record_plex_watch(con, uid, mtype, tmdb_id, season, number, watched_at=None):
     """Returns True only when this creates a *genuinely new* watch (so callers can notify)."""
-    now = watched_at or datetime.utcnow().isoformat()
+    now = watched_at or datetime.now().isoformat()
     if mtype == "movie" and tmdb_id:
         upsert_movie(con, tmdb_id)
         prev = con.execute("SELECT state FROM movie_states WHERE user_id=? AND movie_id=?",
@@ -2923,7 +2938,7 @@ def plex_poll_once():
             uid = users_by_plex.get(uname)
             if not uid:
                 continue
-            when = datetime.utcfromtimestamp(int(e["viewedAt"])).isoformat() if e.get("viewedAt") else None
+            when = datetime.fromtimestamp(int(e["viewedAt"])).isoformat() if e.get("viewedAt") else None
             if e.get("type") == "movie":
                 tid = plex_tmdb_id(e.get("ratingKey"), token)
                 if record_plex_watch(con, uid, "movie", tid, None, None, when):
@@ -2943,10 +2958,10 @@ def plex_poll_once():
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('plex_history_cursor',?)",
                     (str(newest),))
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('plex_last_poll',?)",
-                    (datetime.utcnow().isoformat(),))
+                    (datetime.now().isoformat(),))
         if marked:
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webhook_last',?)",
-                        (datetime.utcnow().isoformat(),))
+                        (datetime.now().isoformat(),))
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webhook_last_user',?)",
                         ("plex history",))
     return f"marked {marked} of {len(entries)} new history entries"
@@ -2982,7 +2997,7 @@ async def plex_native_webhook(request: Request):
             return {"ok": False, "reason": f"no user mapped to plex account {account}"}
         token = plex_owner_token(con)
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webhook_last',?)",
-                    (datetime.utcnow().isoformat(),))
+                    (datetime.now().isoformat(),))
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webhook_last_user',?)",
                     (account,))
         if md.get("type") == "movie":
@@ -3019,7 +3034,7 @@ async def tautulli(request: Request):
     mtype = body.get("media_type")
     with db() as con:
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webhook_last',?)",
-                    (datetime.utcnow().isoformat(),))
+                    (datetime.now().isoformat(),))
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('webhook_last_user',?)",
                     (account,))
     guids = " ".join(str(body.get(k) or "") for k in ("guids", "guid", "grandparent_guid", "grandparent_guids"))
@@ -3030,7 +3045,7 @@ async def tautulli(request: Request):
         if not u:
             return {"ok": False, "reason": f"no user mapped to plex account {account}"}
         uid = u["id"]
-        now = datetime.utcnow().isoformat()
+        now = datetime.now().isoformat()
         if mtype == "movie":
             if not tmdb_id:
                 r = tmdb("/search/movie", query=body.get("title", ""), year=body.get("year"))
@@ -3252,7 +3267,7 @@ async def create_or_update_user(request: Request, _=Depends(admin_user)):
             cur = con.execute("""INSERT INTO users(username,pass,is_admin,plex_username,created_at)
                 VALUES(?,?,?,?,?)""", (body["username"].strip(), hash_pw(body["password"]),
                 1 if body.get("is_admin") else 0, body.get("plex_username"),
-                datetime.utcnow().isoformat()))
+                datetime.now().isoformat()))
             ensure_default_list(con, cur.lastrowid)
     return {"ok": True}
 
@@ -3266,7 +3281,7 @@ def refresh_catalog():
             SELECT DISTINCT s.id FROM shows s JOIN follows f ON f.show_id=s.id
             WHERE (s.status NOT IN ('Ended','Canceled')
                OR EXISTS (SELECT 1 FROM episodes e WHERE e.show_id=s.id
-                          AND (e.air_date IS NULL OR e.air_date>date('now'))))
+                          AND (e.air_date IS NULL OR e.air_date>date('now','localtime'))))
             AND NOT EXISTS (SELECT 1 FROM episodes e WHERE e.show_id=s.id AND e.source='custom')""")]
     log.info("refresh: %d shows", len(ids))
     for sid in ids:
