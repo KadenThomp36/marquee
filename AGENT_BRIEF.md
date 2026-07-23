@@ -14,8 +14,8 @@ is expected to feel designed, not generated.
 
 ## 0. Hard rules (do not violate)
 
-1. **NEVER touch the live server.** Do not `pct exec 130`, do not read/write `/opt/marquee`,
-   do not connect to `192.168.10.67`, do not touch any `.db`. The maintainer deploys.
+1. **NEVER touch the live server.** Do not `pct exec` into the production container, do not read/write `/opt/marquee`,
+   do not connect to the production host, do not touch any `.db`. The maintainer deploys.
    You work **only inside your worktree** on the host filesystem.
 2. **Stay in your lane.** Only edit the files/functions your task owns (listed in your
    spawn prompt). Touching another agent's area causes merge conflicts. When two features

@@ -1,8 +1,8 @@
 # Marquee
 
 Self-hosted household media tracker (TV / movies / anime). A TV-Time replacement
-for Kaden's household, running in Proxmox **LXC CT 130** at `192.168.10.67:8010`
-(public via Tailscale Funnel at `https://marquee.tail2c61c0.ts.net`).
+for Kaden's household, running in a Proxmox LXC
+(published via Tailscale Funnel).
 
 ## Stack
 - **Backend:** single-file FastAPI + stdlib `sqlite3` (WAL) — `main.py`
@@ -11,14 +11,14 @@ for Kaden's household, running in Proxmox **LXC CT 130** at `192.168.10.67:8010`
 - **PWA:** service worker at `static/sw.js` (network-first HTML, SWR for `?v=` assets)
 
 ## Deploy (production, done by the maintainer only)
-Files are pushed to `/opt/marquee` on CT 130 and the service restarted:
+Files are pushed to `/opt/marquee` on the container and the service restarted:
 ```
-pct push 130 main.py /opt/marquee/main.py
-pct push 130 static/app.js /opt/marquee/static/app.js   # etc.
-pct exec 130 -- systemctl restart marquee
+pct push <ct-id> main.py /opt/marquee/main.py
+pct push <ct-id> static/app.js /opt/marquee/static/app.js   # etc.
+pct exec <ct-id> -- systemctl restart marquee
 ```
-Secrets (TMDB/Overseerr/Plex tokens, VAPID keys) live in the DB `settings` table on
-CT 130 — **never** in code. The live DB is production household data; never reset it.
+Secrets (TMDB/Overseerr/Plex tokens, VAPID keys) live in the DB `settings` table on the container
+— **never** in code. The live DB is production household data; never reset it.
 
 ## Build versioning
 `BUILD` is duplicated in `main.py`, `static/app.js`, and `static/index.html` (`?v=`).
