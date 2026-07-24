@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 import zipfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -35,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723i"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723j"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2180,35 +2181,74 @@ def reading(user=Depends(current_user)):
     return {"books": group(books), "manga": group(manga)}
 
 
+def _norm_txt(s):
+    s = unicodedata.normalize("NFKD", (s or "").lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\b(the|a|an)\b", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _author_overlap(a, b):
+    an, bn = set(_norm_txt(a).split()), set(_norm_txt(b).split())
+    return not an or not bn or bool(an & bn)
+
+
 @app.get("/api/books/search")
 def books_search(q: str, user=Depends(current_user)):
-    out, seen = [], set()
+    docs, seen = [], set()
     for v in _q_variants(q):
-        d = openlibrary("/search.json", q=v, limit=20,
-                        fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median")
+        d = openlibrary("/search.json", q=v, limit=30,
+                        fields="key,title,author_name,first_publish_year,cover_i,"
+                               "number_of_pages_median,edition_count")
         for doc in (d or {}).get("docs", []):
             olid = (doc.get("key") or "").rsplit("/", 1)[-1]
-            if not olid or olid in seen:
-                continue
-            seen.add(olid)
-            out.append({"olid": olid, "title": doc.get("title"),
-                        "author": ", ".join((doc.get("author_name") or [])[:2]),
-                        "year": doc.get("first_publish_year"),
-                        "pages": doc.get("number_of_pages_median"),
-                        "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
-                                 if doc.get("cover_i") else None})
-        if len(out) >= 5:
+            if olid and olid not in seen:
+                seen.add(olid); docs.append(doc)
+        if len(docs) >= 8:
             break
-    # decorate with genuine Apple art + genres (one cached Apple search per query)
-    apple = itunes_ebooks(_clean_title(q)) or itunes_ebooks(q)
-    for r in out[:20]:
-        hit = next((a for a in apple if _title_matches(_clean_title(r["title"] or ""),
-                                                       a.get("trackName") or "")), None)
-        if hit:
+    # OL keeps a separate work record per translation/retelling of a classic, so a
+    # search for "The Odyssey" returns a wall of near-identical rows. Cluster by
+    # normalized title+author keeping the most-published record, then rank exact
+    # title matches first and everything by edition count — canon up, oddballs down.
+    qn = _norm_txt(q)
+    clusters = {}
+    for doc in docs:
+        key = (_norm_txt(doc.get("title")) or (doc.get("title") or "").lower(),
+               _norm_txt((doc.get("author_name") or [""])[0]))
+        cur = clusters.get(key)
+        if not cur:
+            clusters[key] = doc
+        elif (doc.get("edition_count") or 0) > (cur.get("edition_count") or 0):
+            if not doc.get("cover_i"):
+                doc["cover_i"] = cur.get("cover_i")
+            clusters[key] = doc
+        elif not cur.get("cover_i") and doc.get("cover_i"):
+            cur["cover_i"] = doc["cover_i"]
+    ranked = sorted(clusters.values(),
+                    key=lambda x: (_norm_txt(x.get("title")) == qn,
+                                   qn in _norm_txt(x.get("title")),
+                                   x.get("edition_count") or 0),
+                    reverse=True)[:12]
+    out = [{"olid": doc["key"].rsplit("/", 1)[-1], "title": doc.get("title"),
+            "author": ", ".join((doc.get("author_name") or [])[:2]),
+            "year": doc.get("first_publish_year"),
+            "pages": doc.get("number_of_pages_median"),
+            "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
+                     if doc.get("cover_i") else None} for doc in ranked]
+    # Apple art: title AND author must match, and each Apple hit decorates at most
+    # one result — otherwise one pink cover ends up stamped across the whole grid
+    apple = list(itunes_ebooks(_clean_title(q)) or itunes_ebooks(q))
+    for r in out:
+        i = next((i for i, a in enumerate(apple)
+                  if _title_matches(_clean_title(r["title"] or ""), a.get("trackName") or "")
+                  and _author_overlap(r["author"], a.get("artistName") or "")), None)
+        if i is not None:
+            hit = apple.pop(i)
             if hit.get("artworkUrl100"):
                 r["cover"] = hit["artworkUrl100"].replace("100x100bb", "600x600bb")
             r["genres"] = ",".join(_apple_genres(hit))
-    return {"results": out[:20]}
+    return {"results": out}
 
 
 def _clean_title(t):
