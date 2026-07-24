@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723f";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723g";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1744,7 +1744,7 @@ function rdEndSession(ses, refresh) {
       await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { pos } }).catch(() => {});
       toast(`Session saved — ${rdElapsed(ses.started_at)}${pos > (ses.start_pos || 0)
         ? ` · ${pos - (ses.start_pos || 0)} ${ses.kind === "book" ? "pages" : "chapters"}` : ""}`);
-      delete CACHE["/reading"]; delete CACHE["/reading/stats"]; delete CACHE["/reading/stats"]; refresh();
+      delete CACHE["/reading"]; delete CACHE["/reading/stats"]; refresh();
     } });
 }
 function paintLive(refresh) {
@@ -1776,24 +1776,40 @@ function rdNeedsDates(it) {
     return !it.finished_at || !it.started_at || s10(it.started_at) === s10(it.finished_at);
   return false;
 }
-function rdDatesWizard(items, kind, refresh) {
+function rdDatesWizard(items, kind, refresh, allItems) {
   let i = 0, saved = 0;
   const s = sheet(`<div class="rd-sheet rdw"><div id="rdwbody"></div></div>`);
+  const s10 = v => (v || "").slice(0, 10);
+  // reading-order inference: you probably started this book around the time you
+  // finished the previous one. Recomputed each step so saves refine later guesses.
+  const guessStart = it => {
+    const pool = (allItems || items).filter(x => x !== it && x.finished_at).map(x => s10(x.finished_at));
+    const anchor = it.state === "finished" ? s10(it.finished_at) : null;
+    const before = anchor ? pool.filter(f => f <= anchor) : pool;
+    if (!before.length) return "";
+    const g = before.sort().pop();
+    if (!anchor) return g;                       // currently-reading: latest finish overall
+    // clamp: don't claim a single book took more than ~60 days
+    const lo = new Date(anchor + "T00:00"); lo.setDate(lo.getDate() - 60);
+    const loS = `${lo.getFullYear()}-${String(lo.getMonth() + 1).padStart(2, "0")}-${String(lo.getDate()).padStart(2, "0")}`;
+    return g > loS ? g : loS;
+  };
   const step = () => {
     if (i >= items.length) {
       toast(saved ? `Dates saved for ${saved} title${saved > 1 ? "s" : ""}` : "All done");
       s.close(); if (saved) refresh(); return;
     }
     const it = items[i];
-    const s10 = v => (v || "").slice(0, 10);
-    const startVal = s10(it.started_at) === s10(it.finished_at) ? "" : s10(it.started_at);
+    let startVal = s10(it.started_at) === s10(it.finished_at) ? "" : s10(it.started_at);
+    const guessed = !startVal && (startVal = guessStart(it));
     $("#rdwbody", s.el).innerHTML = `
       <div class="rd-top"><img src="${POSTER(it.cover)}" alt="">
         <div class="rd-meta"><b>${esc(it.title)}</b>
           <span>${kind === "book" ? esc(it.author || "") : `<span class="o-chip">${esc(it.origin || "manga")}</span>`}</span>
           <span class="hint">${it.state === "finished" ? "When did you read it?" : "When did you start it?"}</span></div></div>
       <div class="rdw-dates">
-        <label>Started<input type="date" id="rdws" value="${startVal}" max="${nowStamp().slice(0, 10)}"></label>
+        <label>Started${guessed ? `<i class="rdw-g">best guess</i>` : ""}<input type="date" id="rdws"
+          value="${startVal}" max="${nowStamp().slice(0, 10)}" ${guessed ? 'data-guess="1"' : ""}></label>
         ${it.state === "finished" ? `<label>Finished<input type="date" id="rdwf"
           value="${s10(it.finished_at)}" max="${nowStamp().slice(0, 10)}"></label>` : ""}</div>
       <div class="rdw-nav">
@@ -1854,7 +1870,8 @@ function renderReading(d, tab, animate = true) {
 
   const refresh = () => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); };
   if ($("#rddates")) $("#rddates").onclick = () =>
-    rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, refresh);
+    rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, refresh,
+      [...dd.reading, ...dd.want, ...dd.finished]);
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
   const doSearch = async () => {
     const q = $("#rdq").value.trim(); if (!q) return;
