@@ -35,7 +35,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723c"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723d"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2189,7 +2189,64 @@ def books_search(q: str, user=Depends(current_user)):
     return {"results": out}
 
 
+def _clean_title(t):
+    return re.sub(r"\s*\([^)]*\)\s*$", "", (t or "").replace("’", "'")).split(":")[0].strip()
+
+
+def _title_matches(a, b):
+    a = re.sub(r"[^a-z0-9 ]", "", a.lower()).strip()
+    b = re.sub(r"[^a-z0-9 ]", "", b.lower()).strip()
+    if not a or not b:
+        return False
+    return a[:18] in b or b[:18] in a \
+        or len(set(a.split()) & set(b.split())) >= min(len(a.split()), len(b.split()), 3)
+
+
+def itunes_cover(title, author):
+    """Apple Books artwork — publisher-supplied, so it's the genuine storefront
+    cover (Open Library's are user-uploaded scans of whatever edition someone had).
+    Guarded by a loose title match so a wrong search hit can't attach a wrong cover."""
+    t = _clean_title(title)
+    if not t:
+        return None
+
+    def fetch():
+        try:
+            r = httpx.get("https://itunes.apple.com/search", timeout=15, headers=OL_UA,
+                          params={"term": f"{t} {author}".strip(), "entity": "ebook", "limit": 3})
+            r.raise_for_status()
+            for res in r.json().get("results") or []:
+                if _title_matches(t, res.get("trackName") or "") and res.get("artworkUrl100"):
+                    return res["artworkUrl100"].replace("100x100bb", "600x600bb")
+            return None
+        except httpx.HTTPError:
+            return None
+    return _cached_get(f"it:{t}:{author}", fetch)
+
+
+def resolve_book_cover(olid, title="", author="", ol_cover=None):
+    """Best available cover: Apple Books artwork first (genuine cover art), then
+    whatever Open Library gave us, then OL work/edition covers as a last resort.
+    (Google Books was tried and 429s keylessly from this network.)"""
+    best = itunes_cover(title, author)
+    if best:
+        return best
+    if ol_cover:
+        return ol_cover
+    w = openlibrary(f"/works/{olid}.json")
+    if w and w.get("covers") and w["covers"][0] > 0:
+        return f"https://covers.openlibrary.org/b/id/{w['covers'][0]}-L.jpg"
+    eds = openlibrary(f"/works/{olid}/editions.json", limit=20)
+    for e in (eds or {}).get("entries", []):
+        if e.get("covers") and e["covers"][0] > 0:
+            return f"https://covers.openlibrary.org/b/id/{e['covers'][0]}-L.jpg"
+    return None
+
+
 def upsert_book(con, item):
+    if item.get("olid"):
+        item["cover"] = resolve_book_cover(item["olid"], item.get("title") or "",
+                                           item.get("author") or "", item.get("cover"))
     con.execute("""INSERT INTO books(olid,title,author,cover,year,pages,details)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(olid) DO UPDATE SET title=excluded.title,
           author=excluded.author, cover=COALESCE(excluded.cover, books.cover),
@@ -2213,6 +2270,23 @@ async def books_add(request: Request, user=Depends(current_user)):
               state=excluded.state, updated_at=excluded.updated_at""",
             (user["id"], bid, state, now, now if state == "reading" else None))
     return {"ok": True, "id": bid}
+
+
+@app.post("/api/books/refresh_covers")
+def refresh_covers(user=Depends(current_user)):
+    """Re-resolve every book's cover through the Apple-first chain (upgrades the
+    user-scan OL covers to genuine artwork). Paced to respect Apple's rate limit."""
+    with db() as con:
+        rows = con.execute("SELECT id, olid, title, author, cover FROM books").fetchall()
+    updated = 0
+    for r in rows:
+        new = resolve_book_cover(r["olid"], r["title"] or "", r["author"] or "", r["cover"])
+        if new and new != r["cover"]:
+            with db() as con:
+                con.execute("UPDATE books SET cover=? WHERE id=?", (new, r["id"]))
+            updated += 1
+        time.sleep(0.35)
+    return {"updated": updated, "total": len(rows)}
 
 
 @app.get("/api/manga/search")
