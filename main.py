@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724h"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724k"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -303,6 +303,38 @@ def hc_search_rows(q, limit=8):
 
 def hc_best(title, author):
     return _hc_pick(hc_search_rows(f"{title} {author}".strip(), 8), title, author)
+
+
+HC_BOOK = """query($id:Int!){books(where:{id:{_eq:$id}},limit:1){
+  id title pages rating ratings_count release_year slug description
+  image{url} contributions{author{name}} book_series{position series{name}}
+  cached_tags}}"""
+
+
+def hc_book_by_id(hc_id):
+    """Fetch one book from the GraphQL books table (the search endpoint can't look up
+    by id). Maps the GraphQL shape (differs from the Typesense search document)."""
+    def fetch():
+        d = hardcover(HC_BOOK, {"id": int(hc_id)})
+        return ((d or {}).get("books") or [None])[0]
+    b = _cached_get(f"hcb:{hc_id}", fetch)
+    if not b:
+        return None
+    bs = b.get("book_series") or []
+    series = (bs[0].get("series") or {}).get("name") if bs else None
+    genres = []
+    ct = b.get("cached_tags") or {}
+    if isinstance(ct, dict):
+        genres = [t.get("tag") for t in (ct.get("Genre") or []) if t.get("tag")][:4]
+    return {"hc_id": int(b["id"]), "title": b.get("title"),
+            "author": ", ".join(c["author"]["name"] for c in (b.get("contributions") or [])
+                                 if c.get("author"))[:120] or "",
+            "year": b.get("release_year"), "pages": b.get("pages") or None,
+            "cover": (b.get("image") or {}).get("url"), "series": series or "",
+            "rating": round(b["rating"], 2) if b.get("rating") else None,
+            "community_rating": round(b["rating"], 2) if b.get("rating") else None,
+            "genres": ",".join(genres), "desc": (b.get("description") or "")[:1500],
+            "slug": b.get("slug")}
 
 
 def openlibrary(path, **params):
@@ -2312,23 +2344,28 @@ def _author_overlap(a, b):
 
 @app.get("/api/books/search")
 def books_search(q: str, user=Depends(current_user)):
-    """Hardcover search — dedupe to one row per book (the most-rated edition), so
-    'The Odyssey' doesn't return a wall of translations; ranked by readership."""
-    hits = hc_search_rows(q, 20)
-    by_book, order = {}, []
-    for h in hits:
-        d = h["document"]
-        try:
-            bid = int(d["id"])
-        except (KeyError, ValueError, TypeError):
-            continue
-        prev = by_book.get(bid)
-        if not prev or (d.get("ratings_count") or 0) > (prev.get("ratings_count") or 0):
-            if bid not in by_book:
-                order.append(bid)
-            by_book[bid] = d
-    ranked = sorted((by_book[b] for b in order),
-                    key=lambda d: (d.get("ratings_count") or 0, d.get("users_count") or 0),
+    """Hardcover search, clustered by title+author. Each translation/retelling of a
+    classic is a SEPARATE Hardcover book id, so 'The Odyssey' otherwise returns a
+    wall of identical rows — collapse to the most-read edition per title+author,
+    rank exact-title first then by readership."""
+    hits = hc_search_rows(q, 30)
+    docs = [h["document"] for h in hits if h.get("document", {}).get("id")]
+    # readership (users_count) cleanly separates real books from the long tail of
+    # summaries, workbooks and micro-editions — a real book, even a niche one, has
+    # readers; a cash-grab "Summary of X" has ~1. Keep books that clear a low bar…
+    def strong(d):
+        return (d.get("users_count") or 0) >= 15 or (d.get("ratings_count") or 0) >= 5
+    kept = [d for d in docs if strong(d)]
+    if not kept:                   # …but for a genuinely obscure search, don't over-filter
+        kept = [d for d in docs if (d.get("image") or {}).get("url") or d.get("users_count")] or docs
+    clusters = {}
+    for d in kept:
+        key = (_norm_txt(d.get("title")), _norm_txt((d.get("author_names") or [""])[0]))
+        cur = clusters.get(key)
+        if not cur or (d.get("users_count") or 0) > (cur.get("users_count") or 0):
+            clusters[key] = d
+    ranked = sorted(clusters.values(),
+                    key=lambda d: (d.get("users_count") or 0, d.get("ratings_count") or 0),
                     reverse=True)[:16]
     return {"results": [_hc_row(d) for d in ranked]}
 
@@ -2814,13 +2851,10 @@ def book_preview(hc_id: int, user=Depends(current_user)):
         row = con.execute("SELECT id FROM books WHERE hardcover_id=?", (hc_id,)).fetchone()
     if row:
         return book_detail(row["id"], user)
-    hits = hc_search_rows(f"id:{hc_id}", 1)   # cheap re-hit; search cache usually has it
-    doc = next((h["document"] for h in hits if str(h["document"].get("id")) == str(hc_id)), None)
-    if not doc:
-        # fall back to a title search using whatever the client last saw isn't available
+    it = hc_book_by_id(hc_id)
+    if not it:
         raise HTTPException(404, "unknown book")
-    it = _hc_row(doc)
-    it.update({"subjects": (doc.get("moods") or []) + (doc.get("tags") or [])[:4]})
+    it["subjects"] = []
     return {"tracked": False, "kind": "book", "state": None, "sessions": [], "household": [],
             "item": it}
 
