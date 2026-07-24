@@ -747,6 +747,27 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rd-banner svg{width:18px;height:18px;flex:none}
 .rd-banner .btn{flex:none}
 .rdw-nav{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px}
+/* reading sessions */
+.rd-sesrow{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.rd-sesrow .btn svg{width:15px;height:15px}
+.rd-pulse{width:9px;height:9px;border-radius:50%;background:var(--c-green,#7fbf7f);flex:none;
+  animation:rdpulse 1.6s ease-in-out infinite}
+@keyframes rdpulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.72)}}
+.rd-livechip{display:inline-flex;align-items:center;gap:8px;color:var(--ink-2);font-size:13px;
+  border:1px solid var(--line-2);border-radius:99px;padding:8px 13px}
+.rd-livechip b{color:var(--ink);font-variant-numeric:tabular-nums}
+.rd-livebar{display:flex;align-items:center;gap:11px;margin:0 0 14px;padding:11px 14px;
+  border:1px solid var(--line-2);border-radius:13px;background:var(--panel)}
+.rd-livebar .rd-lb-t{flex:1;min-width:0;font-size:13.5px;font-weight:650;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.rd-livebar b{color:var(--amber-2);font-variant-numeric:tabular-nums}
+.rd-livebar .iconbtn{flex:none}
+.rdcard.live .wc-shot,.rdcard.live .pshot{outline:2px solid var(--c-green,#7fbf7f);outline-offset:-2px;border-radius:var(--r-s)}
+.rdcard.live .pshot::after{content:"";position:absolute;top:8px;right:8px;width:10px;height:10px;
+  border-radius:50%;background:var(--c-green,#7fbf7f);box-shadow:0 0 0 3px rgba(15,13,10,.65);
+  animation:rdpulse 1.6s ease-in-out infinite}
+.unitpick{margin-bottom:12px}
+.unitpick button{min-width:72px}
 .tabs{display:flex;gap:7px;margin:0 0 16px}
 .tabs button{padding:8px 16px;border-radius:99px;border:1px solid var(--line);color:var(--ink-2);
   font-weight:650;font-size:13.5px;transition:all .13s}

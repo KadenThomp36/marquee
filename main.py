@@ -35,7 +35,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723d"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723f"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS manga_states(
   user_id INTEGER, manga_id INTEGER, state TEXT, progress INTEGER DEFAULT 0,
   rating INTEGER, started_at TEXT, finished_at TEXT, updated_at TEXT,
   PRIMARY KEY(user_id, manga_id));
+CREATE TABLE IF NOT EXISTS reading_sessions(
+  id INTEGER PRIMARY KEY, user_id INTEGER, kind TEXT, item_id INTEGER,
+  started_at TEXT, ended_at TEXT, start_pos INTEGER, end_pos INTEGER);
+CREATE INDEX IF NOT EXISTS idx_rsessions_user ON reading_sessions(user_id, ended_at);
 """
 
 
@@ -2353,6 +2357,12 @@ def _update_reading_state(kind, item_id, body, uid):
         con.execute(f"""UPDATE {tbl} SET state=?, progress=?, rating=?, started_at=?,
             finished_at=?, updated_at=? WHERE user_id=? AND {col}=?""",
             (state, progress, rating, started, finished, now, uid, item_id))
+        # every progress change is history: log a zero-duration checkpoint so the
+        # +1 punches / stepper / ad-hoc updates all feed the reading stats
+        if (progress or 0) != (cur["progress"] or 0):
+            con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,
+                ended_at,start_pos,end_pos) VALUES(?,?,?,?,?,?,?)""",
+                (uid, kind, item_id, now, now, cur["progress"] or 0, progress or 0))
 
 
 @app.post("/api/book/{book_id}/state")
@@ -2365,6 +2375,174 @@ async def book_state(book_id: int, request: Request, user=Depends(current_user))
 async def manga_state(manga_id: int, request: Request, user=Depends(current_user)):
     _update_reading_state("manga", manga_id, await request.json(), user["id"])
     return {"ok": True}
+
+
+# --- timed reading sessions: start now, end with where you got to -----------------
+
+def _session_kind(kind):
+    if kind not in ("book", "manga"):
+        raise HTTPException(400, "bad kind")
+    return ("book_states", "book_id") if kind == "book" else ("manga_states", "manga_id")
+
+
+@app.post("/api/{kind}/{item_id}/session/start")
+def session_start(kind: str, item_id: int, user=Depends(current_user)):
+    tbl, col = _session_kind(kind)
+    uid, now = user["id"], datetime.now().isoformat()
+    with db() as con:
+        cur = con.execute(f"SELECT * FROM {tbl} WHERE user_id=? AND {col}=?",
+                          (uid, item_id)).fetchone()
+        if not cur:
+            raise HTTPException(404, "not tracked")
+        live = con.execute("""SELECT * FROM reading_sessions WHERE user_id=? AND kind=?
+            AND item_id=? AND ended_at IS NULL""", (uid, kind, item_id)).fetchone()
+        if live:
+            return {"ok": True, "session_id": live["id"], "started_at": live["started_at"]}
+        if cur["state"] != "reading":
+            con.execute(f"""UPDATE {tbl} SET state='reading',
+                started_at=COALESCE(started_at,?), updated_at=? WHERE user_id=? AND {col}=?""",
+                (now, now, uid, item_id))
+        cur_pos = cur["progress"] or 0
+        c = con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,start_pos)
+            VALUES(?,?,?,?,?)""", (uid, kind, item_id, now, cur_pos))
+        return {"ok": True, "session_id": c.lastrowid, "started_at": now}
+
+
+@app.post("/api/{kind}/{item_id}/session/end")
+async def session_end(kind: str, item_id: int, request: Request, user=Depends(current_user)):
+    body = await request.json()
+    tbl, col = _session_kind(kind)
+    uid, now = user["id"], datetime.now().isoformat()
+    with db() as con:
+        live = con.execute("""SELECT * FROM reading_sessions WHERE user_id=? AND kind=?
+            AND item_id=? AND ended_at IS NULL""", (uid, kind, item_id)).fetchone()
+        if not live:
+            raise HTTPException(404, "no live session")
+        if body.get("discard"):
+            con.execute("DELETE FROM reading_sessions WHERE id=?", (live["id"],))
+            return {"ok": True, "discarded": True}
+        pos = int(body.get("pos", live["start_pos"] or 0))
+        con.execute("UPDATE reading_sessions SET ended_at=?, end_pos=? WHERE id=?",
+                    (now, pos, live["id"]))
+        # bump shelf progress directly (the session row IS the history entry)
+        con.execute(f"""UPDATE {tbl} SET progress=?, updated_at=? WHERE user_id=? AND {col}=?
+            AND (progress IS NULL OR progress<?)""", (pos, now, uid, item_id, pos))
+    return {"ok": True, "pos": pos}
+
+
+@app.get("/api/reading/active")
+def reading_active(user=Depends(current_user)):
+    with db() as con:
+        rows = con.execute("""SELECT rs.*, COALESCE(b.title, m.title) AS title,
+            COALESCE(b.cover, m.cover) AS cover, b.pages, m.chapters
+            FROM reading_sessions rs
+            LEFT JOIN books b ON rs.kind='book' AND b.id=rs.item_id
+            LEFT JOIN manga m ON rs.kind='manga' AND m.id=rs.item_id
+            WHERE rs.user_id=? AND rs.ended_at IS NULL ORDER BY rs.started_at""",
+            (user["id"],)).fetchall()
+    return {"sessions": [dict(r) for r in rows]}
+
+
+@app.get("/api/reading/stats")
+def reading_stats(user=Depends(current_user)):
+    """The in-depth numbers: totals / paces / streaks / clocks across timeframes,
+    from the session log (timed sessions + zero-duration checkpoints)."""
+    uid = user["id"]
+    t = date.today()
+
+    def mins(a, b):
+        try:
+            return max(0.0, (datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds() / 60)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def crunch(kind, states_tbl, items_tbl, id_col, total_col):
+        with db() as con:
+            ses = con.execute("""SELECT started_at, ended_at, start_pos, end_pos
+                FROM reading_sessions WHERE user_id=? AND kind=? AND ended_at IS NOT NULL
+                ORDER BY started_at""", (uid, kind)).fetchall()
+            st = con.execute(f"""SELECT s.*, i.title, i.{total_col} AS total
+                FROM {states_tbl} s JOIN {items_tbl} i ON i.id=s.{id_col}
+                WHERE s.user_id=?""", (uid,)).fetchall()
+        daily, clock, wd = {}, [0.0] * 24, [0.0] * 7
+        total_units = total_min = timed_units = 0
+        timed = []
+        for s in ses:
+            delta = max(0, (s["end_pos"] or 0) - (s["start_pos"] or 0))
+            day = s["started_at"][:10]
+            m = mins(s["started_at"], s["ended_at"])
+            d0 = daily.setdefault(day, {"units": 0, "min": 0.0})
+            d0["units"] += delta; d0["min"] += m
+            total_units += delta; total_min += m
+            if m >= 3:
+                timed.append((m, delta))
+                timed_units += delta
+                dt0 = datetime.fromisoformat(s["started_at"])
+                clock[dt0.hour] += m; wd[dt0.weekday()] += m
+        days_sorted = sorted(daily)
+        # streak: consecutive days (ending today or yesterday) with any activity
+        streak_cur = streak_max = 0
+        run, prev = 0, None
+        for dstr in days_sorted:
+            dd = date.fromisoformat(dstr)
+            run = run + 1 if prev and (dd - prev).days == 1 else 1
+            streak_max = max(streak_max, run); prev = dd
+        if days_sorted and (t - date.fromisoformat(days_sorted[-1])).days <= 1:
+            streak_cur, i = 1, len(days_sorted) - 1
+            while i > 0 and (date.fromisoformat(days_sorted[i]) - date.fromisoformat(days_sorted[i - 1])).days == 1:
+                streak_cur += 1; i -= 1
+        def units_since(days):
+            lo = (t - timedelta(days=days)).isoformat()
+            return sum(v["units"] for d, v in daily.items() if d >= lo)
+        def min_since(days):
+            lo = (t - timedelta(days=days)).isoformat()
+            return sum(v["min"] for d, v in daily.items() if d >= lo)
+        last30 = [( (t - timedelta(days=i)).isoformat(),
+                    daily.get((t - timedelta(days=i)).isoformat(), {}).get("units", 0))
+                  for i in range(29, -1, -1)]
+        monthly = {}
+        for d0, v in daily.items():
+            monthly[d0[:7]] = monthly.get(d0[:7], 0) + v["units"]
+        yearly = {}
+        for d0, v in daily.items():
+            yearly[d0[:4]] = yearly.get(d0[:4], 0) + v["units"]
+        fins = [r for r in st if r["state"] == "finished"]
+        fin_year = sum(1 for r in fins if (r["finished_at"] or "").startswith(str(t.year)))
+        fastest = longest = None
+        for r in fins:
+            if r["started_at"] and r["finished_at"] and r["finished_at"][:10] > r["started_at"][:10]:
+                days = (date.fromisoformat(r["finished_at"][:10]) - date.fromisoformat(r["started_at"][:10])).days
+                if not fastest or days < fastest["days"]:
+                    fastest = {"title": r["title"], "days": days}
+            if r["total"] and (not longest or r["total"] > longest["units"]):
+                longest = {"title": r["title"], "units": r["total"]}
+        big = max(daily.items(), key=lambda kv: kv[1]["units"], default=None)
+        timed_min = sum(m for m, _ in timed)
+        rating_hist = {}
+        for r in st:
+            if r["rating"]:
+                rating_hist[r["rating"]] = rating_hist.get(r["rating"], 0) + 1
+        return {
+            "totals": {"week": units_since(7), "month": units_since(30), "year": units_since(365),
+                       "all": total_units, "hours_all": round(total_min / 60, 1),
+                       "hours_month": round(min_since(30) / 60, 1),
+                       "sessions": len(ses), "timed_sessions": len(timed)},
+            "pace": round(timed_units / (timed_min / 60), 1) if timed_min >= 15 else None,
+            "avg_session_min": round(timed_min / len(timed)) if timed else None,
+            "streak": {"current": streak_cur, "longest": streak_max},
+            "daily30": last30,
+            "monthly": sorted(monthly.items()),
+            "yearly": sorted(yearly.items()),
+            "clock": [round(x) for x in clock], "weekday": [round(x) for x in wd],
+            "finished": {"all": len(fins), "year": fin_year},
+            "reading_now": sum(1 for r in st if r["state"] == "reading"),
+            "fastest": fastest, "longest": longest,
+            "big_day": {"date": big[0], "units": big[1]["units"]} if big and big[1]["units"] else None,
+            "rating_hist": rating_hist,
+        }
+
+    return {"books": crunch("book", "book_states", "books", "book_id", "pages"),
+            "manga": crunch("manga", "manga_states", "manga", "manga_id", "chapters")}
 
 
 # ---------------------------------------------------------------- search + add

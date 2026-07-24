@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723d";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723f";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1636,12 +1636,18 @@ function rdSheet(it, kind, refresh) {
       <div class="rd-meta"><b>${esc(it.title)}</b>
         <span>${kind === "book" ? esc(it.author || "") : `<span class="o-chip">${esc(it.origin || "manga")}</span> ${esc(it.status || "")}`}${it.year ? ` · ${it.year}` : ""}</span>
         ${total ? `<span class="hint">${total} ${unit}</span>` : ""}</div></div>
+    <div class="rd-sesrow" id="rdses">${RD_ACTIVE.some(s => s.item_id === it.id && s.kind === kind)
+      ? `<span class="rd-livechip"><span class="rd-pulse"></span>reading for
+           <b class="rd-el" data-t="${(RD_ACTIVE.find(s => s.item_id === it.id && s.kind === kind) || {}).started_at}"></b></span>
+         <button class="btn pri" id="sesend">End session</button>`
+      : `<button class="btn" id="sesstart">${PLAY_ICO} Start a reading session</button>`}</div>
     <div class="rd-states">${["want", "reading", "finished"].map(st =>
       `<button class="rd-st ${it.state === st ? "on" : ""}" data-st="${st}">${st === "want" ? (kind === "book" ? "Want to read" : "Want to read") : st === "reading" ? "Reading" : "Finished"}</button>`).join("")}</div>
     <div class="rd-progrow"><label>Progress</label>
       <button class="iconbtn" id="rdminus">−</button>
       <input id="rdprog" type="number" min="0" ${total ? `max="${total}"` : ""} value="${it.progress || 0}">
       <button class="iconbtn" id="rdplus">+</button>
+      ${total ? `<button class="iconbtn" id="rdpct" title="Enter as percent">%</button>` : ""}
       <span class="hint">${total ? "of " + total : ""} ${unit}</span></div>
     <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(it.rating)}</span></div>
     <div class="rdw-dates">
@@ -1653,7 +1659,7 @@ function rdSheet(it, kind, refresh) {
     <button class="btn danger ghost" id="rdremove">${I.x} Remove from my ${kind === "book" ? "books" : "shelf"}</button>
   </div>`);
   const post = body => api(`/${kind}/${it.id}/state`, { body })
-    .then(() => { delete CACHE["/reading"]; }).catch(() => {});
+    .then(() => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; }).catch(() => {});
   $$(".rd-st", s.el).forEach(b => b.onclick = () => {
     $$(".rd-st", s.el).forEach(x => x.classList.remove("on")); b.classList.add("on");
     it.state = b.dataset.st;
@@ -1665,6 +1671,21 @@ function rdSheet(it, kind, refresh) {
   $("#rdminus", s.el).onclick = () => setProg((it.progress || 0) - 1);
   $("#rdplus", s.el).onclick = () => setProg((it.progress || 0) + 1);
   $("#rdprog", s.el).onchange = () => setProg(+$("#rdprog", s.el).value || 0);
+  if ($("#rdpct", s.el)) $("#rdpct", s.el).onclick = () =>
+    posSheet({ title: `How far through ${it.title}?`, total, unit, cur: it.progress || 0,
+      onSave: pos => setProg(pos) });
+  if ($("#sesstart", s.el)) $("#sesstart", s.el).onclick = async () => {
+    await api(`/${kind}/${it.id}/session/start`, { body: {} }).catch(() => {});
+    toast("Session started — happy reading"); s.close();
+    delete CACHE["/reading"]; delete CACHE["/reading/stats"]; refresh();
+  };
+  if ($("#sesend", s.el)) $("#sesend", s.el).onclick = () => {
+    const ses = RD_ACTIVE.find(x => x.item_id === it.id && x.kind === kind);
+    s.close();
+    if (ses) rdEndSession({ ...ses, pages: kind === "book" ? total : null,
+      chapters: kind === "manga" ? total : null }, refresh);
+  };
+  rdTickTimers();
   $("#rdstars", s.el).onclick = e => {
     const t = e.target.closest("[data-v]"); if (!t) return;
     it.rating = it.rating === +t.dataset.v ? null : +t.dataset.v;
@@ -1677,6 +1698,73 @@ function rdSheet(it, kind, refresh) {
     post({ finished_at: it.finished_at }); };
   $("#rdremove", s.el).onclick = async () => { await post({ state: "none" }); s.close(); refresh(); };
   s.el.addEventListener("click", e => { if (e.target === s.el) refresh(); });
+}
+
+/* ---- reading sessions: start/end timed sessions, ad-hoc progress in pages or % ---- */
+let RD_ACTIVE = [];
+const PLAY_ICO = `<svg viewBox="0 0 24 24"><path d="m8 5.5 10 6.5-10 6.5z" fill="currentColor"/></svg>`;
+const rdElapsed = t => { const m = Math.max(1, Math.round((Date.now() - new Date(t).getTime()) / 60000));
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`; };
+function rdTickTimers() {
+  clearInterval(window._rdT);
+  window._rdT = setInterval(() => $$(".rd-el").forEach(el =>
+    { el.textContent = rdElapsed(el.dataset.t); }), 30000);
+  $$(".rd-el").forEach(el => { el.textContent = rdElapsed(el.dataset.t); });
+}
+/* position entry accepting the item's native unit (pages / chapters) OR percent */
+function posSheet({ title, total, unit, cur, onSave }) {
+  const s = sheet(`<div class="rd-sheet">
+    <div class="sh-t">${esc(title)}</div>
+    ${total ? `<div class="tabs unitpick"><button data-u="u" class="on">${unit}</button>
+      <button data-u="pct">%</button></div>` : ""}
+    <div class="rd-progrow"><input id="posv" type="number" min="0" inputmode="numeric"
+        value="${cur || 0}" autofocus><span class="hint" id="posmax">${total ? `of ${total} ${unit}` : unit}</span></div>
+    <button class="btn pri" id="possave" style="width:100%;justify-content:center">${I.check} Save</button></div>`);
+  let u = "u";
+  $$(".unitpick button", s.el).forEach(b => b.onclick = () => {
+    if (b.dataset.u === u) return;
+    const v = +$("#posv", s.el).value || 0;
+    u = b.dataset.u;
+    $$(".unitpick button", s.el).forEach(x => x.classList.toggle("on", x === b));
+    $("#posv", s.el).value = u === "pct" ? Math.min(100, Math.round(100 * v / total)) : Math.round(v / 100 * total);
+    $("#posmax", s.el).textContent = u === "pct" ? "% read" : `of ${total} ${unit}`;
+  });
+  $("#possave", s.el).onclick = () => {
+    let pos = +$("#posv", s.el).value || 0;
+    if (u === "pct") pos = Math.round(pos / 100 * total);
+    if (total) pos = Math.min(pos, total);
+    s.close(); onSave(Math.max(0, pos));
+  };
+}
+function rdEndSession(ses, refresh) {
+  const total = ses.pages || ses.chapters;
+  posSheet({ title: `Where did you get to?`, total, unit: ses.kind === "book" ? "pages" : "chapters",
+    cur: ses.start_pos || 0,
+    onSave: async pos => {
+      await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { pos } }).catch(() => {});
+      toast(`Session saved — ${rdElapsed(ses.started_at)}${pos > (ses.start_pos || 0)
+        ? ` · ${pos - (ses.start_pos || 0)} ${ses.kind === "book" ? "pages" : "chapters"}` : ""}`);
+      delete CACHE["/reading"]; delete CACHE["/reading/stats"]; delete CACHE["/reading/stats"]; refresh();
+    } });
+}
+function paintLive(refresh) {
+  const box = $("#rdlive");
+  if (box) box.innerHTML = RD_ACTIVE.map(s => `
+    <div class="rd-livebar" data-sid="${s.id}">
+      <span class="rd-pulse"></span>
+      <span class="rd-lb-t">${esc(s.title)} · <b class="rd-el" data-t="${s.started_at}"></b></span>
+      <button class="btn pri" data-a="end">End</button>
+      <button class="iconbtn" data-a="discard" title="Discard session">${I.x}</button>
+    </div>`).join("");
+  $$(".rdcard").forEach(c => c.classList.toggle("live",
+    RD_ACTIVE.some(s => s.item_id === +c.dataset.id && s.kind === c.dataset.kind)));
+  if (box) $$(".rd-livebar button", box).forEach(b => b.onclick = async () => {
+    const ses = RD_ACTIVE.find(s => s.id === +b.closest(".rd-livebar").dataset.sid);
+    if (b.dataset.a === "end") rdEndSession(ses, refresh);
+    else { await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { discard: true } }).catch(() => {});
+      toast("Session discarded"); refresh(); }
+  });
+  rdTickTimers();
 }
 
 /* fill-in-dates wizard: steps through titles missing read dates (imports carry a
@@ -1722,7 +1810,7 @@ function rdDatesWizard(items, kind, refresh) {
       if (Object.keys(body).length) {
         await api(`/${kind}/${it.id}/state`, { body }).catch(() => {});
         Object.assign(it, body); saved++;
-        delete CACHE["/reading"];
+        delete CACHE["/reading"]; delete CACHE["/reading/stats"];
       }
       i++; step();
     };
@@ -1730,6 +1818,14 @@ function rdDatesWizard(items, kind, refresh) {
   step();
 }
 
+function readingTabs(tab, f) {
+  const pills = [];
+  if (f.books) pills.push(["books", "Books"]);
+  if (f.manga) pills.push(["manga", "Manga"]);
+  pills.push(["stats", "Stats"]);
+  return pills.length > 1 ? `<div class="tabs">${pills.map(([t, l]) =>
+    `<button data-t="${t}" class="${tab === t ? "on" : ""}">${l}</button>`).join("")}</div>` : "";
+}
 function renderReading(d, tab, animate = true) {
   const f = (ME && ME.features) || {};
   const both = f.books && f.manga;
@@ -1740,9 +1836,8 @@ function renderReading(d, tab, animate = true) {
   const section = (title, arr, sec) => arr.length
     ? `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x => rdCard(x, kind, sec)).join("")}</div>` : "";
   view.innerHTML = `<h1>${both ? "Reading" : tab === "books" ? "Books" : "Manga"}</h1>
-    ${both ? `<div class="tabs">
-      <button data-t="books" class="${tab === "books" ? "on" : ""}">Books</button>
-      <button data-t="manga" class="${tab === "manga" ? "on" : ""}">Manga</button></div>` : ""}
+    ${readingTabs(tab, f)}
+    <div id="rdlive"></div>
     <div class="rd-search"><input id="rdq" type="search" enterkeyhint="search"
         placeholder="${tab === "books" ? "Add a book — search Open Library" : "Add manga · manhwa · manhua — search AniList"}">
       <button class="btn" id="rdgo">${I.plus} Add</button></div>
@@ -1757,7 +1852,7 @@ function renderReading(d, tab, animate = true) {
     ${dd.reading.length + dd.want.length + dd.finished.length ? "" :
       `<div class="empty">Nothing on the shelf yet — search above to add your first ${tab === "books" ? "book" : "series"}.</div>`}`;
 
-  const refresh = () => { delete CACHE["/reading"]; routes.reading(tab); };
+  const refresh = () => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); };
   if ($("#rddates")) $("#rddates").onclick = () =>
     rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, refresh);
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
@@ -1805,21 +1900,95 @@ function renderReading(d, tab, animate = true) {
           const y = card.querySelector(".y"), pr = card.querySelector(".rd-prog i");
           if (y) y.innerHTML = y.innerHTML.replace(/\d+(?=\/|\s)/, it.progress);
           if (pr && total) pr.style.width = Math.min(100, Math.round(100 * it.progress / total)) + "%";
-          if (total && it.progress >= total) { delete CACHE["/reading"]; routes.reading(tab); }
-          delete CACHE["/reading"];
+          if (total && it.progress >= total) { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); }
+          delete CACHE["/reading"]; delete CACHE["/reading/stats"];
         } else { refresh(); }
       }).catch(() => refresh());
     };
   });
 }
+function renderReadingStats(d, animate = true) {
+  const f = (ME && ME.features) || {};
+  const rv = animate ? "reveal" : "";
+  const tile = (cls, hue, v, l, sub) =>
+    `<div class="tile ${cls}" style="--tc:var(--c-${hue})"><div class="v">${v}</div>
+      <div class="l">${l}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+  const monLabel = ym => { const [y, mo] = ym.split("-"); return MONTHS[+mo - 1] + " " + y; };
+  const dayLabel = ds => fmtDate(ds).replace(/, \d+$/, "");
+  const hourLabel = h => h === 0 ? "12a" : h < 12 ? h + "a" : h === 12 ? "12p" : (h - 12) + "p";
+
+  const block = (name, s, unit) => {
+    if (!s) return "";
+    const T = s.totals;
+    if (!T.all && !T.sessions && !s.finished.all)
+      return `<div class="sub-h">${name}</div><div class="empty">No ${unit} logged yet — start a session or punch some progress.</div>`;
+    // last-24-months line, padded with zero months
+    const months = [];
+    for (let i = 23; i >= 0; i--) { const dt = new Date(); dt.setDate(1); dt.setMonth(dt.getMonth() - i);
+      months.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`); }
+    const byM = Object.fromEntries(s.monthly);
+    const mVals = months.map(m => byM[m] || 0);
+    const daily = s.daily30 || [];
+    const clockOn = s.clock && s.clock.some(v => v);
+    const ratings = Object.entries(s.rating_hist || {});
+    return `
+    <div class="sub-h" style="margin-top:26px">${name}</div>
+    <div class="tiles ${rv}">
+      ${tile("big", "amber", `${T.month.toLocaleString()}<small class="unit">${unit} / 30d</small>`,
+        `${unit} this month`, `${T.week} this week · ${T.all.toLocaleString()} all-time${T.hours_month ? ` · ${T.hours_month}h in sessions` : ""}`)}
+      ${tile("", "blue", s.finished.year, `finished this year`, `${s.finished.all} all-time · ${s.reading_now} in progress`)}
+      ${tile("", "green", `${s.streak.current}<small class="unit">days</small>`, "reading streak", `best ${s.streak.longest} days`)}
+      ${s.pace ? tile("", "violet", `${s.pace}<small class="unit">${unit}/hr</small>`, "reading pace",
+          s.avg_session_min ? `avg session ${s.avg_session_min} min · ${T.timed_sessions} timed` : "")
+        : tile("", "violet", T.sessions, "progress updates", `${T.timed_sessions} timed sessions`)}
+    </div>
+    <div class="chart ${rv}"><div class="ch-head"><h3>Last 30 days</h3>
+      <span class="ch-badge">${T.month.toLocaleString()} ${unit}</span></div>
+      ${colBar(daily.map(([ds, v], i) => ({ label: dayLabel(ds), xlabel: i % 5 === 0 ? ds.slice(8) : "",
+        v, color: "var(--c-amber)" })), unit)}</div>
+    ${mVals.filter(Boolean).length > 1 ? `<div class="chart ${rv}"><div class="ch-head"><h3>Month by month</h3>
+      <span class="ch-badge">${mVals.reduce((a, b) => a + b, 0).toLocaleString()} in 24 mo</span></div>
+      <div class="sub">${unit} · drag across to read any month</div>
+      ${lineChart(months, mVals, { yearMarks: true, series: unit, labelFmt: monLabel, valFmt: v => `${v} ${unit}` })}</div>` : ""}
+    ${clockOn ? `<div class="chart ${rv}"><div class="ch-head"><h3>Reading clock</h3></div>
+      <div class="sub">minutes in timed sessions by hour of day</div>
+      ${colBar(s.clock.map((v, h) => ({ label: hourLabel(h), xlabel: h % 6 === 0 ? hourLabel(h) : "",
+        v, color: "var(--c-blue)" })), "min")}</div>` : ""}
+    <div class="statcols ${rv}">
+      ${s.fastest ? tile("stat-rec", "orange", `${s.fastest.days}<small class="unit">days</small>`, "fastest finish", esc(s.fastest.title)) : ""}
+      ${s.longest ? tile("stat-rec", "pink", `${s.longest.units.toLocaleString()}<small class="unit">${unit}</small>`, "longest finished", esc(s.longest.title)) : ""}
+      ${s.big_day ? tile("stat-rec", "aqua", `${s.big_day.units}<small class="unit">${unit}</small>`, "biggest day", fmtDate(s.big_day.date)) : ""}
+    </div>
+    ${ratings.length ? `<div class="chart ${rv}"><div class="ch-head"><h3>Your ratings</h3></div>
+      ${colBar(Array.from({ length: 10 }, (_, i) => ({ label: `${i + 1}/10`, xlabel: String(i + 1),
+        v: s.rating_hist[i + 1] || 0, color: "var(--c-amber)" })))}</div>` : ""}`;
+  };
+  view.innerHTML = `<h1>Reading</h1>${readingTabs("stats", f)}
+    <div class="stats-wrap" id="rdstats">
+    ${f.books ? block("Books", d.books, "pages") : ""}
+    ${f.manga ? block("Manga", d.manga, "chapters") : ""}</div>`;
+  $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
+  wireStats($("#rdstats"));
+}
 routes.reading = (tab) => {
   const f = (ME && ME.features) || {};
   if (!f.books && !f.manga) { location.hash = "#/"; return; }
   tab = tab || (f.books ? "books" : "manga");
+  if (tab === "stats") {
+    const c = cached("/reading/stats");
+    if (c.stale) renderReadingStats(c.stale);
+    else view.innerHTML = `<h1>Reading</h1><div class="tiles">${Array.from({ length: 4 }, () => `<div class="sk tile-sk"></div>`).join("")}</div>`;
+    c.refresh(() => seg()[0] === "reading", d => renderReadingStats(d, !c.stale));
+    return;
+  }
   const c = cached("/reading");
   if (c.stale) renderReading(c.stale, tab);
   else view.innerHTML = `<h1>Reading</h1><div class="pgrid">${Array.from({ length: 6 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
   c.refresh(() => seg()[0] === "reading", d => renderReading(d, tab, !c.stale));
+  api("/reading/active").then(a => {
+    RD_ACTIVE = a.sessions || [];
+    if (seg()[0] === "reading") paintLive(() => routes.reading(tab));
+  }).catch(() => {});
 };
 
 /* ---------- lists ---------- */
@@ -3113,10 +3282,10 @@ function segBar(segments) {
 
 /* Vertical column chart with a per-column color ramp — used for the ratings
    histogram so score maps to a red→amber→green quality color. */
-function colBar(rows) {
+function colBar(rows, unit = "rated") {
   const max = Math.max(...rows.map(r => r.v), 1);
   return `<div class="colbars">${rows.map(r =>
-    `<div class="colbar" data-tip-title="${esc(r.label)}" data-tip-val="${r.v} rated" data-tip-color="${r.color}">
+    `<div class="colbar" data-tip-title="${esc(r.label)}" data-tip-val="${r.v} ${unit}" data-tip-color="${r.color}">
        <span class="col-track"><i style="height:${Math.max(3, Math.round(100 * r.v / max))}%;background:${r.color}"></i></span>
        <span class="col-x">${esc(r.xlabel ?? r.label)}</span></div>`).join("")}</div>`;
 }
@@ -3671,7 +3840,7 @@ routes.settings = async () => {
     ME.features = r.features;
     applyFeatureNav();
     if ($("#grblock")) $("#grblock").hidden = !ME.features.books;
-    delete CACHE["/reading"];
+    delete CACHE["/reading"]; delete CACHE["/reading/stats"];
     toast(on ? `${btn.dataset.feat === "books" ? "Books" : "Manga"} tracking is on — check your menu` : "Turned off");
   });
   if ($("#grcsv")) $("#grcsv").onchange = async () => {
@@ -3683,7 +3852,7 @@ routes.settings = async () => {
       const s = await api("/import/status");
       $("#grs").textContent = `${s.state} — ${s.done || 0}/${s.total || "?"}` +
         (s.errors?.length ? ` · ${s.errors.length} unmatched` : "");
-      if (s.state !== "running") { clearInterval(poll); delete CACHE["/reading"]; toast("Goodreads import " + s.state); }
+      if (s.state !== "running") { clearInterval(poll); delete CACHE["/reading"]; delete CACHE["/reading/stats"]; toast("Goodreads import " + s.state); }
     }, 2500);
   };
   if ($("#mkuser")) $("#mkuser").onclick = async () => {
