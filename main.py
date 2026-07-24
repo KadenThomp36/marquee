@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724k"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724m"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -305,23 +305,19 @@ def hc_best(title, author):
     return _hc_pick(hc_search_rows(f"{title} {author}".strip(), 8), title, author)
 
 
-HC_BOOK = """query($id:Int!){books(where:{id:{_eq:$id}},limit:1){
-  id title pages rating ratings_count release_year slug description
-  image{url} contributions{author{name}} book_series{position series{name}}
-  cached_tags}}"""
+HC_FIELDS = """id title pages rating ratings_count users_count release_year slug description
+  image{url} contributions{author{name}} book_series{position series{id name}} cached_tags"""
+
+HC_BOOK = """query($id:Int!){books(where:{id:{_eq:$id}},limit:1){%s}}""" % HC_FIELDS
 
 
-def hc_book_by_id(hc_id):
-    """Fetch one book from the GraphQL books table (the search endpoint can't look up
-    by id). Maps the GraphQL shape (differs from the Typesense search document)."""
-    def fetch():
-        d = hardcover(HC_BOOK, {"id": int(hc_id)})
-        return ((d or {}).get("books") or [None])[0]
-    b = _cached_get(f"hcb:{hc_id}", fetch)
-    if not b:
-        return None
+def _hc_gql_row(b, series_id=None):
+    """A Hardcover GraphQL `books` row → our book shape. The GraphQL shape differs
+    from the Typesense search document that _hc_row maps."""
     bs = b.get("book_series") or []
-    series = (bs[0].get("series") or {}).get("name") if bs else None
+    hit = next((x for x in bs if (x.get("series") or {}).get("id") == series_id), None) \
+        if series_id else (bs[0] if bs else None)
+    series = (hit.get("series") or {}).get("name") if hit else None
     genres = []
     ct = b.get("cached_tags") or {}
     if isinstance(ct, dict):
@@ -331,10 +327,105 @@ def hc_book_by_id(hc_id):
                                  if c.get("author"))[:120] or "",
             "year": b.get("release_year"), "pages": b.get("pages") or None,
             "cover": (b.get("image") or {}).get("url"), "series": series or "",
+            "series_pos": hit.get("position") if hit else None,
+            "users_count": b.get("users_count") or 0,
+            "ratings_count": b.get("ratings_count") or 0,
             "rating": round(b["rating"], 2) if b.get("rating") else None,
             "community_rating": round(b["rating"], 2) if b.get("rating") else None,
             "genres": ",".join(genres), "desc": (b.get("description") or "")[:1500],
             "slug": b.get("slug")}
+
+
+def hc_book_by_id(hc_id):
+    """Fetch one book from the GraphQL books table (the search endpoint can't look up
+    by id)."""
+    def fetch():
+        d = hardcover(HC_BOOK, {"id": int(hc_id)})
+        return ((d or {}).get("books") or [None])[0]
+    b = _cached_get(f"hcb:{hc_id}", fetch)
+    return _hc_gql_row(b) if b else None
+
+
+HC_AUTHOR = """query($id:Int!,$k:Int!){
+  authors(where:{id:{_eq:$id}},limit:1){id name slug books_count bio image{url}}
+  books(where:{contributions:{author_id:{_eq:$id}}},order_by:{users_count:desc},limit:$k){%s}}
+""" % HC_FIELDS
+
+HC_SERIES = """query($id:Int!,$k:Int!){
+  series(where:{id:{_eq:$id}},limit:1){id name slug books_count description}
+  books(where:{book_series:{series_id:{_eq:$id}}},order_by:{users_count:desc},limit:$k){%s}}
+""" % HC_FIELDS
+
+
+def hc_entity(kind, name):
+    """Resolve an author / series name to its Hardcover record via the Typesense
+    search index — names on our shelf are close but rarely exact ("James S.A. Corey"
+    vs "James S. A. Corey"), and GraphQL only offers `_eq` (`_ilike` is blocked)."""
+    def fetch():
+        d = hardcover('query($q:String!){search(query:$q,query_type:"%s",per_page:6)'
+                      '{results}}' % kind, {"q": name})
+        return ((d or {}).get("search") or {}).get("results", {}).get("hits") or []
+    hits = _cached_get(f"hce:{kind}:{name}", fetch) or []
+    docs = [h.get("document") or {} for h in hits]
+    want = _norm_txt(name)
+    exact = [d for d in docs if _norm_txt(d.get("name")) == want]
+    # search is fuzzy enough to answer "Nobody McNothing" with some real author —
+    # only accept a hit whose name actually contains (or is contained by) ours
+    near = [d for d in docs if want and (want in _norm_txt(d.get("name"))
+                                         or _norm_txt(d.get("name")) in want)]
+    return (exact or near or [None])[0]
+
+
+def hc_bibliography(kind, name, limit=40):
+    """(header, [book rows]) for an author or a series, straight from Hardcover."""
+    ent = hc_entity(kind, name)
+    if not ent:
+        return None, []
+    ent_id = int(ent["id"])
+    q = HC_AUTHOR if kind == "Author" else HC_SERIES
+
+    def fetch():
+        return hardcover(q, {"id": ent_id, "k": limit}) or {}
+    d = _cached_get(f"hcbib:{kind}:{ent_id}:{limit}", fetch) or {}
+    rec = ((d.get("authors") if kind == "Author" else d.get("series")) or [{}])[0] or {}
+    head = {"id": ent_id, "name": rec.get("name") or ent.get("name"),
+            "slug": rec.get("slug") or ent.get("slug"),
+            "books_count": rec.get("books_count") or ent.get("books_count") or 0,
+            "bio": (rec.get("bio") or rec.get("description") or "")[:1200],
+            "image": ((rec.get("image") or ent.get("image") or {}) or {}).get("url")}
+    rows = [_hc_gql_row(b, series_id=ent_id if kind == "Series" else None)
+            for b in (d.get("books") or []) if b and b.get("id")]
+    return head, rows
+
+
+def _book_key(title):
+    """Title identity for de-duping a bibliography: subtitles and series suffixes
+    dropped ("The Hobbit, or There and Back Again" == "The Hobbit"), but nothing
+    split on a plain space (so Dune Messiah never collapses into Dune)."""
+    return _norm_txt(re.split(r"[:;,(–—]", title or "")[0])
+
+
+def _hc_dedupe(rows, by_position=False):
+    """Hardcover keeps a separate book id per translation, omnibus and micro-edition,
+    so a raw bibliography is mostly noise. Keep the most-read record per slot (series
+    position, else title) and drop the unread long tail of summaries/reprints."""
+    def strong(r):
+        return r["users_count"] >= 15 or r["ratings_count"] >= 5
+    kept = [r for r in rows if strong(r)] or rows
+    best = {}
+    for r in kept:
+        pos = r.get("series_pos")
+        key = ("p", pos) if by_position and pos else ("t", _book_key(r["title"]))
+        cur = best.get(key)
+        if not cur or r["users_count"] > cur["users_count"]:
+            best[key] = r
+    out = list(best.values())
+    if by_position:
+        out.sort(key=lambda r: (not r.get("series_pos"), r.get("series_pos") or 0,
+                                -r["users_count"]))
+    else:
+        out.sort(key=lambda r: -r["users_count"])
+    return out
 
 
 def openlibrary(path, **params):
@@ -2271,8 +2362,12 @@ async def set_features(request: Request, user=Depends(current_user)):
 
 
 def _state_row(r, kind):
+    # books.rating (community score) shadows book_states.rating in `SELECT b.*, s.rating`
+    # — sqlite3.Row resolves a duplicate name to the FIRST column — so the shelf queries
+    # alias the user's own score as user_rating
+    rating = r["user_rating"] if "user_rating" in r.keys() else r["rating"]
     out = {"id": r["id"], "title": r["title"], "cover": r["cover"], "year": r["year"],
-           "state": r["state"], "progress": r["progress"] or 0, "rating": r["rating"],
+           "state": r["state"], "progress": r["progress"] or 0, "rating": rating,
            "started_at": r["started_at"], "finished_at": r["finished_at"]}
     out["mode"] = r["mode"] if "mode" in r.keys() else None
     if kind == "book":
@@ -2297,8 +2392,8 @@ def reading(user=Depends(current_user)):
     uid = user["id"]
     with db() as con:
         rows = con.execute("""
-            SELECT b.*, b.rating AS community_rating, s.state, s.progress, s.rating,
-                   s.started_at, s.finished_at, s.mode
+            SELECT b.*, b.rating AS community_rating, s.state, s.progress,
+                   s.rating AS user_rating, s.started_at, s.finished_at, s.mode
             FROM book_states s JOIN books b ON b.id=s.book_id WHERE s.user_id=?
             ORDER BY s.updated_at DESC""", (uid,)).fetchall()
         # instant title-suffix series backfill (no network) so grouping has some data;
@@ -2368,6 +2463,47 @@ def books_search(q: str, user=Depends(current_user)):
                     key=lambda d: (d.get("users_count") or 0, d.get("ratings_count") or 0),
                     reverse=True)[:16]
     return {"results": [_hc_row(d) for d in ranked]}
+
+
+@app.get("/api/books/browse")
+def books_browse(by: str, name: str, user=Depends(current_user)):
+    """Everything by one author / everything in one series: the household's own copies
+    first, then the rest of the bibliography from Hardcover to add from."""
+    if by not in ("author", "series"):
+        raise HTTPException(400, "by must be author or series")
+    uid = user["id"]
+    with db() as con:
+        rows = con.execute("""
+            SELECT b.*, b.rating AS community_rating, s.state, s.progress,
+                   s.rating AS user_rating, s.started_at, s.finished_at, s.mode
+            FROM book_states s JOIN books b ON b.id=s.book_id WHERE s.user_id=?
+            ORDER BY s.updated_at DESC""", (uid,)).fetchall()
+    owned = {r["hardcover_id"] for r in rows if r["hardcover_id"]}
+    want = _norm_txt(name)
+    if by == "author":
+        mine = [r for r in rows
+                if want in [_norm_txt(a) for a in (r["author"] or "").split(",")]]
+    else:
+        mine = [r for r in rows if _norm_txt(r["series"]) == want]
+    head, cat = hc_bibliography("Author" if by == "author" else "Series", name)
+    cat = _hc_dedupe(cat, by_position=(by == "series"))
+    pos_by_hc = {r["hc_id"]: r.get("series_pos") for r in cat}
+
+    shelf = []
+    for r in mine:
+        row = _state_row(r, "book")
+        row["series_pos"] = pos_by_hc.get(r["hardcover_id"])
+        shelf.append(row)
+    if by == "series":
+        shelf.sort(key=lambda x: (not x["series_pos"], x["series_pos"] or 0,
+                                  x["year"] or 0))
+    else:
+        shelf.sort(key=lambda x: -(x["year"] or 0))
+    have = {_book_key(x["title"]) for x in shelf}
+    more = [r for r in cat
+            if r["hc_id"] not in owned and _book_key(r["title"]) not in have][:30]
+    return {"by": by, "name": (head or {}).get("name") or name,
+            "header": head, "shelf": shelf, "more": more}
 
 
 def _clean_title(t):

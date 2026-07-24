@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724k";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724m";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -581,6 +581,7 @@ function parseHash() {
   if (p[0] === "show" && p[2] === "e") routes.episode(p[1], p[3], p[4]);
   else if (p[0] === "show") routes.show(p[1]);
   else if (p[0] === "movie") routes.movie(p[1]);
+  else if (p[0] === "books" && (p[1] === "author" || p[1] === "series")) routes.bookBrowse(p[1], p[2]);
   else if (p[0] === "book" && p[1] === "hc") routes.bookhc(p[2]);
   else if (p[0] === "book") routes.book(p[1]);
   else if (p[0] === "person") routes.person(p[1]);
@@ -590,7 +591,8 @@ function parseHash() {
   else if (p[0] === "recap") routes.recap(null, p[1]);
   else (routes[p[0]] || routes.home)(p[1]);
   const active = { list: "lists", movie: "movies", show: "home", u: "profile",
-    recap: "profile", stats: "profile" }[p[0]] || p[0] || "home";
+    recap: "profile", stats: "profile", book: "reading", books: "reading",
+    manga: "reading" }[p[0]] || p[0] || "home";
   $$("#nav a, #tabbar a, .gear, .bell").forEach(a =>
     a.classList.toggle("on", a.dataset.r === active));
 }
@@ -1600,6 +1602,13 @@ function applyFeatureNav() {
   if (tabAvatar) tabAvatar.insertAdjacentHTML("beforebegin", link);
 }
 
+/* author / series browse links — every name on a book page is a door into the rest
+   of the shelf (and the rest of the bibliography) */
+const SERIES_ICO = `<svg viewBox="0 0 24 24"><path d="M4.5 4.5h3.6v15H4.5zM10 4.5h3.4v15H10z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m16.2 5.4 3.4.9-3.6 13.6-3.4-.9z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>`;
+const browseHref = (by, name) => `#/books/${by}/${encodeURIComponent(name)}`;
+const authorLinks = a => (a || "").split(",").map(s => s.trim()).filter(Boolean)
+  .map(n => `<a class="rdt-lk" href="${browseHref("author", n)}">${esc(n)}</a>`).join(", ");
+
 /* mode-aware progress display: each title remembers whether its owner thinks in
    pages, percent or chapters (book_states.mode / manga_states.mode) */
 const rdChOf = it => it.pages && it.chapters
@@ -1632,7 +1641,7 @@ function rdBigCard(it, kind) {
     </div>
   </div>`;
 }
-function rdCard(it, kind, section) {
+function rdCard(it, kind, section, opts = {}) {
   const total = kind === "book" ? it.pages : it.chapters;
   const pct = total && it.progress ? Math.min(100, Math.round(100 * it.progress / total)) : 0;
   const sub = kind === "book" ? esc(it.author || "") :
@@ -1650,8 +1659,9 @@ function rdCard(it, kind, section) {
   return `<div class="pcard rdcard" data-id="${it.id}" data-kind="${kind}">
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
       ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
+      ${opts.pos && it.series_pos ? `<span class="rd-pos">#${it.series_pos}</span>` : ""}
       <span class="rd-status ${status[0]}">${status[2] || ""}${status[1]}</span>
-      <div class="act">${acts}</div>
+      ${opts.acts === false ? "" : `<div class="act">${acts}</div>`}
     </div>
     <a class="t" href="#/reading">${esc(it.title)}</a>
     <div class="y">${sub}${section === "reading" ? ` · ${rdProgLabel(it, kind)}` : ""}
@@ -1708,14 +1718,15 @@ function renderRDetail(d) {
         <div class="rdt-meta reveal">
           <a class="crumb" href="#/reading">${I.chevS} ${kind === "book" ? "Books" : "Manga"}</a>
           <h1>${esc(it.title)}</h1>
-          <div class="rdt-by">${kind === "book" ? esc(it.author || "")
+          <div class="rdt-by">${kind === "book" ? authorLinks(it.author)
             : `<span class="o-chip">${esc(it.origin || "manga")}</span> ${esc(it.status || "")}`}${it.year ? ` · ${it.year}` : ""}</div>
+          ${series ? `<a class="rdt-ser" href="${browseHref("series", series)}">${SERIES_ICO}
+            <span>${esc(series)}</span>${it.series_pos ? `<i>#${it.series_pos}</i>` : ""}</a>` : ""}
           <div class="rdt-chips">
             ${total ? `<span class="chip">${total} ${unit}</span>` : ""}
             ${it.volumes ? `<span class="chip">${it.volumes} vols</span>` : ""}
             ${it.community_rating ? `<span class="chip star">${I.star} ${it.community_rating}</span>` : ""}
             ${it.score ? `<span class="chip star">${I.star} ${it.score}</span>` : ""}
-            ${series ? `<span class="chip">${esc(series)}</span>` : ""}
             ${genres.slice(0, 3).map(g => `<span class="chip">${esc(g)}</span>`).join("")}
           </div>
         </div>
@@ -1937,6 +1948,72 @@ routes.bookhc = async hcid => {
     const d = await api(`/book/hc/${hcid}`);
     un(); if (seg()[0] === "book") renderRDetail(d);
   } catch { un(); }
+};
+/* ---- everything by an author / everything in a series ---- */
+function renderBrowse(d) {
+  const isA = d.by === "author";
+  const h = d.header || {};
+  const shelf = d.shelf || [], more = d.more || [];
+  const meta = [shelf.length ? `${shelf.length} on your shelf` : "",
+    h.books_count ? `${h.books_count} ${isA ? "titles" : "volumes"} on Hardcover` : ""]
+    .filter(Boolean).join(" · ");
+  const moreCard = (x, i) => `<div class="pcard rdres" data-i="${i}">
+    <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
+      ${!isA && x.series_pos ? `<span class="rd-pos">#${x.series_pos}</span>` : ""}
+      ${x._added ? `<span class="badge">${I.check}</span>`
+        : x.community_rating ? `<span class="badge">${I.star} ${x.community_rating}</span>` : ""}
+      ${x._added ? "" : `<div class="act"><button title="Want to read" data-a="want">${I.bookmark}</button>
+        <button title="Start reading now" data-a="reading">${I.eye}</button></div>`}</div>
+    <span class="t">${esc(x.title)}</span>
+    <div class="y">${isA ? esc(x.series || "") : esc(x.author || "")}${
+      x.year ? `${isA && !x.series ? "" : " · "}${x.year}` : ""}</div>
+  </div>`;
+  view.innerHTML = `<a class="crumb" href="#/reading">${I.chevS} Books</a>
+    <div class="brs-hero reveal">
+      ${isA ? `<div class="per-face">${h.image ? `<img src="${h.image}" alt="">` : personGlyph()}</div>`
+        : `<div class="brs-glyph">${SERIES_ICO}</div>`}
+      <div class="brs-body"><div class="brs-kind">${isA ? "Author" : "Series"}</div>
+        <h1>${esc(d.name)}</h1>
+        ${meta ? `<div class="brs-meta">${meta}</div>` : ""}
+        ${h.slug ? `<div class="actions"><a class="btn" target="_blank" rel="noopener"
+          href="https://hardcover.app/${isA ? "authors" : "series"}/${h.slug}">Hardcover</a></div>` : ""}
+      </div>
+    </div>
+    ${h.bio ? `<p class="overview clamp" id="ov">${esc(h.bio)}</p>` : ""}
+    ${shelf.length ? `<div class="sub-h">On your shelf · ${shelf.length}</div>
+      <div class="pgrid reveal">${shelf.map(x =>
+        rdCard(x, "book", null, { acts: false, pos: !isA })).join("")}</div>` : ""}
+    ${more.length ? `<div class="sub-h" style="margin-top:22px">${isA
+        ? `More by ${esc(d.name)}` : "Rest of the series"} · ${more.length}</div>
+      <div class="pgrid reveal">${more.map(moreCard).join("")}</div>` : ""}
+    ${shelf.length || more.length ? "" :
+      `<div class="empty">Nothing found for “${esc(d.name)}”.</div>`}`;
+
+  if ($("#ov")) $("#ov").onclick = () => $("#ov").classList.toggle("clamp");
+  $$(".rdcard", view).forEach(card => card.onclick = () => {
+    location.hash = `#/book/${card.dataset.id}`;
+  });
+  $$(".rdres", view).forEach(card => card.onclick = async e => {
+    const x = more[+card.dataset.i];
+    const b = e.target.closest(".act button");
+    if (!b) { location.hash = `#/book/hc/${x.hc_id}`; return; }
+    b.disabled = true; sparks(b);
+    const r = await api("/books/add", { body: { ...x, state: b.dataset.a } }).catch(() => null);
+    if (!r) { b.disabled = false; return; }
+    toast(`${x.title} — ${b.dataset.a === "reading" ? "started" : "on the shelf"}`);
+    x._added = true;
+    delete CACHE["/reading"]; delete CACHE["/reading/stats"];
+    renderBrowse(d);
+  });
+}
+routes.bookBrowse = async (by, raw) => {
+  const name = decodeURIComponent(raw || "");
+  if (!name) return routes.reading("books");
+  const un = deferSkeleton(`<div class="sk" style="height:120px;border-radius:18px"></div>${skRows(1)}`);
+  try {
+    const d = await api(`/books/browse?by=${by}&name=${encodeURIComponent(name)}`);
+    un(); if (seg()[0] === "books") renderBrowse(d);
+  } catch { un(); view.innerHTML = `<div class="empty">Couldn’t load ${esc(name)}.</div>`; }
 };
 routes.manga = async id => {
   if (!id) return routes.reading("manga");

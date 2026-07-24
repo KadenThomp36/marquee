@@ -821,6 +821,16 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rdt-meta{min-width:0}
 .rdt-meta h1{margin:6px 0 4px;font-size:27px;line-height:1.12}
 .rdt-by{color:var(--ink-2);font-size:13.5px}
+/* names are doors: author + series lead to the rest of the shelf */
+.rdt-lk{color:var(--ink);border-bottom:1px solid rgba(240,181,68,.4);padding-bottom:1px}
+.rdt-lk:hover{color:var(--amber-2);border-bottom-color:var(--amber)}
+.rdt-ser{display:inline-flex;align-items:center;gap:7px;margin-top:8px;padding:5px 11px 5px 9px;
+  border-radius:99px;background:rgba(240,181,68,.11);box-shadow:inset 0 0 0 1px rgba(240,181,68,.28);
+  color:var(--amber-2);font-size:12.5px;font-weight:650;max-width:100%}
+.rdt-ser:hover{background:rgba(240,181,68,.2)}
+.rdt-ser svg{width:14px;height:14px;flex:none}
+.rdt-ser span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rdt-ser i{font-style:normal;color:var(--mut);font-variant-numeric:tabular-nums}
 .rdt-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .rdt-body{padding-top:20px;max-width:760px}
 .rdt-bar{height:7px;border-radius:99px;background:var(--panel-2);overflow:hidden;margin:2px 0 10px}
@@ -844,6 +854,27 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
   .rdt-hero{margin:-16px -13px 0;padding:22px 13px 16px}
   .rdt-cover{width:104px}
   .rdt-meta h1{font-size:21px}
+}
+/* author / series browse page */
+.brs-hero{display:flex;align-items:center;gap:18px;margin:6px 0 14px}
+.brs-glyph{width:74px;height:74px;border-radius:16px;flex:none;display:grid;place-items:center;
+  background:var(--panel-2);color:var(--amber-2);box-shadow:inset 0 0 0 1px var(--line-2)}
+.brs-glyph svg{width:32px;height:32px}
+.brs-hero .per-face{width:96px;height:96px}
+.brs-body{min-width:0}
+.brs-body h1{margin:2px 0 4px;font-size:26px;line-height:1.12}
+.brs-kind{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--amber-2)}
+.brs-meta{color:var(--ink-2);font-size:13px}
+.brs-body .actions{margin-top:9px}
+/* volume number on a series tile — bottom-right is the one free corner (quick actions
+   sit top-left, the score badge top-right, the read/unread pill bottom-left) */
+.rd-pos{position:absolute;right:6px;bottom:6px;z-index:2;pointer-events:none;
+  padding:3px 7px;border-radius:8px;
+  background:rgba(20,17,13,.86);color:var(--amber-2);font-size:10.5px;font-weight:800;
+  font-variant-numeric:tabular-nums;box-shadow:inset 0 0 0 1px var(--line-2)}
+@media(max-width:700px){
+  .brs-hero{gap:13px}.brs-hero .per-face{width:74px;height:74px}
+  .brs-glyph{width:62px;height:62px}.brs-body h1{font-size:20px}
 }
 /* kebab action sheet rows (compact, icon fixed-size) */
 .rd-menu .list-opt{display:flex;align-items:center;gap:13px;width:100%;padding:13px 10px;
