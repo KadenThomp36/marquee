@@ -709,9 +709,11 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rd-search input::-webkit-search-cancel-button{-webkit-appearance:none}
 .o-chip{display:inline-block;background:var(--amber-soft);color:var(--amber-2);border-radius:99px;
   padding:1px 7px;font-size:10px;font-weight:750;letter-spacing:.06em;text-transform:uppercase}
-.rd-prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(15,13,10,.65)}
-.rd-prog i{display:block;height:100%;background:var(--amber);border-radius:0 2px 2px 0;
-  transition:width .3s cubic-bezier(.2,.9,.3,1)}
+.rd-prog{position:absolute;left:0;right:0;bottom:0;height:7px;background:rgba(10,8,6,.85);
+  box-shadow:0 -1px 0 rgba(0,0,0,.4)}
+.rd-prog i{display:block;height:100%;background:linear-gradient(90deg,var(--amber-2),var(--amber));
+  border-radius:0 3px 3px 0;transition:width .3s cubic-bezier(.2,.9,.3,1);
+  box-shadow:0 0 9px rgba(240,181,68,.55)}
 .rdcard{cursor:pointer}
 .rd-sheet .rd-top{display:flex;gap:14px;margin-bottom:14px}
 .rd-sheet .rd-top img{width:84px;aspect-ratio:2/3;object-fit:cover;border-radius:9px;background:var(--panel-2)}
@@ -734,10 +736,12 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rd-sheet .btn.danger.ghost{width:100%;justify-content:center}
 .rdw-dates{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
 .rdw-dates label{display:flex;flex-direction:column;gap:6px;color:var(--mut);font-size:11.5px;
-  font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  font-weight:700;letter-spacing:.08em;text-transform:uppercase;min-width:0}
 .rdw-dates input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;
   border:1px solid var(--line-2);background:var(--panel);color:var(--ink);font-size:14.5px;
-  font-weight:500;letter-spacing:normal;text-transform:none;color-scheme:dark;min-height:42px}
+  font-weight:500;letter-spacing:normal;text-transform:none;color-scheme:dark;min-height:42px;
+  min-width:0;-webkit-min-logical-width:0}
+@media(max-width:700px){.rdw-dates input{font-size:13.5px;padding:10px 8px}}
 .rdw-dates input:focus{outline:none;border-color:var(--amber-dim)}
 .rdw .rd-top{align-items:center;margin-bottom:16px}
 .rdw .rd-top img{width:72px}
@@ -809,6 +813,30 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
   .rdt-cover{width:104px}
   .rdt-meta h1{font-size:21px}
 }
+/* kebab action sheet rows (compact, icon fixed-size) */
+.rd-menu .list-opt{display:flex;align-items:center;gap:13px;width:100%;padding:13px 10px;
+  text-align:left;border-radius:12px;background:none;border:none;color:var(--ink);font-size:14.5px}
+.rd-menu .list-opt:hover{background:var(--panel-2)}
+.rd-menu .lo-ic{width:22px;height:22px;flex:none;display:grid;place-items:center;color:var(--amber-2)}
+.rd-menu .lo-ic svg{width:19px;height:19px}
+.rd-menu .lo-name{flex:1;min-width:0}
+/* progress-mode chips + chapter tracker */
+.rdt-mode{margin:0 0 12px}
+.rdt-mode button{padding:7px 14px;font-size:12.5px}
+.rdt-body select{width:100%;max-width:420px;padding:10px 34px 10px 13px;border-radius:11px;
+  border:1px solid var(--line-2);color:var(--ink);font-size:14px;-webkit-appearance:none;appearance:none;
+  background:var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m7 10 5 5 5-5' fill='none' stroke='%23b3a88f' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center/15px}
+.rdt-chs{max-height:400px;overflow-y:auto;border:1px solid var(--line);border-radius:13px;
+  padding:5px;display:flex;flex-direction:column;gap:1px}
+.rdt-ch{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:9px;width:100%;
+  background:none;border:none;text-align:left;color:var(--ink-2);font-size:13px}
+.rdt-ch:hover{background:var(--panel-2)}
+.rdt-ch i{font-style:normal;font-variant-numeric:tabular-nums;color:var(--mut);min-width:34px;flex:none}
+.rdt-ch span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rdt-ch b{flex:none;color:var(--amber);display:grid;place-items:center}
+.rdt-ch b svg{width:14px;height:14px}
+.rdt-ch.read{color:var(--ink)}
+.rdt-ch.read i{color:var(--amber-2)}
 .tabs{display:flex;gap:7px;margin:0 0 16px}
 .tabs button{padding:8px 16px;border-radius:99px;border:1px solid var(--line);color:var(--ink-2);
   font-weight:650;font-size:13.5px;transition:all .13s}

@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723k"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -1071,7 +1071,9 @@ def mal_reviews(title):
 
 @app.get("/api/external_reviews/{item_type}/{item_id}")
 def external_reviews(item_type: str, item_id: int, user=Depends(current_user)):
-    ck = f"{item_type}:{item_id}"
+    if item_type not in ("show", "movie", "episode"):
+        return {"reviews": []}   # books/manga ids are NOT TMDB ids — a fallthrough
+    ck = f"{item_type}:{item_id}"  # here once showed a random movie's reviews on a book
     hit = _ext_cache.get(ck)
     if hit and time.time() - hit[0] < 43200:
         return hit[1]
@@ -2155,8 +2157,10 @@ def _state_row(r, kind):
     out = {"id": r["id"], "title": r["title"], "cover": r["cover"], "year": r["year"],
            "state": r["state"], "progress": r["progress"] or 0, "rating": r["rating"],
            "started_at": r["started_at"], "finished_at": r["finished_at"]}
+    out["mode"] = r["mode"] if "mode" in r.keys() else None
     if kind == "book":
         out.update({"author": r["author"], "pages": r["pages"], "olid": r["olid"],
+                    "chapters": r["chapters"] if "chapters" in r.keys() else None,
                     "genres": (r["genres"] if "genres" in r.keys() else None) or ""})
     else:
         try:
@@ -2173,11 +2177,11 @@ def reading(user=Depends(current_user)):
     uid = user["id"]
     with db() as con:
         books = [_state_row(r, "book") for r in con.execute("""
-            SELECT b.*, s.state, s.progress, s.rating, s.started_at, s.finished_at
+            SELECT b.*, s.state, s.progress, s.rating, s.started_at, s.finished_at, s.mode
             FROM book_states s JOIN books b ON b.id=s.book_id WHERE s.user_id=?
             ORDER BY s.updated_at DESC""", (uid,))]
         manga = [_state_row(r, "manga") for r in con.execute("""
-            SELECT m.*, s.state, s.progress, s.rating, s.started_at, s.finished_at
+            SELECT m.*, s.state, s.progress, s.rating, s.started_at, s.finished_at, s.mode
             FROM manga_states s JOIN manga m ON m.id=s.manga_id WHERE s.user_id=?
             ORDER BY s.updated_at DESC""", (uid,))]
     group = lambda rows: {"reading": [r for r in rows if r["state"] == "reading"],
@@ -2470,9 +2474,10 @@ def _update_reading_state(kind, item_id, body, uid):
         else:
             finished = now if (state == "finished" and cur["state"] != "finished") \
                 else (None if state != "finished" else cur["finished_at"])
+        mode = body.get("mode", cur["mode"] if "mode" in cur.keys() else None)
         con.execute(f"""UPDATE {tbl} SET state=?, progress=?, rating=?, started_at=?,
-            finished_at=?, updated_at=? WHERE user_id=? AND {col}=?""",
-            (state, progress, rating, started, finished, now, uid, item_id))
+            finished_at=?, updated_at=?, mode=? WHERE user_id=? AND {col}=?""",
+            (state, progress, rating, started, finished, now, mode, uid, item_id))
         # every progress change is history: log a zero-duration checkpoint so the
         # +1 punches / stepper / ad-hoc updates all feed the reading stats
         if (progress or 0) != (cur["progress"] or 0):
@@ -2552,6 +2557,68 @@ def _household_states(uid, kind, item_id):
     return [dict(r) for r in rows]
 
 
+def mangadex_chlist(al_id, title):
+    """Chapter numbers + titles from MangaDex (matched by its AniList link, title
+    fallback). Licensed series may be partially delisted there — rows without a
+    known title render as 'Chapter N' client-side."""
+    def fetch():
+        try:
+            r = httpx.get("https://api.mangadex.org/manga", timeout=20, headers=OL_UA,
+                          params={"title": _clean_title(title), "limit": 10})
+            r.raise_for_status()
+            cands = r.json().get("data") or []
+            uuid = next((m["id"] for m in cands
+                         if ((m["attributes"].get("links") or {}).get("al")) == str(al_id)), None)
+            if not uuid:
+                uuid = next((m["id"] for m in cands if _title_matches(_clean_title(title),
+                             ((m["attributes"].get("title") or {}).get("en") or ""))), None)
+            if not uuid:
+                return []
+            out, offset = {}, 0
+            while offset < 1500:
+                f = httpx.get(f"https://api.mangadex.org/manga/{uuid}/feed", timeout=25,
+                              headers=OL_UA, params={"translatedLanguage[]": "en",
+                              "order[chapter]": "asc", "limit": 500, "offset": offset})
+                f.raise_for_status()
+                data = f.json()
+                for c in data.get("data") or []:
+                    a = c["attributes"]
+                    try:
+                        n = int(float(a.get("chapter")))
+                    except (TypeError, ValueError):
+                        continue
+                    if n > 0 and (n not in out or (not out[n] and a.get("title"))):
+                        out[n] = (a.get("title") or "").strip()[:80]
+                offset += 500
+                if offset >= (data.get("total") or 0):
+                    break
+                time.sleep(0.25)
+            return [[n, out[n]] for n in sorted(out)]
+        except httpx.HTTPError:
+            return None
+    return _cached_get(f"md:{al_id}", fetch) or []
+
+
+def _ol_toc(olid):
+    """Chapter list scraped from OL edition tables-of-contents — prefer an English
+    edition's, else the longest one found. Empty list = no chapter data."""
+    eds = openlibrary(f"/works/{olid}/editions.json", limit=30)
+    best, best_eng = [], []
+    for e in (eds or {}).get("entries", []):
+        toc = [(t.get("title") or t.get("label") or "").strip()[:80]
+               for t in (e.get("table_of_contents") or [])]
+        toc = [t for t in toc if t]
+        if len(toc) < 3:
+            continue
+        langs = [l.get("key", "") for l in (e.get("languages") or [])]
+        if "/languages/eng" in langs:
+            if len(toc) > len(best_eng):
+                best_eng = toc
+        elif len(toc) > len(best):
+            best = toc
+    return (best_eng or best)[:80]
+
+
 def _ol_desc(olid):
     w = openlibrary(f"/works/{olid}.json") or {}
     desc = w.get("description")
@@ -2598,12 +2665,21 @@ def book_detail(book_id: int, user=Depends(current_user)):
         det = json.loads(b["details"] or "{}")
     except ValueError:
         det = {}
+    dirty = False
     if "desc" not in det and b["olid"]:      # lazy description fetch, cached in the row
         det["desc"], det["subjects"], _ = _ol_desc(b["olid"])
+        dirty = True
+    if "toc" not in det and b["olid"]:       # chapter list from OL edition TOCs
+        det["toc"] = _ol_toc(b["olid"])
+        dirty = True
+    if dirty:
         with db() as con:
-            con.execute("UPDATE books SET details=? WHERE id=?", (json.dumps(det), book_id))
+            con.execute("UPDATE books SET details=?, chapters=COALESCE(?, chapters) WHERE id=?",
+                        (json.dumps(det), len(det.get("toc") or []) or None, book_id))
     item = {k: b[k] for k in b.keys() if k != "details"}
-    item.update({"desc": det.get("desc") or "", "subjects": det.get("subjects") or []})
+    item["chapters"] = item.get("chapters") or (len(det.get("toc") or []) or None)
+    item.update({"desc": det.get("desc") or "", "subjects": det.get("subjects") or [],
+                 "toc": det.get("toc") or []})
     return {"tracked": bool(st), "kind": "book", "item": item,
             "state": dict(st) if st else None,
             "sessions": _sessions_for(uid, "book", book_id) if st else [],
@@ -2622,9 +2698,18 @@ def manga_detail(manga_id: int, user=Depends(current_user)):
             det = json.loads(m["details"] or "{}")
         except ValueError:
             det = {}
+        if st and "chlist" not in det:   # lazy chapter-list fetch, cached in the row
+            det["chlist"] = mangadex_chlist(manga_id, m["title"] or "")
+            new_total = max([n for n, _ in det["chlist"]], default=None)
+            with db() as con:
+                con.execute("UPDATE manga SET details=?, chapters=COALESCE(chapters,?) WHERE id=?",
+                            (json.dumps(det), new_total, manga_id))
+            if not m["chapters"] and new_total:
+                m = dict(m); m["chapters"] = new_total
         item = {k: m[k] for k in m.keys() if k != "details"}
         item.update({"desc": det.get("desc") or "", "score": det.get("score"),
-                     "genres": ",".join(det.get("genres") or [])})
+                     "genres": ",".join(det.get("genres") or []),
+                     "chlist": det.get("chlist") or []})
     else:                                     # search-result preview, straight from AniList
         d = anilist("query($id:Int){Media(id:$id,type:MANGA){" + AL_MEDIA_FIELDS + "}}",
                     {"id": manga_id})
@@ -2696,10 +2781,13 @@ async def session_end(kind: str, item_id: int, request: Request, user=Depends(cu
 def reading_active(user=Depends(current_user)):
     with db() as con:
         rows = con.execute("""SELECT rs.*, COALESCE(b.title, m.title) AS title,
-            COALESCE(b.cover, m.cover) AS cover, b.pages, m.chapters
+            COALESCE(b.cover, m.cover) AS cover, b.pages, m.chapters,
+            b.chapters AS book_chapters, COALESCE(bs.mode, ms2.mode) AS mode
             FROM reading_sessions rs
             LEFT JOIN books b ON rs.kind='book' AND b.id=rs.item_id
             LEFT JOIN manga m ON rs.kind='manga' AND m.id=rs.item_id
+            LEFT JOIN book_states bs ON rs.kind='book' AND bs.book_id=rs.item_id AND bs.user_id=rs.user_id
+            LEFT JOIN manga_states ms2 ON rs.kind='manga' AND ms2.manga_id=rs.item_id AND ms2.user_id=rs.user_id
             WHERE rs.user_id=? AND rs.ended_at IS NULL ORDER BY rs.started_at""",
             (user["id"],)).fetchall()
     return {"sessions": [dict(r) for r in rows]}
@@ -4280,6 +4368,9 @@ def startup():
                      "ALTER TABLE users ADD COLUMN banner TEXT",
                      "ALTER TABLE users ADD COLUMN features TEXT",
                      "ALTER TABLE books ADD COLUMN genres TEXT",
+                     "ALTER TABLE books ADD COLUMN chapters INTEGER",
+                     "ALTER TABLE book_states ADD COLUMN mode TEXT",
+                     "ALTER TABLE manga_states ADD COLUMN mode TEXT",
                      "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
             try:
                 con.execute(stmt)

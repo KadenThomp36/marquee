@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723k";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1600,14 +1600,26 @@ function applyFeatureNav() {
   if (tabAvatar) tabAvatar.insertAdjacentHTML("beforebegin", link);
 }
 
+/* mode-aware progress display: each title remembers whether its owner thinks in
+   pages, percent or chapters (book_states.mode / manga_states.mode) */
+const rdChOf = it => it.pages && it.chapters
+  ? Math.min(it.chapters, Math.round((it.progress || 0) / it.pages * it.chapters)) : (it.progress || 0);
+function rdProgLabel(it, kind) {
+  const total = kind === "book" ? it.pages : it.chapters;
+  if (it.mode === "pct" && total)
+    return `${Math.min(100, Math.round(100 * (it.progress || 0) / total))}%`;
+  if (kind === "book" && it.mode === "chapters" && it.chapters)
+    return `ch ${rdChOf(it)}/${it.chapters}`;
+  return `${it.progress || 0}${total ? "/" + total : ""} ${kind === "book" ? "p" : "ch"}`;
+}
 function rdCard(it, kind, section) {
   const total = kind === "book" ? it.pages : it.chapters;
-  const unit = kind === "book" ? "p" : "ch";
   const pct = total && it.progress ? Math.min(100, Math.round(100 * it.progress / total)) : 0;
   const sub = kind === "book" ? esc(it.author || "") :
     `<span class="o-chip">${esc(it.origin || "manga")}</span>${it.status ? " " + esc(it.status) : ""}`;
+  const plusable = kind === "manga" || (it.mode === "chapters" && it.chapters && it.pages);
   const acts =
-    section === "reading" ? (kind === "manga" ? `<button title="+1 chapter" data-a="plus">${I.plus}</button>` : "")
+    section === "reading" ? (plusable ? `<button title="+1 chapter" data-a="plus">${I.plus}</button>` : "")
       + `<button title="Finished it" data-a="finish">${I.check}</button>`
     : section === "want" ? `<button title="Start ${kind === "book" ? "reading" : "it"}" data-a="start">${I.eye}</button>
         <button title="Remove" data-a="none">${I.x}</button>`
@@ -1616,10 +1628,10 @@ function rdCard(it, kind, section) {
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
       ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
       <div class="act">${acts}</div>
-      ${section === "reading" ? `<div class="rd-prog" title="${it.progress || 0}${total ? " of " + total : ""} ${unit}"><i style="width:${pct}%"></i></div>` : ""}
+      ${section === "reading" ? `<div class="rd-prog" title="${rdProgLabel(it, kind)}"><i style="width:${pct}%"></i></div>` : ""}
     </div>
     <a class="t" href="#/reading">${esc(it.title)}</a>
-    <div class="y">${sub}${section === "reading" ? ` · ${it.progress || 0}${total ? "/" + total : ""} ${unit}` : ""}
+    <div class="y">${sub}${section === "reading" ? ` · ${rdProgLabel(it, kind)}` : ""}
       ${section === "finished" && it.finished_at ? esc(fmtDate(it.finished_at.slice(0, 10))) : ""}</div>
   </div>`;
 }
@@ -1654,6 +1666,15 @@ function renderRDetail(d) {
   const series = kind === "book" ? seriesOf(it.title) : "";
   const stars = r => Array.from({ length: 5 }, (_, k) => `<span data-v="${(k + 1) * 2}"
     class="${(r || 0) >= (k + 1) * 2 ? "b" : ""}">${I.star}</span>`).join("");
+  // reading-log rows speak the item's progress mode (pages / % / chapters)
+  const modeNow = st.mode || (kind === "manga" ? "chapters" : "pages");
+  const chConv = v => Math.min(it.chapters || 0, Math.round(v / (it.pages || 1) * (it.chapters || 0)));
+  const lp = v => modeNow === "pct" && total ? Math.round(100 * v / total) + "%"
+    : (kind === "book" && modeNow === "chapters" && it.chapters && it.pages) ? "ch" + chConv(v) : v;
+  const lpDelta = (a, b2) => modeNow === "pct" && total
+    ? Math.round(100 * Math.max(0, b2 - a) / total) + "%"
+    : (kind === "book" && modeNow === "chapters" && it.chapters && it.pages)
+      ? Math.max(0, chConv(b2) - chConv(a)) + " ch" : Math.max(0, b2 - a) + " " + unit;
   view.innerHTML = `
     <div class="rdt-hero">${it.cover ? `<img class="rdt-bg" src="${it.cover}" alt="">` : ""}
       <div class="rdt-head">
@@ -1676,18 +1697,35 @@ function renderRDetail(d) {
       ${d.tracked ? `
       <div class="rd-states" id="rdtstates">${["want", "reading", "finished"].map(x =>
         `<button class="rd-st ${st.state === x ? "on" : ""}" data-st="${x}">${x === "want" ? "Want to read" : x === "reading" ? "Reading" : "Finished"}</button>`).join("")}</div>
-      ${st.state !== "want" ? `
+      ${st.state !== "want" ? (() => {
+        const mode = st.mode || (kind === "manga" ? "chapters" : "pages");
+        const chAvail = kind === "book" && it.chapters && it.pages;
+        const modes = kind === "book"
+          ? [["pages", "Pages"], ...(it.pages ? [["pct", "%"]] : []), ...(chAvail ? [["chapters", "Chapters"]] : [])]
+          : [["chapters", "Chapters"], ...(total ? [["pct", "%"]] : [])];
+        const curCh = rdChOf({ ...it, progress: st.progress });
+        const dispVal = mode === "pct" && total
+          ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : (st.progress || 0);
+        const ctrl = (kind === "book" && mode === "chapters" && chAvail)
+          ? `<select id="rdch">${["Not started", ...Array.from({ length: it.chapters }, (_, i) =>
+              `${i + 1}. ${(it.toc || [])[i] ? esc(String(it.toc[i]).slice(0, 44)) : "Chapter " + (i + 1)}`)]
+              .map((l, i) => `<option value="${i}" ${i === curCh ? "selected" : ""}>${l}</option>`).join("")}</select>`
+          : `<button class="iconbtn" id="rdminus">−</button>
+             <input id="rdprog" type="number" min="0" ${mode === "pct" ? `max="100"` : total ? `max="${total}"` : ""} value="${dispVal}">
+             <button class="iconbtn" id="rdplus">+</button>`;
+        return `
       <div class="rdt-bar"><i style="width:${pct}%"></i></div>
-      <div class="rd-progrow"><label>Progress</label>
-        <button class="iconbtn" id="rdminus">−</button>
-        <input id="rdprog" type="number" min="0" ${total ? `max="${total}"` : ""} value="${st.progress || 0}">
-        <button class="iconbtn" id="rdplus">+</button>
-        ${total ? `<button class="iconbtn" id="rdpct" title="Enter as percent">%</button>` : ""}
-        <span class="hint">${total ? `of ${total}` : ""} ${unit}${total ? ` · ${pct}%` : ""}</span></div>
+      ${modes.length > 1 ? `<div class="tabs unitpick rdt-mode">${modes.map(([m, l]) =>
+        `<button data-m="${m}" class="${mode === m ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
+      <div class="rd-progrow"><label>Progress</label>${ctrl}
+        <span class="hint">${mode === "pct" ? `% · ${st.progress || 0}${total ? "/" + total : ""} ${unit}`
+          : mode === "chapters" && chAvail ? `of ${it.chapters} ch · ${pct}%`
+          : `${total ? `of ${total}` : ""} ${unit}${total ? ` · ${pct}%` : ""}`}</span></div>`;
+      })() : ""}
       <div class="rd-sesrow">${live
         ? `<span class="rd-livechip"><span class="rd-pulse"></span>reading for <b class="rd-el" data-t="${live.started_at}"></b></span>
            <button class="btn pri" id="sesend">End session</button>`
-        : `<button class="btn" id="sesstart">${PLAY_ICO} Start a reading session</button>`}</div>` : ""}
+        : `<button class="btn" id="sesstart">${PLAY_ICO} Start a reading session</button>`}</div>
       <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(st.rating)}</span></div>
       <div class="rdw-dates">
         <label>Started<input type="date" id="rdstart" value="${(st.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
@@ -1698,13 +1736,24 @@ function renderRDetail(d) {
         <button class="btn" data-add="want">${I.bookmark} Want to read</button>
         <button class="btn" data-add="finished">${I.check} I\u2019ve read this</button>
       </div>`}
+      ${d.tracked && kind === "manga" && (it.chapters || (it.chlist || []).length) ? (() => {
+        const N = it.chapters || Math.max(...it.chlist.map(c => c[0]));
+        const titles = Object.fromEntries(it.chlist || []);
+        const cur = st.progress || 0;
+        return `<div class="sub-h" style="margin-top:22px">Chapters · ${N}
+          <i class="rdt-edithint">tap to mark read up to there</i></div>
+        <div class="rdt-chs" id="rdchs">${Array.from({ length: N }, (_, i) => { const n = i + 1;
+          return `<button class="rdt-ch ${n <= cur ? "read" : ""}" data-n="${n}">
+            <i>${n}</i><span>${titles[n] ? esc(titles[n]) : "Chapter " + n}</span>
+            ${n <= cur ? `<b>${I.check}</b>` : ""}</button>`; }).join("")}</div>`;
+      })() : ""}
       ${it.desc ? `<div class="sub-h" style="margin-top:22px">About</div><p class="overview">${esc(it.desc)}</p>` : ""}
       ${(it.subjects || []).length ? `<div class="rdt-chips" style="margin-top:10px">${it.subjects.map(x => `<span class="chip">${esc(x)}</span>`).join("")}</div>` : ""}
       ${d.sessions.length ? `<div class="sub-h" style="margin-top:22px">Reading log <i class="rdt-edithint">tap a row to edit</i></div>
       <div class="rdt-log">${d.sessions.map(s => `
         <button class="rdt-lrow" data-sid="${s.id}"><b>${fmtDate(s.date)}</b>
           <span>${s.minutes >= 3 ? `${s.minutes} min \u00b7 ` : ""}${s.from !== s.to
-            ? `${s.from} \u2192 ${s.to}<i> \u00b7 ${Math.max(0, s.to - s.from)} ${unit}</i>` : `at ${s.to}`}</span></button>`).join("")}</div>` : ""}
+            ? `${lp(s.from)} \u2192 ${lp(s.to)}<i> \u00b7 ${lpDelta(s.from, s.to)}</i>` : `at ${lp(s.to)}`}</span></button>`).join("")}</div>` : ""}
       ${(d.household || []).length ? `<div class="sub-h" style="margin-top:22px">Around the house</div><div class="rdt-house">${d.household.map(h => `
         <span class="rdt-hrow">${avatarHTML(h, "tiny")} <b>${esc(h.display_name || h.username)}</b>
           <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${h.rating}` : ""}</i></span>`).join("")}</div>` : ""}
@@ -1718,7 +1767,7 @@ function renderRDetail(d) {
 
   const syncShelf = () => patchShelf(kind, it.id, sh => {
     if (sh) Object.assign(sh, { state: st.state, progress: st.progress, rating: st.rating,
-      started_at: st.started_at, finished_at: st.finished_at });
+      started_at: st.started_at, finished_at: st.finished_at, mode: st.mode });
     return sh;
   });
   const post = body => { syncShelf();
@@ -1733,14 +1782,31 @@ function renderRDetail(d) {
       post({ state: st.state, progress: st.progress }); syncShelf();
       d.state = st; renderRDetail(d);
     });
+    const mode = st.mode || (kind === "manga" ? "chapters" : "pages");
+    $$(".rdt-mode button", view).forEach(b => b.onclick = () => {
+      st.mode = b.dataset.m; post({ mode: st.mode }); d.state = st; renderRDetail(d);
+    });
     const setProg = v => { st.progress = Math.max(0, total ? Math.min(total, v) : v);
       post({ progress: st.progress }); d.state = st; renderRDetail(d); };
-    if ($("#rdminus")) $("#rdminus").onclick = () => setProg((st.progress || 0) - 1);
-    if ($("#rdplus")) $("#rdplus").onclick = () => setProg((st.progress || 0) + 1);
-    if ($("#rdprog")) $("#rdprog").onchange = () => setProg(+$("#rdprog").value || 0);
-    if ($("#rdpct")) $("#rdpct").onclick = () =>
-      posSheet({ title: `How far through ${it.title}?`, total, unit, cur: st.progress || 0,
-        onSave: setProg });
+    const step = mode === "pct" && total ? Math.max(1, Math.round(total / 100)) : 1;
+    if ($("#rdminus")) $("#rdminus").onclick = () => setProg((st.progress || 0) - step);
+    if ($("#rdplus")) $("#rdplus").onclick = () => setProg((st.progress || 0) + step);
+    if ($("#rdprog")) $("#rdprog").onchange = () => {
+      const v = +$("#rdprog").value || 0;
+      setProg(mode === "pct" && total ? Math.round(v / 100 * total) : v);
+    };
+    if ($("#rdch")) $("#rdch").onchange = () =>
+      setProg(Math.round((+$("#rdch").value || 0) / it.chapters * it.pages));
+    $$(".rdt-ch", view).forEach(row => row.onclick = () => {
+      const n = +row.dataset.n;
+      sparks(row);
+      setProg(n === (st.progress || 0) ? n - 1 : n);   // tap current chapter = undo it
+    });
+    const chbox = $("#rdchs");
+    if (chbox) {
+      const last = [...chbox.querySelectorAll(".rdt-ch.read")].pop();
+      if (last) chbox.scrollTop = Math.max(0, last.offsetTop - chbox.clientHeight / 2);
+    }
     $("#rdstars").onclick = e => {
       const t = e.target.closest("[data-v]"); if (!t) return;
       st.rating = st.rating === +t.dataset.v ? null : +t.dataset.v;
@@ -1852,26 +1918,34 @@ function rdTickTimers() {
   $$(".rd-el").forEach(el => { el.textContent = rdElapsed(el.dataset.t); });
 }
 /* position entry accepting the item's native unit (pages / chapters) OR percent */
-function posSheet({ title, total, unit, cur, onSave }) {
+function posSheet({ title, total, unit, cur, onSave, mode, chapters }) {
+  // chips reflect the item's saved progress mode; conversions are internal and
+  // onSave always receives the canonical position (pages for books)
+  const chips = [["u", unit], ...(total ? [["pct", "%"]] : []),
+                 ...(chapters && total ? [["ch", "chapters"]] : [])];
+  let u = mode === "pct" && total ? "pct" : mode === "chapters" && chapters && total ? "ch" : "u";
+  const disp = (pos, uu) => uu === "pct" ? Math.min(100, Math.round(100 * pos / total))
+    : uu === "ch" ? Math.min(chapters, Math.round(pos / total * chapters)) : pos;
+  const toPos = (v, uu) => uu === "pct" ? Math.round(v / 100 * total)
+    : uu === "ch" ? Math.round(v / chapters * total) : v;
+  const hint = uu => uu === "pct" ? "% read" : uu === "ch" ? `of ${chapters} chapters` : `of ${total || "?"} ${unit}`;
   const s = sheet(`<div class="rd-sheet">
     <div class="sh-t">${esc(title)}</div>
-    ${total ? `<div class="tabs unitpick"><button data-u="u" class="on">${unit}</button>
-      <button data-u="pct">%</button></div>` : ""}
+    ${chips.length > 1 ? `<div class="tabs unitpick">${chips.map(([cu, l]) =>
+      `<button data-u="${cu}" class="${u === cu ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
     <div class="rd-progrow"><input id="posv" type="number" min="0" inputmode="numeric"
-        value="${cur || 0}" autofocus><span class="hint" id="posmax">${total ? `of ${total} ${unit}` : unit}</span></div>
+        value="${disp(cur || 0, u)}" autofocus><span class="hint" id="posmax">${hint(u)}</span></div>
     <button class="btn pri" id="possave" style="width:100%;justify-content:center">${I.check} Save</button></div>`);
-  let u = "u";
   $$(".unitpick button", s.el).forEach(b => b.onclick = () => {
     if (b.dataset.u === u) return;
-    const v = +$("#posv", s.el).value || 0;
+    const pos = toPos(+$("#posv", s.el).value || 0, u);
     u = b.dataset.u;
     $$(".unitpick button", s.el).forEach(x => x.classList.toggle("on", x === b));
-    $("#posv", s.el).value = u === "pct" ? Math.min(100, Math.round(100 * v / total)) : Math.round(v / 100 * total);
-    $("#posmax", s.el).textContent = u === "pct" ? "% read" : `of ${total} ${unit}`;
+    $("#posv", s.el).value = disp(pos, u);
+    $("#posmax", s.el).textContent = hint(u);
   });
   $("#possave", s.el).onclick = () => {
-    let pos = +$("#posv", s.el).value || 0;
-    if (u === "pct") pos = Math.round(pos / 100 * total);
+    let pos = toPos(+$("#posv", s.el).value || 0, u);
     if (total) pos = Math.min(pos, total);
     s.close(); onSave(Math.max(0, pos));
   };
@@ -1879,6 +1953,7 @@ function posSheet({ title, total, unit, cur, onSave }) {
 function rdEndSession(ses, refresh) {
   const total = ses.pages || ses.chapters;
   posSheet({ title: `Where did you get to?`, total, unit: ses.kind === "book" ? "pages" : "chapters",
+    mode: ses.mode, chapters: ses.kind === "book" ? ses.book_chapters : null,
     cur: ses.start_pos || 0,
     onSave: async pos => {
       await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { pos } }).catch(() => {});
@@ -2101,12 +2176,12 @@ function renderReading(d, tab, animate = true) {
     const link = tab === "books"
       ? `https://www.goodreads.com/search?q=${encodeURIComponent(x.title + " " + (x.author || ""))}`
       : `https://anilist.co/manga/${x.id}`;
-    const s = sheet(`<div class="sh-t">${esc(x.title)}</div>
+    const s = sheet(`<div class="rd-menu"><div class="sh-t">${esc(x.title)}</div>
       <button class="list-opt" data-a="detail"><span class="lo-ic">${BOOK_ICO}</span><span class="lo-name">View details</span></button>
       <button class="list-opt" data-a="want"><span class="lo-ic">${I.bookmark}</span><span class="lo-name">Want to read</span></button>
       <button class="list-opt" data-a="reading"><span class="lo-ic">${I.eye}</span><span class="lo-name">Start reading now</span></button>
       <button class="list-opt" data-a="finished"><span class="lo-ic">${I.check}</span><span class="lo-name">I’ve read this — add as finished</span></button>
-      <a class="list-opt" href="${link}" target="_blank" rel="noopener"><span class="lo-ic">${I.globe}</span><span class="lo-name">Open on ${tab === "books" ? "Goodreads" : "AniList"}</span></a>`);
+      <a class="list-opt" href="${link}" target="_blank" rel="noopener"><span class="lo-ic">${I.globe}</span><span class="lo-name">Open on ${tab === "books" ? "Goodreads" : "AniList"}</span></a></div>`);
     $$(".list-opt[data-a]", s.el).forEach(b => b.onclick = () => {
       s.close();
       if (b.dataset.a === "detail")
@@ -2170,16 +2245,15 @@ function renderReading(d, tab, animate = true) {
       if (!b) { location.hash = kind === "book" ? `#/book/${it.id}` : `#/manga/${it.id}`; return; }
       const a = b.dataset.a;
       const total = kind === "book" ? it.pages : it.chapters;
-      const body = a === "plus" ? { progress: Math.min(total || 1e9, (it.progress || 0) + 1) }
+      const body = a === "plus" ? (kind === "book" && it.mode === "chapters" && it.chapters && it.pages
+          ? { progress: Math.min(it.pages, Math.round((rdChOf(it) + 1) / it.chapters * it.pages)) }
+          : { progress: Math.min(total || 1e9, (it.progress || 0) + 1) })
         : a === "finish" ? { state: "finished", progress: total || it.progress }
         : a === "start" ? { state: "reading" } : { state: "none" };
       if (a === "plus" || a === "finish") sparks(b);
       delete CACHE["/reading/stats"];
       api(`/${kind}/${it.id}/state`, { body }).then(() => {
-        if (a === "plus") { it.progress = body.progress;
-          const y = card.querySelector(".y"), pr = card.querySelector(".rd-prog i");
-          if (y) y.innerHTML = y.innerHTML.replace(/\d+(?=\/|\s)/, it.progress);
-          if (pr && total) pr.style.width = Math.min(100, Math.round(100 * it.progress / total)) + "%";
+        if (a === "plus") { it.progress = body.progress; soft();
         } else {
           if (a === "finish") { it.state = "finished"; it.progress = total || it.progress;
             if (!it.finished_at) it.finished_at = nowStamp();
