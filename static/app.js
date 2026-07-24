@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723h";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723i";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1622,8 +1622,8 @@ function rdCard(it, kind, section) {
   </div>`;
 }
 
-function rdSheet(it, kind, refresh) {
-  const total = kind === "book" ? it.pages : it.chapters;
+function rdSheet(it, kind, view) {   // view: {soft, hard, regroup} — soft = redraw from
+  const total = kind === "book" ? it.pages : it.chapters;   // local data, no refetch
   const unit = kind === "book" ? "pages" : "chapters";
   const stars = r => Array.from({ length: 5 }, (_, k) => `<span data-v="${(k + 1) * 2}"
     class="${(r || 0) >= (k + 1) * 2 ? "b" : ""}">${I.star}</span>`).join("");
@@ -1658,12 +1658,20 @@ function rdSheet(it, kind, refresh) {
     <div class="act-row">${links}</div>
     <button class="btn danger ghost" id="rdremove">${I.x} Remove from my ${kind === "book" ? "books" : "shelf"}</button>
   </div>`);
-  const post = body => api(`/${kind}/${it.id}/state`, { body })
-    .then(() => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; }).catch(() => {});
+  let dirty = false;   // only redraw the shelf on close if something actually changed
+  const post = body => { dirty = true; delete CACHE["/reading/stats"];
+    return api(`/${kind}/${it.id}/state`, { body }).catch(() => {}); };
   $$(".rd-st", s.el).forEach(b => b.onclick = () => {
     $$(".rd-st", s.el).forEach(x => x.classList.remove("on")); b.classList.add("on");
     it.state = b.dataset.st;
-    if (it.state === "finished" && total) { it.progress = total; $("#rdprog", s.el).value = total; }
+    // mirror the server's date stamping so the local redraw matches
+    if (it.state === "finished") {
+      if (total) { it.progress = total; $("#rdprog", s.el).value = total; }
+      if (!it.finished_at) { it.finished_at = nowStamp(); $("#rdfin", s.el).value = it.finished_at.slice(0, 10); }
+    } else it.finished_at = null;
+    if (it.state !== "want" && !it.started_at) {
+      it.started_at = nowStamp(); $("#rdstart", s.el).value = it.started_at.slice(0, 10);
+    }
     post({ state: it.state, progress: it.progress });
   });
   const setProg = v => { it.progress = Math.max(0, total ? Math.min(total, v) : v);
@@ -1677,13 +1685,17 @@ function rdSheet(it, kind, refresh) {
   if ($("#sesstart", s.el)) $("#sesstart", s.el).onclick = async () => {
     await api(`/${kind}/${it.id}/session/start`, { body: {} }).catch(() => {});
     toast("Session started — happy reading"); s.close();
-    delete CACHE["/reading"]; delete CACHE["/reading/stats"]; refresh();
+    if (it.state !== "reading") { it.state = "reading"; if (!it.started_at) it.started_at = nowStamp(); }
+    view.regroup(it); delete CACHE["/reading/stats"];
+    const a = await api("/reading/active").catch(() => null);
+    if (a) RD_ACTIVE = a.sessions || [];
+    view.soft();
   };
   if ($("#sesend", s.el)) $("#sesend", s.el).onclick = () => {
     const ses = RD_ACTIVE.find(x => x.item_id === it.id && x.kind === kind);
     s.close();
     if (ses) rdEndSession({ ...ses, pages: kind === "book" ? total : null,
-      chapters: kind === "manga" ? total : null }, refresh);
+      chapters: kind === "manga" ? total : null }, view.hard);
   };
   rdTickTimers();
   $("#rdstars", s.el).onclick = e => {
@@ -1696,8 +1708,13 @@ function rdSheet(it, kind, refresh) {
     post({ started_at: it.started_at }); };
   $("#rdfin", s.el).onchange = () => { it.finished_at = $("#rdfin", s.el).value || null;
     post({ finished_at: it.finished_at }); };
-  $("#rdremove", s.el).onclick = async () => { await post({ state: "none" }); s.close(); refresh(); };
-  s.el.addEventListener("click", e => { if (e.target === s.el) refresh(); });
+  $("#rdremove", s.el).onclick = async () => {
+    await post({ state: "none" }); s.close();
+    it.state = "none"; view.regroup(it); view.soft();
+  };
+  s.el.addEventListener("click", e => {
+    if (e.target === s.el && dirty) { view.regroup(it); view.soft(); }
+  });
 }
 
 /* ---- reading sessions: start/end timed sessions, ad-hoc progress in pages or % ---- */
@@ -1836,6 +1853,7 @@ function rdDatesWizard(items, kind, refresh, allItems) {
 
 /* shelf view state: sort + filters (author / series / genre / origin), per session */
 let RD_VIEW = { sort: "recent", author: "", series: "", genre: "", origin: "" };
+let RD_SEARCH = {};   // {tab, q, results} — survives soft re-renders of the shelf
 const seriesOf = t => ((t || "").match(/\(([^,()#]+?),? *#?\d+\)\s*$/) || [])[1] || "";
 const stripArticle = t => (t || "").replace(/^(the|a|an)\s+/i, "");
 function rdApplyView(arr, kind) {
@@ -1917,64 +1935,109 @@ function renderReading(d, tab, animate = true) {
       `<div class="empty">Nothing matches those filters.</div>`) :
       `<div class="empty">Nothing on the shelf yet — search above to add your first ${tab === "books" ? "book" : "series"}.</div>`}`;
 
-  const refresh = () => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); };
+  // hard = refetch everything; soft = redraw from local data (modals & quick actions
+  // patch items in place, so closing a sheet never reloads the library)
+  const hard = () => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); };
+  const regroup = it => {
+    ["reading", "want", "finished"].forEach(k => {
+      const i = dd[k].indexOf(it); if (i > -1) dd[k].splice(i, 1); });
+    if (["reading", "want", "finished"].includes(it.state)) dd[it.state].unshift(it);
+  };
+  const soft = () => { renderReading(d, tab, false); paintLive(hard); };
+  const vw = { soft, hard, regroup };
   if ($("#rddates")) $("#rddates").onclick = () =>
-    rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, refresh,
+    rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, soft,
       [...dd.reading, ...dd.want, ...dd.finished]);
   [["rdsort", "sort"], ["rdfauthor", "author"], ["rdfseries", "series"],
    ["rdforigin", "origin"], ["rdfgenre", "genre"]].forEach(([id, key]) => {
     const el = $("#" + id);
-    if (el) el.onchange = () => { RD_VIEW[key] = el.value; renderReading(d, tab, false); paintLive(refresh); };
+    if (el) el.onchange = () => { RD_VIEW[key] = el.value; soft(); };
   });
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
+
+  const paintResults = results => {
+    $("#rdresults").innerHTML = results.length ? `<div class="sub-h">Results</div>
+      <div class="pgrid reveal">${results.map((x, i) => `
+        <div class="pcard rdres" data-i="${i}">
+          <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
+            ${x._added ? `<span class="badge">${I.check}</span>` : x.score ? `<span class="badge">${x.score}</span>` : ""}
+            ${x._added ? "" : `<div class="act"><button title="Want to read" data-a="want">${I.bookmark}</button>
+              <button title="Start now" data-a="reading">${I.eye}</button></div>`}</div>
+          <span class="t">${esc(x.title)}</span>
+          <div class="y">${tab === "books" ? esc(x.author || "") : `<span class="o-chip">${esc(x.origin)}</span>`}${x.year ? ` · ${x.year}` : ""}</div>
+        </div>`).join("")}</div>`
+      : `<div class="empty">No matches for “${esc(RD_SEARCH.q)}”.</div>`;
+    $$(".rdres .act button", view).forEach(b => b.onclick = async () => {
+      const x = results[+b.closest(".rdres").dataset.i];
+      b.disabled = true; sparks(b);
+      const r = await api(tab === "books" ? "/books/add" : "/manga/add",
+        { body: { ...x, state: b.dataset.a } }).catch(() => null);
+      if (!r) { b.disabled = false; return; }
+      toast(`${x.title} — ${b.dataset.a === "want" ? "on the shelf" : "started"}`);
+      x._added = true;
+      delete CACHE["/reading/stats"];
+      dd[b.dataset.a].unshift({
+        id: r.id, title: x.title, cover: x.cover, year: x.year, state: b.dataset.a,
+        progress: 0, rating: null, finished_at: null,
+        started_at: b.dataset.a === "reading" ? nowStamp() : null,
+        ...(tab === "books"
+          ? { olid: x.olid, author: x.author, pages: x.pages, genres: x.genres || "" }
+          : { chapters: x.chapters, volumes: x.volumes, status: x.status, origin: x.origin,
+              genres: Array.isArray(x.genres) ? x.genres.join(",") : (x.genres || "") }),
+      });
+      soft();   // search box + results are restored by renderReading via RD_SEARCH
+    });
+  };
   const doSearch = async () => {
     const q = $("#rdq").value.trim(); if (!q) return;
     $("#rdresults").innerHTML = `<div class="hint" style="margin:10px 0">Searching…</div>`;
     const r = await api(`/${tab === "books" ? "books" : "manga"}/search?q=${encodeURIComponent(q)}`).catch(() => ({ results: [] }));
-    $("#rdresults").innerHTML = r.results.length ? `<div class="sub-h">Results</div>
-      <div class="pgrid reveal">${r.results.map((x, i) => `
-        <div class="pcard rdres" data-i="${i}">
-          <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
-            ${x.score ? `<span class="badge">${x.score}</span>` : ""}
-            <div class="act"><button title="Want to read" data-a="want">${I.bookmark}</button>
-              <button title="Start now" data-a="reading">${I.eye}</button></div></div>
-          <span class="t">${esc(x.title)}</span>
-          <div class="y">${tab === "books" ? esc(x.author || "") : `<span class="o-chip">${esc(x.origin)}</span>`}${x.year ? ` · ${x.year}` : ""}</div>
-        </div>`).join("")}</div>`
-      : `<div class="empty">No matches for “${esc(q)}”.</div>`;
-    $$(".rdres .act button", view).forEach(b => b.onclick = async () => {
-      const x = r.results[+b.closest(".rdres").dataset.i];
-      b.disabled = true; sparks(b);
-      await api(tab === "books" ? "/books/add" : "/manga/add",
-        { body: { ...x, state: b.dataset.a } }).catch(() => {});
-      toast(`${x.title} — ${b.dataset.a === "want" ? "on the shelf" : "started"}`);
-      refresh();
-    });
+    if ($("#rdq")?.value.trim() !== q) return;   // stale response — user kept typing
+    RD_SEARCH = { tab, q, results: r.results };
+    paintResults(r.results);
   };
   $("#rdgo").onclick = doSearch;
   $("#rdq").onkeydown = e => { if (e.key === "Enter") doSearch(); };
+  let qTimer;
+  $("#rdq").oninput = () => {                    // search as you type
+    clearTimeout(qTimer);
+    const v = $("#rdq").value.trim();
+    if (!v) { RD_SEARCH = {}; $("#rdresults").innerHTML = ""; return; }
+    if (v.length < 3) return;
+    qTimer = setTimeout(() => { if (v !== RD_SEARCH.q) doSearch(); }, 500);
+  };
+  if (RD_SEARCH.tab === tab && RD_SEARCH.q) {    // survive soft re-renders
+    $("#rdq").value = RD_SEARCH.q;
+    paintResults(RD_SEARCH.results || []);
+  } else if (RD_SEARCH.tab !== tab) RD_SEARCH = {};
 
   $$(".rdcard", view).forEach(card => {
     const it = [...dd.reading, ...dd.want, ...dd.finished].find(x => x.id === +card.dataset.id);
     card.onclick = e => {
       const b = e.target.closest(".act button");
       e.preventDefault();
-      if (!b) { rdSheet(it, kind, refresh); return; }
+      if (!b) { rdSheet(it, kind, vw); return; }
       const a = b.dataset.a;
       const total = kind === "book" ? it.pages : it.chapters;
       const body = a === "plus" ? { progress: Math.min(total || 1e9, (it.progress || 0) + 1) }
         : a === "finish" ? { state: "finished", progress: total || it.progress }
         : a === "start" ? { state: "reading" } : { state: "none" };
       if (a === "plus" || a === "finish") sparks(b);
+      delete CACHE["/reading/stats"];
       api(`/${kind}/${it.id}/state`, { body }).then(() => {
         if (a === "plus") { it.progress = body.progress;
           const y = card.querySelector(".y"), pr = card.querySelector(".rd-prog i");
           if (y) y.innerHTML = y.innerHTML.replace(/\d+(?=\/|\s)/, it.progress);
           if (pr && total) pr.style.width = Math.min(100, Math.round(100 * it.progress / total)) + "%";
-          if (total && it.progress >= total) { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); }
-          delete CACHE["/reading"]; delete CACHE["/reading/stats"];
-        } else { refresh(); }
-      }).catch(() => refresh());
+        } else {
+          if (a === "finish") { it.state = "finished"; it.progress = total || it.progress;
+            if (!it.finished_at) it.finished_at = nowStamp();
+            if (!it.started_at) it.started_at = it.finished_at; }
+          else if (a === "start") { it.state = "reading"; if (!it.started_at) it.started_at = nowStamp(); }
+          else it.state = "none";
+          regroup(it); soft();
+        }
+      }).catch(() => hard());
     };
   });
 }
