@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724g";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724h";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -581,7 +581,7 @@ function parseHash() {
   if (p[0] === "show" && p[2] === "e") routes.episode(p[1], p[3], p[4]);
   else if (p[0] === "show") routes.show(p[1]);
   else if (p[0] === "movie") routes.movie(p[1]);
-  else if (p[0] === "book" && p[1] === "ol") routes.bookol(p[2]);
+  else if (p[0] === "book" && p[1] === "hc") routes.bookhc(p[2]);
   else if (p[0] === "book") routes.book(p[1]);
   else if (p[0] === "person") routes.person(p[1]);
   else if (p[0] === "list") routes.list(p[1]);
@@ -1684,7 +1684,7 @@ function renderRDetail(d) {
   const total = kind === "book" ? it.pages : it.chapters;
   const unit = kind === "book" ? "pages" : "chapters";
   const rerun = () => (kind === "book"
-    ? (d.tracked || it.id ? routes.book(it.id) : routes.bookol(it.olid))
+    ? (d.tracked ? routes.book(it.id) : routes.bookhc(it.hc_id))
     : routes.manga(it.id));
   const live = d.tracked && RD_ACTIVE.find(s => s.item_id === it.id && s.kind === kind);
   const pct = d.tracked && total ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : 0;
@@ -1713,6 +1713,7 @@ function renderRDetail(d) {
           <div class="rdt-chips">
             ${total ? `<span class="chip">${total} ${unit}</span>` : ""}
             ${it.volumes ? `<span class="chip">${it.volumes} vols</span>` : ""}
+            ${it.community_rating ? `<span class="chip star">${I.star} ${it.community_rating}</span>` : ""}
             ${it.score ? `<span class="chip star">${I.star} ${it.score}</span>` : ""}
             ${series ? `<span class="chip">${esc(series)}</span>` : ""}
             ${genres.slice(0, 3).map(g => `<span class="chip">${esc(g)}</span>`).join("")}
@@ -1784,7 +1785,7 @@ function renderRDetail(d) {
         <span class="rdt-hrow">${avatarHTML(h, "tiny")} <b>${esc(h.display_name || h.username)}</b>
           <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${h.rating}` : ""}</i></span>`).join("")}</div>` : ""}
       <div class="act-row" style="margin-top:18px">${kind === "book"
-        ? `${it.olid ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://openlibrary.org/works/${it.olid}">Open Library</a>` : ""}
+        ? `${it.slug || it.hc_id ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://hardcover.app/books/${it.slug || it.hc_id}">Hardcover</a>` : ""}
            <a class="chip-btn" target="_blank" rel="noopener" href="https://www.goodreads.com/search?q=${encodeURIComponent((it.title || "") + " " + (it.author || ""))}"><b>goodreads</b></a>`
         : `<a class="chip-btn" target="_blank" rel="noopener" href="https://anilist.co/manga/${it.id}">AniList</a>`}
         ${d.tracked ? `<button class="chip-btn danger" id="rdtremove">${I.x} Remove</button>` : ""}</div>
@@ -1863,8 +1864,9 @@ function renderRDetail(d) {
     $$("[data-add]").forEach(b => b.onclick = async () => {
       b.disabled = true;
       const body = kind === "book"
-        ? { olid: it.olid, title: it.title, author: it.author, year: it.year,
-            pages: it.pages, cover: it.cover, genres: it.genres, state: b.dataset.add }
+        ? { hc_id: it.hc_id, title: it.title, author: it.author, year: it.year,
+            pages: it.pages, cover: it.cover, series: it.series, rating: it.community_rating,
+            genres: it.genres, slug: it.slug, desc: it.desc, state: b.dataset.add }
         : { id: it.id, state: b.dataset.add };
       const r = await api(kind === "book" ? "/books/add" : "/manga/add", { body }).catch(() => null);
       if (!r) { b.disabled = false; return; }
@@ -1928,11 +1930,11 @@ routes.book = async id => {
     un(); if (seg()[0] === "book") renderRDetail(d);
   } catch { un(); }
 };
-routes.bookol = async olid => {
-  if (!olid) return routes.reading("books");
+routes.bookhc = async hcid => {
+  if (!hcid) return routes.reading("books");
   const un = deferSkeleton(`<div class="sk" style="height:320px;border-radius:18px"></div>`);
   try {
-    const d = await api(`/book/ol/${olid}`);
+    const d = await api(`/book/hc/${hcid}`);
     un(); if (seg()[0] === "book") renderRDetail(d);
   } catch { un(); }
 };
@@ -2289,7 +2291,8 @@ function renderReading(d, tab, animate = true) {
       progress: state === "finished" ? (x.pages || x.chapters || 0) : 0, rating: null,
       finished_at: null, started_at: state === "reading" ? nowStamp() : null,
       ...(tab === "books"
-        ? { olid: x.olid, author: x.author, pages: x.pages, genres: x.genres || "" }
+        ? { hc_id: x.hc_id, author: x.author, pages: x.pages, series: x.series || "",
+            community_rating: x.community_rating, genres: x.genres || "" }
         : { chapters: x.chapters, volumes: x.volumes, status: x.status, origin: x.origin,
             genres: Array.isArray(x.genres) ? x.genres.join(",") : (x.genres || "") }),
     });
@@ -2308,7 +2311,7 @@ function renderReading(d, tab, animate = true) {
     $$(".list-opt[data-a]", s.el).forEach(b => b.onclick = () => {
       s.close();
       if (b.dataset.a === "detail")
-        location.hash = tab === "books" ? `#/book/ol/${x.olid}` : `#/manga/${x.id}`;
+        location.hash = tab === "books" ? `#/book/hc/${x.hc_id}` : `#/manga/${x.id}`;
       else addResult(x, b.dataset.a);
     });
   };
@@ -2318,7 +2321,8 @@ function renderReading(d, tab, animate = true) {
       <div class="pgrid reveal">${results.map((x, i) => `
         <div class="pcard rdres" data-i="${i}">
           <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
-            ${x._added ? `<span class="badge">${I.check}</span>` : x.score ? `<span class="badge">${x.score}</span>` : ""}
+            ${x._added ? `<span class="badge">${I.check}</span>`
+              : (x.community_rating || x.score) ? `<span class="badge">${I.star} ${x.community_rating || x.score}</span>` : ""}
             <div class="act">${x._added ? "" : `<button title="Want to read" data-a="want">${I.bookmark}</button>
               <button title="Start now" data-a="reading">${I.eye}</button>`}
               <button title="More" data-a="menu">${KEBAB}</button></div></div>
@@ -2330,7 +2334,7 @@ function renderReading(d, tab, animate = true) {
       const x = results[+card.dataset.i];
       const b = e.target.closest(".act button");
       if (!b) {   // tap the card itself → full detail page
-        location.hash = tab === "books" ? `#/book/ol/${x.olid}` : `#/manga/${x.id}`;
+        location.hash = tab === "books" ? `#/book/hc/${x.hc_id}` : `#/manga/${x.id}`;
         return;
       }
       if (b.dataset.a === "menu") resultMenu(x);

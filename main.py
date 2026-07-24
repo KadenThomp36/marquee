@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724g"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724h"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -218,6 +218,91 @@ def _cached_get(key, fetch):
     if data is not None:
         _read_cache[key] = (time.time(), data)
     return data
+
+
+# ---- Hardcover (primary book source: metadata, covers, series, community ratings) ----
+
+def _hc_token():
+    with db() as con:
+        return setting(con, "hardcover_token") or os.environ.get("HARDCOVER_TOKEN", "")
+
+
+def hardcover(query, variables=None):
+    token = _hc_token()
+    if not token:
+        return None
+    for attempt in range(3):
+        try:
+            r = httpx.post("https://api.hardcover.app/v1/graphql", timeout=25,
+                           headers={"Authorization": f"Bearer {token.strip()}",
+                                    "Content-Type": "application/json"},
+                           json={"query": query, "variables": variables or {}})
+            if r.status_code == 429:
+                time.sleep(3 + attempt * 3)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return data.get("data")
+        except httpx.HTTPError:
+            if attempt == 2:
+                return None
+            time.sleep(1 + attempt)
+    return None
+
+
+HC_SEARCH = ('query($q:String!,$n:Int!){search(query:$q,query_type:"Book",per_page:$n)'
+             '{results}}')
+
+
+def _hc_row(doc):
+    """A Hardcover search 'document' (Typesense) → our book shape."""
+    fs = doc.get("featured_series") or {}
+    series = (fs.get("series") or {}).get("name") or (doc.get("series_names") or [None])[0]
+    img_url = (doc.get("image") or {}).get("url")
+    return {"hc_id": int(doc["id"]), "title": doc.get("title"),
+            "author": ", ".join((doc.get("author_names") or [])[:2]),
+            "year": doc.get("release_year"),
+            "pages": doc.get("pages") or None,
+            "cover": img_url,
+            "series": series or "",
+            "rating": round(doc["rating"], 2) if doc.get("rating") else None,
+            "community_rating": round(doc["rating"], 2) if doc.get("rating") else None,
+            "ratings_count": doc.get("ratings_count") or 0,
+            "genres": ",".join((doc.get("genres") or [])[:4]),
+            "desc": (doc.get("description") or "")[:1500],
+            "slug": doc.get("slug")}
+
+
+def _hc_pick(hits, want_title, want_author):
+    """Best hit for a title+author: title contains/contained, author surname present,
+    then the most-rated edition (the canonical individual book, not omnibus/sample)."""
+    def norm(s):
+        return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    wt, wa = norm(want_title), norm((want_author or "").split()[-1] if want_author else "")
+
+    def tmatch(d):
+        alts = [norm(x) for x in ([d.get("title")] + (d.get("alternative_titles") or [])) if x]
+        return any(wt in a or a in wt for a in alts)
+
+    def amatch(d):
+        return not wa or wa in norm(" ".join(d.get("author_names") or []))
+    docs = [h["document"] for h in hits]
+    cand = [d for d in docs if tmatch(d) and amatch(d)] or [d for d in docs if tmatch(d)]
+    if not cand:
+        return None
+    return max(cand, key=lambda d: (d.get("ratings_count") or 0, d.get("users_count") or 0))
+
+
+def hc_search_rows(q, limit=8):
+    def fetch():
+        d = hardcover(HC_SEARCH, {"q": q, "n": limit})
+        return ((d or {}).get("search") or {}).get("results", {}).get("hits") or []
+    hits = _cached_get(f"hcs:{q}:{limit}", fetch) or []
+    return hits
+
+
+def hc_best(title, author):
+    return _hc_pick(hc_search_rows(f"{title} {author}".strip(), 8), title, author)
 
 
 def openlibrary(path, **params):
@@ -2160,6 +2245,8 @@ def _state_row(r, kind):
     out["mode"] = r["mode"] if "mode" in r.keys() else None
     if kind == "book":
         out.update({"author": r["author"], "pages": r["pages"], "olid": r["olid"],
+                    "hc_id": r["hardcover_id"] if "hardcover_id" in r.keys() else None,
+                    "community_rating": r["community_rating"] if "community_rating" in r.keys() else None,
                     "chapters": r["chapters"] if "chapters" in r.keys() else None,
                     "series": (r["series"] if "series" in r.keys() else None) or "",
                     "genres": (r["genres"] if "genres" in r.keys() else None) or ""})
@@ -2178,7 +2265,8 @@ def reading(user=Depends(current_user)):
     uid = user["id"]
     with db() as con:
         rows = con.execute("""
-            SELECT b.*, s.state, s.progress, s.rating, s.started_at, s.finished_at, s.mode
+            SELECT b.*, b.rating AS community_rating, s.state, s.progress, s.rating,
+                   s.started_at, s.finished_at, s.mode
             FROM book_states s JOIN books b ON b.id=s.book_id WHERE s.user_id=?
             ORDER BY s.updated_at DESC""", (uid,)).fetchall()
         # instant title-suffix series backfill (no network) so grouping has some data;
@@ -2224,59 +2312,25 @@ def _author_overlap(a, b):
 
 @app.get("/api/books/search")
 def books_search(q: str, user=Depends(current_user)):
-    docs, seen = [], set()
-    for v in _q_variants(q):
-        d = openlibrary("/search.json", q=v, limit=30,
-                        fields="key,title,author_name,first_publish_year,cover_i,"
-                               "number_of_pages_median,edition_count")
-        for doc in (d or {}).get("docs", []):
-            olid = (doc.get("key") or "").rsplit("/", 1)[-1]
-            if olid and olid not in seen:
-                seen.add(olid); docs.append(doc)
-        if len(docs) >= 8:
-            break
-    # OL keeps a separate work record per translation/retelling of a classic, so a
-    # search for "The Odyssey" returns a wall of near-identical rows. Cluster by
-    # normalized title+author keeping the most-published record, then rank exact
-    # title matches first and everything by edition count — canon up, oddballs down.
-    qn = _norm_txt(q)
-    clusters = {}
-    for doc in docs:
-        key = (_norm_txt(doc.get("title")) or (doc.get("title") or "").lower(),
-               _norm_txt((doc.get("author_name") or [""])[0]))
-        cur = clusters.get(key)
-        if not cur:
-            clusters[key] = doc
-        elif (doc.get("edition_count") or 0) > (cur.get("edition_count") or 0):
-            if not doc.get("cover_i"):
-                doc["cover_i"] = cur.get("cover_i")
-            clusters[key] = doc
-        elif not cur.get("cover_i") and doc.get("cover_i"):
-            cur["cover_i"] = doc["cover_i"]
-    ranked = sorted(clusters.values(),
-                    key=lambda x: (_norm_txt(x.get("title")) == qn,
-                                   qn in _norm_txt(x.get("title")),
-                                   x.get("edition_count") or 0),
-                    reverse=True)[:12]
-    out = [{"olid": doc["key"].rsplit("/", 1)[-1], "title": doc.get("title"),
-            "author": ", ".join((doc.get("author_name") or [])[:2]),
-            "year": doc.get("first_publish_year"),
-            "pages": doc.get("number_of_pages_median"),
-            "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
-                     if doc.get("cover_i") else None} for doc in ranked]
-    # Apple art: title AND author must match, and each Apple hit decorates at most
-    # one result — otherwise one pink cover ends up stamped across the whole grid
-    apple = list(itunes_ebooks(_clean_title(q)) or itunes_ebooks(q))
-    for r in out:
-        i = next((i for i, a in enumerate(apple)
-                  if _title_matches(_clean_title(r["title"] or ""), a.get("trackName") or "")
-                  and _author_overlap(r["author"], a.get("artistName") or "")), None)
-        if i is not None:
-            hit = apple.pop(i)
-            if hit.get("artworkUrl100"):
-                r["cover"] = hit["artworkUrl100"].replace("100x100bb", "600x600bb")
-            r["genres"] = ",".join(_apple_genres(hit))
-    return {"results": out}
+    """Hardcover search — dedupe to one row per book (the most-rated edition), so
+    'The Odyssey' doesn't return a wall of translations; ranked by readership."""
+    hits = hc_search_rows(q, 20)
+    by_book, order = {}, []
+    for h in hits:
+        d = h["document"]
+        try:
+            bid = int(d["id"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        prev = by_book.get(bid)
+        if not prev or (d.get("ratings_count") or 0) > (prev.get("ratings_count") or 0):
+            if bid not in by_book:
+                order.append(bid)
+            by_book[bid] = d
+    ranked = sorted((by_book[b] for b in order),
+                    key=lambda d: (d.get("ratings_count") or 0, d.get("users_count") or 0),
+                    reverse=True)[:16]
+    return {"results": [_hc_row(d) for d in ranked]}
 
 
 def _clean_title(t):
@@ -2371,28 +2425,72 @@ def resolve_book_cover(olid, title="", author="", ol_cover=None):
 
 
 def upsert_book(con, item):
-    if item.get("olid"):
-        item["cover"] = resolve_book_cover(item["olid"], item.get("title") or "",
-                                           item.get("author") or "", item.get("cover"))
-        if not item.get("genres"):
-            m = itunes_match(item.get("title") or "", item.get("author") or "")
-            if m:
-                item["genres"] = ",".join(_apple_genres(m))
+    """Insert/update a book keyed by Hardcover id (legacy rows have olid only).
+    `item` is a Hardcover row (_hc_row) or a legacy shape."""
+    hc = item.get("hc_id")
+    if hc:
+        row = con.execute("SELECT id FROM books WHERE hardcover_id=?", (hc,)).fetchone()
+        con.execute("""INSERT INTO books(hardcover_id,title,author,cover,year,pages,series,
+            rating,genres,slug,olid,details) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(hardcover_id) DO UPDATE SET title=excluded.title, author=excluded.author,
+              cover=COALESCE(excluded.cover, books.cover), year=COALESCE(excluded.year, books.year),
+              pages=COALESCE(excluded.pages, books.pages), series=COALESCE(excluded.series, books.series),
+              rating=COALESCE(excluded.rating, books.rating), genres=COALESCE(excluded.genres, books.genres),
+              slug=COALESCE(excluded.slug, books.slug)""",
+            (hc, item.get("title"), item.get("author"), item.get("cover"), item.get("year"),
+             item.get("pages"), item.get("series") or None, item.get("rating"),
+             item.get("genres") or None, item.get("slug"), item.get("olid"),
+             json.dumps({"desc": item["desc"]}) if item.get("desc") else None))
+        return con.execute("SELECT id FROM books WHERE hardcover_id=?", (hc,)).fetchone()["id"]
+    # legacy path (Goodreads rows that only matched Open Library)
     con.execute("""INSERT INTO books(olid,title,author,cover,year,pages,genres,details)
         VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(olid) DO UPDATE SET title=excluded.title,
           author=excluded.author, cover=COALESCE(excluded.cover, books.cover),
-          year=COALESCE(excluded.year, books.year), pages=COALESCE(excluded.pages, books.pages),
-          genres=COALESCE(excluded.genres, books.genres)""",
+          year=COALESCE(excluded.year, books.year), pages=COALESCE(excluded.pages, books.pages)""",
         (item["olid"], item.get("title"), item.get("author"), item.get("cover"),
          item.get("year"), item.get("pages"), item.get("genres") or None, None))
     return con.execute("SELECT id FROM books WHERE olid=?", (item["olid"],)).fetchone()["id"]
 
 
+@app.post("/api/books/migrate_hardcover")
+def migrate_hardcover(user=Depends(current_user)):
+    """One-time: match every existing (Open Library) book to Hardcover and adopt its
+    id, series, community rating, cover, pages. Keeps the internal book id (states
+    stay linked). Paced for Hardcover's rate limit."""
+    with db() as con:
+        rows = con.execute("SELECT id, title, author, hardcover_id FROM books").fetchall()
+    matched = missed = 0
+    misses = []
+    for r in rows:
+        if r["hardcover_id"]:
+            continue
+        doc = hc_best(_clean_title(r["title"] or ""), r["author"] or "")
+        if not doc:
+            missed += 1; misses.append(r["title"]); continue
+        it = _hc_row(doc)
+        with db() as con:
+            # don't collide if this HC id already got adopted by another row
+            dup = con.execute("SELECT id FROM books WHERE hardcover_id=? AND id<>?",
+                              (it["hc_id"], r["id"])).fetchone()
+            if dup:
+                missed += 1; misses.append(r["title"] + " (dup)"); continue
+            con.execute("""UPDATE books SET hardcover_id=?, series=?, rating=?, slug=?,
+                cover=COALESCE(?,cover), pages=COALESCE(?,pages), year=COALESCE(?,year),
+                genres=COALESCE(?,genres),
+                details=json_set(COALESCE(details,'{}'),'$.desc',?) WHERE id=?""",
+                (it["hc_id"], it["series"] or None, it["rating"], it["slug"],
+                 it["cover"], it["pages"], it["year"], it["genres"] or None,
+                 it["desc"] or "", r["id"]))
+        matched += 1
+        time.sleep(0.25)
+    return {"matched": matched, "missed": missed, "misses": misses}
+
+
 @app.post("/api/books/add")
 async def books_add(request: Request, user=Depends(current_user)):
     body = await request.json()
-    if not body.get("olid"):
-        raise HTTPException(400, "missing olid")
+    if not (body.get("hc_id") or body.get("olid")):
+        raise HTTPException(400, "missing book id")
     state = body.get("state") or "want"
     now = datetime.now().isoformat()
     with db() as con:
@@ -2403,26 +2501,6 @@ async def books_add(request: Request, user=Depends(current_user)):
               state=excluded.state, updated_at=excluded.updated_at""",
             (user["id"], bid, state, prog, now, now if state == "reading" else None))
     return {"ok": True, "id": bid}
-
-
-@app.post("/api/books/refresh_covers")
-def refresh_covers(user=Depends(current_user)):
-    """Re-resolve every book's cover through the Apple-first chain (upgrades the
-    user-scan OL covers to genuine artwork). Paced to respect Apple's rate limit."""
-    with db() as con:
-        rows = con.execute("SELECT id, olid, title, author, cover, genres FROM books").fetchall()
-    updated = 0
-    for r in rows:
-        new = resolve_book_cover(r["olid"], r["title"] or "", r["author"] or "", r["cover"])
-        m = itunes_match(r["title"] or "", r["author"] or "") if not r["genres"] else None
-        genres = ",".join(_apple_genres(m)) if m else None
-        if (new and new != r["cover"]) or genres:
-            with db() as con:
-                con.execute("UPDATE books SET cover=COALESCE(?,cover), genres=COALESCE(?,genres) WHERE id=?",
-                            (new, genres, r["id"]))
-            updated += 1
-        time.sleep(0.35)
-    return {"updated": updated, "total": len(rows)}
 
 
 @app.get("/api/manga/search")
@@ -2729,29 +2807,40 @@ def _ol_desc(olid):
     return (desc or "")[:1400], (w.get("subjects") or [])[:6], w
 
 
-@app.get("/api/book/ol/{olid}")
-def book_preview(olid: str, user=Depends(current_user)):
+@app.get("/api/book/hc/{hc_id}")
+def book_preview(hc_id: int, user=Depends(current_user)):
+    """Search-result preview page for an untracked Hardcover book."""
     with db() as con:
-        row = con.execute("SELECT id FROM books WHERE olid=?", (olid,)).fetchone()
+        row = con.execute("SELECT id FROM books WHERE hardcover_id=?", (hc_id,)).fetchone()
     if row:
         return book_detail(row["id"], user)
-    desc, subjects, w = _ol_desc(olid)
-    title = w.get("title") or ""
-    author = ""
-    try:
-        ak = ((w.get("authors") or [{}])[0].get("author") or {}).get("key")
-        if ak:
-            author = (openlibrary(f"{ak}.json") or {}).get("name") or ""
-    except (AttributeError, TypeError):
-        pass
-    cover = f"https://covers.openlibrary.org/b/id/{w['covers'][0]}-L.jpg" if w.get("covers") else None
-    m = itunes_match(title, author)
-    if m and m.get("artworkUrl100"):
-        cover = m["artworkUrl100"].replace("100x100bb", "600x600bb")
+    hits = hc_search_rows(f"id:{hc_id}", 1)   # cheap re-hit; search cache usually has it
+    doc = next((h["document"] for h in hits if str(h["document"].get("id")) == str(hc_id)), None)
+    if not doc:
+        # fall back to a title search using whatever the client last saw isn't available
+        raise HTTPException(404, "unknown book")
+    it = _hc_row(doc)
+    it.update({"subjects": (doc.get("moods") or []) + (doc.get("tags") or [])[:4]})
     return {"tracked": False, "kind": "book", "state": None, "sessions": [], "household": [],
-            "item": {"olid": olid, "title": title, "author": author, "cover": cover,
-                     "genres": ",".join(_apple_genres(m)) if m else "",
-                     "desc": desc, "subjects": subjects, "year": None, "pages": None}}
+            "item": it}
+
+
+def _ol_chapters_for(b):
+    """Chapter list from Open Library TOCs — kept solely because Hardcover has no
+    chapter data. Matches the book by ISBN/title to find an OL work, then scrapes."""
+    try:
+        det = json.loads(b["details"] or "{}")
+    except ValueError:
+        det = {}
+    if "toc" in det:
+        return det.get("toc") or [], det
+    olid = b["olid"]
+    if not olid:                          # Hardcover book — find an OL work by title+author
+        doc = _ol_match(b["title"] or "", b["author"] or "")
+        olid = doc["key"].rsplit("/", 1)[-1] if doc else None
+        det["olid_toc"] = olid
+    det["toc"] = _ol_toc(olid) if olid else []
+    return det["toc"], det
 
 
 @app.get("/api/book/{book_id}")
@@ -2767,30 +2856,17 @@ def book_detail(book_id: int, user=Depends(current_user)):
         det = json.loads(b["details"] or "{}")
     except ValueError:
         det = {}
-    dirty = False
-    w = None
-    if "desc" not in det and b["olid"]:      # lazy description fetch, cached in the row
-        det["desc"], det["subjects"], w = _ol_desc(b["olid"])
-        dirty = True
-    if "toc" not in det and b["olid"]:       # chapter list from OL edition TOCs
-        det["toc"] = _ol_toc(b["olid"])
-        dirty = True
-    new_series = None
-    if not b["series"] and b["olid"]:        # canonical series name (once), for grouping
-        new_series = _series_name(w if w is not None else (openlibrary(f"/works/{b['olid']}.json") or {}),
-                                  b["title"], b["olid"])
-        if new_series:
-            dirty = True
-    if dirty:
-        with db() as con:
-            con.execute("""UPDATE books SET details=?, chapters=COALESCE(?, chapters),
-                series=COALESCE(?, series) WHERE id=?""",
-                (json.dumps(det), len(det.get("toc") or []) or None, new_series, book_id))
+    # chapter TOC is the one thing Hardcover lacks — lazily pull it from OL and cache
+    toc, det = _ol_chapters_for(b)
+    with db() as con:
+        con.execute("UPDATE books SET details=?, chapters=COALESCE(?, chapters) WHERE id=?",
+                    (json.dumps(det), len(toc) or None, book_id))
     item = {k: b[k] for k in b.keys() if k != "details"}
-    item["series"] = item.get("series") or new_series
-    item["chapters"] = item.get("chapters") or (len(det.get("toc") or []) or None)
+    item["community_rating"] = b["rating"]        # b.rating is the aggregate score
+    item["hc_id"] = b["hardcover_id"]
+    item["chapters"] = item.get("chapters") or (len(toc) or None)
     item.update({"desc": det.get("desc") or "", "subjects": det.get("subjects") or [],
-                 "toc": det.get("toc") or []})
+                 "toc": toc})
     return {"tracked": bool(st), "kind": "book", "item": item,
             "state": dict(st) if st else None,
             "sessions": _sessions_for(uid, "book", book_id) if st else [],
@@ -3827,29 +3903,11 @@ def _import_goodreads(uid, raw):
             state = shelf_map.get((r.get("Exclusive Shelf") or "").strip())
             if not title or not state:
                 continue
-            isbn = re.sub(r"\D", "", r.get("ISBN13") or "") or re.sub(r"\D", "", r.get("ISBN") or "")
-            item = None
-            if isbn:
-                ed = openlibrary(f"/isbn/{isbn}.json")
-                if ed and ed.get("works"):
-                    olid = ed["works"][0]["key"].rsplit("/", 1)[-1]
-                    cov = (ed.get("covers") or [None])[0]
-                    item = {"olid": olid, "title": title, "author": author,
-                            "pages": ed.get("number_of_pages"),
-                            "cover": f"https://covers.openlibrary.org/b/id/{cov}-L.jpg" if cov else None}
-            if not item:
-                doc = _ol_match(title, author)
-                if doc:
-                    item = {"olid": doc["key"].rsplit("/", 1)[-1], "title": title, "author": author,
-                            "year": doc.get("first_publish_year"),
-                            "pages": doc.get("number_of_pages_median"),
-                            "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
-                                     if doc.get("cover_i") else None}
+            doc = hc_best(_clean_title(title), author)   # Hardcover match
+            item = _hc_row(doc) if doc else None
             if not item:
                 st["errors"].append(title)
                 continue
-            item.setdefault("year", int(r["Original Publication Year"])
-                            if (r.get("Original Publication Year") or "").strip().isdigit() else None)
             if not item.get("pages") and (r.get("Number of Pages") or "").strip().isdigit():
                 item["pages"] = int(r["Number of Pages"])
             gr_rating = int(r["My Rating"]) * 2 if (r.get("My Rating") or "").strip().isdigit() \
@@ -4481,6 +4539,10 @@ def startup():
                      "ALTER TABLE books ADD COLUMN genres TEXT",
                      "ALTER TABLE books ADD COLUMN chapters INTEGER",
                      "ALTER TABLE books ADD COLUMN series TEXT",
+                     "ALTER TABLE books ADD COLUMN hardcover_id INTEGER",
+                     "ALTER TABLE books ADD COLUMN rating REAL",
+                     "ALTER TABLE books ADD COLUMN slug TEXT",
+                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_books_hc ON books(hardcover_id)",
                      "ALTER TABLE book_states ADD COLUMN mode TEXT",
                      "ALTER TABLE manga_states ADD COLUMN mode TEXT",
                      "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
