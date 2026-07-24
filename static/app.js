@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724m";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724n";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -32,6 +32,7 @@ const I = {
   bell: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M6 9a6 6 0 0 1 12 0c0 5 1.8 6.5 2.5 7.3.4.5.1 1.2-.6 1.2H4.1c-.7 0-1-.7-.6-1.2C4.2 15.5 6 14 6 9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9.5 20a2.5 2.5 0 0 0 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   lock: `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="5" y="10.5" width="14" height="9.5" rx="2.4" stroke="currentColor" stroke-width="1.8"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="15" r="1.5" fill="currentColor"/></svg>`,
   globe: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 12h17M12 3.4c2.4 2.3 3.7 5.4 3.7 8.6S14.4 18.3 12 20.6c-2.4-2.3-3.7-5.4-3.7-8.6S9.6 5.7 12 3.4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
+  swap: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M4 8.5h13.5M14 5l3.5 3.5L14 12M20 15.5H6.5M10 12l-3.5 3.5L10 19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   users: `<svg class="ico" viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3.3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 5.5a3.2 3.2 0 0 1 0 6.2M17.5 14.6c1.9.5 3.4 2.2 3.4 4.9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`,
   sort: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M7 5v14M7 19l-3.2-3.2M7 5l3.2 3.2M17 19V5M17 5l3.2 3.2M17 19l-3.2-3.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
@@ -1796,7 +1797,8 @@ function renderRDetail(d) {
         <span class="rdt-hrow">${avatarHTML(h, "tiny")} <b>${esc(h.display_name || h.username)}</b>
           <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${h.rating}` : ""}</i></span>`).join("")}</div>` : ""}
       <div class="act-row" style="margin-top:18px">${kind === "book"
-        ? `${it.slug || it.hc_id ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://hardcover.app/books/${it.slug || it.hc_id}">Hardcover</a>` : ""}
+        ? `${d.tracked ? `<button class="chip-btn" id="rdtfix">${I.swap} Wrong book?</button>` : ""}
+           ${it.slug || it.hc_id ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://hardcover.app/books/${it.slug || it.hc_id}">Hardcover</a>` : ""}
            <a class="chip-btn" target="_blank" rel="noopener" href="https://www.goodreads.com/search?q=${encodeURIComponent((it.title || "") + " " + (it.author || ""))}"><b>goodreads</b></a>`
         : `<a class="chip-btn" target="_blank" rel="noopener" href="https://anilist.co/manga/${it.id}">AniList</a>`}
         ${d.tracked ? `<button class="chip-btn danger" id="rdtremove">${I.x} Remove</button>` : ""}</div>
@@ -1866,6 +1868,7 @@ function renderRDetail(d) {
     if ($("#sesend")) $("#sesend").onclick = () =>
       rdEndSession({ ...live, pages: kind === "book" ? total : null,
         chapters: kind === "manga" ? total : null }, rerun);
+    if ($("#rdtfix")) $("#rdtfix").onclick = () => rdFixMatch(it);
     $("#rdtremove").onclick = async () => {
       await api(`/${kind}/${it.id}/state`, { body: { state: "none" } }).catch(() => {});
       patchShelf(kind, it.id, () => null);
@@ -1949,6 +1952,38 @@ routes.bookhc = async hcid => {
     un(); if (seg()[0] === "book") renderRDetail(d);
   } catch { un(); }
 };
+/* Matching a shelf title to Hardcover is guesswork — a workbook, a boxed set or a
+   "Summary of…" can win. This is the manual override: pick the real book. */
+async function rdFixMatch(it) {
+  const s = sheet(`<div class="rd-menu"><div class="sh-t">Which book is it?</div>
+    <div class="hint" style="padding:0 10px 8px">Matching ${esc(it.title)} — your progress,
+      dates and reviews stay put.</div>
+    <div id="fixlist" class="fix-list"><div class="hint" style="padding:10px">Looking…</div></div></div>`);
+  const r = await api(`/book/${it.id}/matches`).catch(() => null);
+  const list = $("#fixlist", s.el);
+  if (!list) return;
+  const rows = (r && r.results) || [];
+  if (!rows.length) { list.innerHTML = `<div class="hint" style="padding:10px">No other editions found.</div>`; return; }
+  list.innerHTML = rows.map((x, i) => `
+    <button class="list-opt fix-opt ${x.hc_id === r.current ? "on" : ""}" data-i="${i}">
+      <img class="fix-cover" src="${POSTER(x.cover)}" alt="">
+      <span class="lo-name"><b>${esc(x.title)}</b>
+        <i>${esc(x.author || "")}${x.year ? ` · ${x.year}` : ""}${x.pages ? ` · ${x.pages}p` : ""}</i></span>
+      ${x.hc_id === r.current ? `<span class="lo-ic">${I.check}</span>` : ""}
+    </button>`).join("");
+  $$(".fix-opt", s.el).forEach(b => b.onclick = async () => {
+    const x = rows[+b.dataset.i];
+    if (x.hc_id === r.current) { s.close(); return; }
+    b.disabled = true;
+    const res = await api(`/book/${it.id}/rematch`, { body: { hc_id: x.hc_id } }).catch(() => null);
+    s.close();
+    if (!res) { toast("Couldn’t switch that one"); return; }
+    toast(`Now tracking ${x.title}`);
+    delete CACHE["/reading"]; delete CACHE["/reading/stats"];
+    routes.book(it.id);
+  });
+}
+
 /* ---- everything by an author / everything in a series ---- */
 function renderBrowse(d) {
   const isA = d.by === "author";

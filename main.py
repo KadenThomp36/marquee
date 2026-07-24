@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724m"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724n"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -273,12 +273,24 @@ def _hc_row(doc):
             "slug": doc.get("slug")}
 
 
+# Titles of things that are ABOUT a book rather than the book: cash-grab summaries,
+# workbooks, study guides. They out-rank nothing on readership, but when the real book
+# is missing from a result set they are exactly what a naive matcher settles for.
+DERIVATIVE_RE = re.compile(
+    r"\b(summary|summaries|workbook|companion|study guide|analysis|key takeaways|"
+    r"cliffs?notes|sparknotes|conversation starters|trivia[- ]on[- ]books|quicklet|"
+    r"instaread|blinkist|review and analysis)\b", re.I)
+
+
 def _hc_pick(hits, want_title, want_author):
-    """Best hit for a title+author: title contains/contained, author surname present,
-    then the most-rated edition (the canonical individual book, not omnibus/sample)."""
+    """Best hit for a title+author. Ranked in tiers, because the trap here is never a
+    close call: an exact title beats a longer one that merely contains it (The Hobbit,
+    not The Hobbit & The Lord of the Rings), a real book beats a summary/workbook of
+    it, and within a tier the most-read record is the canonical edition."""
     def norm(s):
         return re.sub(r"[^a-z0-9]", "", (s or "").lower())
     wt, wa = norm(want_title), norm((want_author or "").split()[-1] if want_author else "")
+    wkey = _book_key(want_title)
 
     def tmatch(d):
         alts = [norm(x) for x in ([d.get("title")] + (d.get("alternative_titles") or [])) if x]
@@ -286,11 +298,17 @@ def _hc_pick(hits, want_title, want_author):
 
     def amatch(d):
         return not wa or wa in norm(" ".join(d.get("author_names") or []))
-    docs = [h["document"] for h in hits]
+    docs = hits if hits and isinstance(hits[0], dict) and "id" in hits[0] \
+        else [h["document"] for h in hits]
     cand = [d for d in docs if tmatch(d) and amatch(d)] or [d for d in docs if tmatch(d)]
     if not cand:
         return None
-    return max(cand, key=lambda d: (d.get("ratings_count") or 0, d.get("users_count") or 0))
+
+    def rank(d):
+        return (_book_key(d.get("title")) == wkey,          # same book, not a superset
+                not DERIVATIVE_RE.search(d.get("title") or ""),
+                d.get("users_count") or 0, d.get("ratings_count") or 0)
+    return max(cand, key=rank)
 
 
 def hc_search_rows(q, limit=8):
@@ -301,8 +319,28 @@ def hc_search_rows(q, limit=8):
     return hits
 
 
+def hc_candidates(title, author, limit=10):
+    """Hardcover's search is a text index, so which query you send decides what you can
+    possibly match: "The Hobbit" finds Tolkien's book (12k readers), "The Hobbit
+    Tolkien" finds a boxed set and three books *about* him. Ask several ways and pool
+    the answers, keeping each book once."""
+    clean = _clean_title(title)
+    surname = (author or "").split()[-1] if author else ""
+    asked, seen, out = set(), set(), []
+    for q in [f"{clean} {surname}".strip(), clean, f"{title} {author}".strip(), title]:
+        if not q or q.lower() in asked:
+            continue
+        asked.add(q.lower())
+        for h in hc_search_rows(q, limit):
+            d = h.get("document") or {}
+            if d.get("id") and d["id"] not in seen:
+                seen.add(d["id"])
+                out.append(d)
+    return out
+
+
 def hc_best(title, author):
-    return _hc_pick(hc_search_rows(f"{title} {author}".strip(), 8), title, author)
+    return _hc_pick(hc_candidates(title, author), title, author)
 
 
 HC_FIELDS = """id title pages rating ratings_count users_count release_year slug description
@@ -323,8 +361,8 @@ def _hc_gql_row(b, series_id=None):
     if isinstance(ct, dict):
         genres = [t.get("tag") for t in (ct.get("Genre") or []) if t.get("tag")][:4]
     return {"hc_id": int(b["id"]), "title": b.get("title"),
-            "author": ", ".join(c["author"]["name"] for c in (b.get("contributions") or [])
-                                 if c.get("author"))[:120] or "",
+            "author": ", ".join([c["author"]["name"] for c in (b.get("contributions") or [])
+                                 if c.get("author")][:2])[:120] or "",
             "year": b.get("release_year"), "pages": b.get("pages") or None,
             "cover": (b.get("image") or {}).get("url"), "series": series or "",
             "series_pos": hit.get("position") if hit else None,
@@ -3041,6 +3079,69 @@ def book_detail(book_id: int, user=Depends(current_user)):
             "state": dict(st) if st else None,
             "sessions": _sessions_for(uid, "book", book_id) if st else [],
             "household": _household_states(uid, "book", book_id)}
+
+
+@app.get("/api/book/{book_id}/matches")
+def book_matches(book_id: int, user=Depends(current_user)):
+    """Candidate Hardcover records for a book already on the shelf — the list behind
+    "wrong book?", for when automatic matching lands on a workbook or a boxed set."""
+    with db() as con:
+        b = con.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+    if not b:
+        raise HTTPException(404, "unknown book")
+    docs = hc_candidates(b["title"] or "", b["author"] or "")
+    best = {}
+    for d in docs:
+        key = _book_key(d.get("title"))
+        cur = best.get(key)
+        if not cur or (d.get("users_count") or 0) > (cur.get("users_count") or 0):
+            best[key] = d
+    ranked = sorted(best.values(), key=lambda d: (
+        not DERIVATIVE_RE.search(d.get("title") or ""),
+        d.get("users_count") or 0), reverse=True)[:12]
+    return {"current": b["hardcover_id"], "results": [_hc_row(d) for d in ranked]}
+
+
+@app.post("/api/book/{book_id}/rematch")
+async def book_rematch(book_id: int, request: Request, user=Depends(current_user)):
+    """Re-point a shelf book at a different Hardcover record (or re-run the matcher),
+    keeping the internal book id so states, sessions and reviews stay attached."""
+    body = await request.json() if await request.body() else {}
+    with db() as con:
+        b = con.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+    if not b:
+        raise HTTPException(404, "unknown book")
+    if body.get("hc_id"):
+        it = hc_book_by_id(int(body["hc_id"]))
+    else:
+        doc = hc_best(b["title"] or "", b["author"] or "")
+        it = _hc_row(doc) if doc else None
+    if not it:
+        raise HTTPException(404, "no Hardcover match")
+    with db() as con:
+        dup = con.execute("SELECT id, title FROM books WHERE hardcover_id=? AND id<>?",
+                          (it["hc_id"], book_id)).fetchone()
+        if dup:
+            raise HTTPException(409, f"“{dup['title']}” is already that book")
+        # the old TOC/chapter count belonged to the old match — let them re-resolve
+        # keep the shelf's own title when it already names this book (nobody wants
+        # "The Hobbit" relabelled "The Hobbit, or There and Back Again")
+        title = b["title"] if _book_key(b["title"]) == _book_key(it["title"]) \
+            else (it["title"] or b["title"])
+        con.execute("""UPDATE books SET hardcover_id=?, title=?, author=?, series=?,
+            rating=?, slug=?, cover=COALESCE(?,cover), pages=COALESCE(?,pages),
+            year=COALESCE(?,year), genres=COALESCE(?,genres), chapters=NULL,
+            details=json_remove(json_set(COALESCE(details,'{}'),'$.desc',?),
+                                '$.toc','$.olid_toc')
+            WHERE id=?""",
+            (it["hc_id"], title, it["author"] or b["author"],
+             it["series"] or None, it["rating"], it["slug"], it["cover"], it["pages"],
+             it["year"], it["genres"] or None, it["desc"] or "", book_id))
+        if it["pages"]:      # a 1,178-page omnibus → a 320-page novel: keep progress sane
+            con.execute("""UPDATE book_states
+                SET progress = CASE WHEN state='finished' THEN ? ELSE MIN(progress,?) END
+                WHERE book_id=?""", (it["pages"], it["pages"], book_id))
+    return {"ok": True, "item": it}
 
 
 @app.get("/api/manga/{manga_id}")
