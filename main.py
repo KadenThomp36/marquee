@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724b"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724c"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2557,7 +2557,7 @@ def _household_states(uid, kind, item_id):
     return [dict(r) for r in rows]
 
 
-def mangadex_chlist(al_id, title):
+def mangadex_chlist(al_id, title, expect=None):
     """Chapter numbers + titles from MangaDex (matched by its AniList link, title
     fallback). Licensed series may be partially delisted there — rows without a
     known title render as 'Chapter N' client-side."""
@@ -2574,26 +2574,46 @@ def mangadex_chlist(al_id, title):
                              ((m["attributes"].get("title") or {}).get("en") or ""))), None)
             if not uuid:
                 return []
-            out, offset = {}, 0
-            while offset < 1500:
-                f = httpx.get(f"https://api.mangadex.org/manga/{uuid}/feed", timeout=25,
-                              headers=OL_UA, params={"translatedLanguage[]": "en",
-                              "order[chapter]": "asc", "limit": 500, "offset": offset})
-                f.raise_for_status()
-                data = f.json()
-                for c in data.get("data") or []:
-                    a = c["attributes"]
-                    try:
-                        n = int(float(a.get("chapter")))
-                    except (TypeError, ValueError):
-                        continue
-                    if n > 0 and (n not in out or (not out[n] and a.get("title"))):
-                        out[n] = (a.get("title") or "").strip()[:80]
-                offset += 500
-                if offset >= (data.get("total") or 0):
-                    break
-                time.sleep(0.25)
-            return [[n, out[n]] for n in sorted(out)]
+            by_lang = {}          # lang -> {chapter n: title}
+
+            def feed_pass(extra, cap):
+                offset = 0
+                while offset < cap:
+                    f = httpx.get(f"https://api.mangadex.org/manga/{uuid}/feed", timeout=25,
+                                  headers=OL_UA, params={"order[chapter]": "asc", "limit": 500,
+                                  "offset": offset, **extra})
+                    f.raise_for_status()
+                    data = f.json()
+                    for c in data.get("data") or []:
+                        a = c["attributes"]
+                        try:
+                            n = int(float(a.get("chapter")))
+                        except (TypeError, ValueError):
+                            continue
+                        if n <= 0:
+                            continue
+                        lang = by_lang.setdefault(a.get("translatedLanguage") or "?", {})
+                        if n not in lang or (not lang[n] and a.get("title")):
+                            lang[n] = (a.get("title") or "").strip()[:80]
+                    offset += 500
+                    if offset >= (data.get("total") or 0):
+                        break
+                    time.sleep(0.25)
+            feed_pass({"translatedLanguage[]": "en"}, 1500)
+            # licensed series delist EN chapters — if EN coverage is thin vs the known
+            # total, sweep all languages and merge with a consistent-language priority
+            if len(by_lang.get("en") or {}) < max(5, (expect or 0) // 2):
+                feed_pass({}, 2000)
+            order = ["en"] + sorted((l for l in by_lang if l != "en"),
+                                    key=lambda l: -len(by_lang[l]))
+            merged = {}
+            for lang in order:
+                for n, t in by_lang.get(lang, {}).items():
+                    if n not in merged:
+                        merged[n] = t
+                    elif not merged[n] and t:
+                        merged[n] = t
+            return [[n, merged[n]] for n in sorted(merged)]
         except httpx.HTTPError:
             return None
     return _cached_get(f"md:{al_id}", fetch) or []
@@ -2698,8 +2718,8 @@ def manga_detail(manga_id: int, user=Depends(current_user)):
             det = json.loads(m["details"] or "{}")
         except ValueError:
             det = {}
-        if st and "chlist" not in det:   # lazy chapter-list fetch, cached in the row
-            det["chlist"] = mangadex_chlist(manga_id, m["title"] or "")
+        if st and not det.get("chlist"):   # lazy chapter-list fetch; retry while empty
+            det["chlist"] = mangadex_chlist(manga_id, m["title"] or "", m["chapters"])
             new_total = max([n for n, _ in det["chlist"]], default=None)
             with db() as con:
                 con.execute("UPDATE manga SET details=?, chapters=COALESCE(chapters,?) WHERE id=?",

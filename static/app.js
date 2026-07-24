@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1628,11 +1628,13 @@ function rdCard(it, kind, section) {
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
       ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
       <div class="act">${acts}</div>
-      ${section === "reading" ? `<div class="rd-prog" title="${rdProgLabel(it, kind)}"><i style="width:${pct}%"></i></div>` : ""}
     </div>
     <a class="t" href="#/reading">${esc(it.title)}</a>
     <div class="y">${sub}${section === "reading" ? ` · ${rdProgLabel(it, kind)}` : ""}
       ${section === "finished" && it.finished_at ? esc(fmtDate(it.finished_at.slice(0, 10))) : ""}</div>
+    ${section === "reading" && total ? `<div class="pbar" title="${rdProgLabel(it, kind)}">
+      <div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div>
+      <div class="pbar-num">${pct}%</div></div>` : ""}
   </div>`;
 }
 
@@ -2087,27 +2089,82 @@ function rdApplyView(arr, kind) {
   if (by) out = out.slice().sort(by);
   return out;
 }
-function rdToolbar(all, kind) {
+const FILTER_ICO = `<svg viewBox="0 0 24 24"><path d="M4 5.5h16l-6.2 7v6l-3.6-2.2v-3.8z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>`;
+const GROUP_ICO = `<svg viewBox="0 0 24 24"><path d="m12 3.5 8.5 4.6-8.5 4.6-8.5-4.6z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="m4.5 12.6 7.5 4 7.5-4M4.5 16.6l7.5 4 7.5-4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>`;
+function rdDims(all, kind) {
   const uniq = f => [...new Set(all.map(f).filter(Boolean))].sort();
-  const authors = kind === "book" ? uniq(x => x.author) : [];
-  const series = kind === "book" ? uniq(x => seriesOf(x.title)) : [];
-  const genres = uniq(x => x.genres).flatMap(g => g.split(",")).filter(Boolean);
-  const genreList = [...new Set(genres)].sort();
-  const origins = kind === "manga" ? uniq(x => x.origin) : [];
-  const sel = (id, cur, empty, opts) => opts.length > 1
-    ? `<select id="${id}"><option value="">${empty}</option>${opts.map(o =>
-        `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>` : "";
+  return {
+    authors: kind === "book" ? uniq(x => x.author) : [],
+    series: kind === "book" ? uniq(x => seriesOf(x.title)) : [],
+    genres: [...new Set(uniq(x => x.genres).flatMap(g => g.split(",")).filter(Boolean))].sort(),
+    origins: kind === "manga" ? uniq(x => x.origin) : [],
+    years: uniq(x => x.year),
+    rated: all.some(x => x.rating),
+  };
+}
+const GROUP_LABELS = { status: "Status", author: "Author", series: "Series",
+  genre: "Genre", origin: "Origin", year: "Year", rating: "My rating" };
+function rdToolbar(all, kind) {
+  const dm = rdDims(all, kind);
+  const filters = [["author", dm.authors], ["series", dm.series],
+                   ["origin", dm.origins], ["genre", dm.genres]].filter(([, o]) => o.length > 1);
+  const active = filters.filter(([k]) => RD_VIEW[k]).length;
+  const group = RD_VIEW.group || "status";
+  const groupable = rdGroupOptions(dm, kind).length > 1;
   return `<div class="rd-tools">
     <select id="rdsort">${[["recent", "Recent"], ["title", "Title A–Z"],
       ...(kind === "book" ? [["author", "Author"]] : []), ["year", "Year"],
       ["len", kind === "book" ? "Pages" : "Chapters"], ["rating", "My rating"],
       ["finished", "Date finished"]].map(([v, l]) =>
       `<option value="${v}" ${RD_VIEW.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select>
-    ${sel("rdfauthor", RD_VIEW.author, "All authors", authors)}
-    ${sel("rdfseries", RD_VIEW.series, "All series", series)}
-    ${sel("rdforigin", RD_VIEW.origin, "All origins", origins)}
-    ${sel("rdfgenre", RD_VIEW.genre, "All genres", genreList)}
+    ${filters.length ? `<button class="rd-tbtn ${active ? "on" : ""}" id="rdfilter">
+      ${FILTER_ICO}<span>Filter${active ? ` · ${active}` : ""}</span></button>` : ""}
+    ${groupable ? `<button class="rd-tbtn ${group !== "status" ? "on" : ""}" id="rdgroup">
+      ${GROUP_ICO}<span>${group !== "status" ? GROUP_LABELS[group] : "Group"}</span></button>` : ""}
   </div>`;
+}
+function rdGroupOptions(dm, kind) {
+  return [["status", "Status"],
+    ...(dm.authors.length > 1 ? [["author", "Author"]] : []),
+    ...(dm.series.length ? [["series", "Series"]] : []),
+    ...(dm.genres.length > 1 ? [["genre", "Genre"]] : []),
+    ...(dm.origins.length > 1 ? [["origin", "Origin"]] : []),
+    ...(dm.years.length > 1 ? [["year", "Year"]] : []),
+    ...(dm.rated ? [["rating", "My rating"]] : [])];
+}
+function rdFilterSheet(all, kind, apply) {
+  const dm = rdDims(all, kind);
+  const sel = (key, label, opts) => opts.length > 1 ? `<label class="rdf-row">${label}
+    <select data-f="${key}"><option value="">All</option>${opts.map(o =>
+      `<option ${o === RD_VIEW[key] ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>` : "";
+  const s = sheet(`<div class="rd-fsheet"><div class="sh-t">${FILTER_ICO} Filter</div>
+    ${sel("author", "Author", dm.authors)}
+    ${sel("series", "Series", dm.series)}
+    ${sel("origin", "Origin", dm.origins)}
+    ${sel("genre", "Genre", dm.genres)}
+    <div class="rdw-nav"><button class="btn ghost" id="rdfclear">Clear all</button>
+      <button class="btn pri" id="rdfdone">${I.check} Done</button></div></div>`);
+  $$("select[data-f]", s.el).forEach(el => el.onchange = () => {
+    RD_VIEW[el.dataset.f] = el.value; apply();   // live — shelf updates behind the sheet
+  });
+  $("#rdfclear", s.el).onclick = () => {
+    ["author", "series", "origin", "genre"].forEach(k => { RD_VIEW[k] = ""; });
+    $$("select[data-f]", s.el).forEach(el => { el.value = ""; });
+    apply();
+  };
+  $("#rdfdone", s.el).onclick = s.close;
+}
+function rdGroupSheet(all, kind, apply) {
+  const opts = rdGroupOptions(rdDims(all, kind), kind);
+  const cur = RD_VIEW.group || "status";
+  const s = sheet(`<div class="rd-fsheet"><div class="sh-t">${GROUP_ICO} Group by</div>
+    <div class="rd-menu">${opts.map(([v, l]) => `
+      <button class="list-opt ${cur === v ? "on" : ""}" data-g="${v}">
+        <span class="lo-ic">${cur === v ? I.check : ""}</span><span class="lo-name">${l}</span></button>`).join("")}
+    </div></div>`);
+  $$("[data-g]", s.el).forEach(b => b.onclick = () => {
+    RD_VIEW.group = b.dataset.g; s.close(); apply();
+  });
 }
 function readingTabs(tab, f) {
   const pills = [];
@@ -2125,7 +2182,34 @@ function renderReading(d, tab, animate = true) {
   const dd = d[tab];
   const rv = animate ? "reveal" : "";
   const section = (title, arr, sec) => arr.length
-    ? `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x => rdCard(x, kind, sec)).join("")}</div>` : "";
+    ? `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x =>
+        rdCard(x, kind, sec || (x.state === "want" ? "want" : x.state))).join("")}</div>` : "";
+  const allShelf = [...dd.reading, ...dd.want, ...dd.finished];
+  const group = RD_VIEW.group || "status";
+  const sectionsHtml = group === "status"
+    ? section("Reading now", rdApplyView(dd.reading, kind), "reading")
+      + section("Want to read", rdApplyView(dd.want, kind), "want")
+      + section("Finished", rdApplyView(dd.finished, kind), "finished")
+    : (() => {
+      const keyFn = {
+        author: x => x.author || "Unknown author",
+        series: x => seriesOf(x.title) || "No series",
+        genre: x => (x.genres || "").split(",")[0] || "No genre",
+        origin: x => x.origin || "other",
+        year: x => x.year || 0,
+        rating: x => x.rating || 0,
+      }[group];
+      const m = new Map();
+      rdApplyView(allShelf, kind).forEach(x => {
+        const k = keyFn(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); });
+      let keys = [...m.keys()];
+      if (group === "year" || group === "rating") keys.sort((a, b) => b - a);
+      else keys.sort((a, b) => String(a).localeCompare(String(b)));
+      return keys.map(k => section(
+        group === "rating" ? (k ? `★ ${k}/10` : "Unrated")
+        : group === "year" ? (k || "Unknown year") : esc(String(k)),
+        m.get(k), null)).join("");
+    })();
   view.innerHTML = `<h1>${both ? "Reading" : tab === "books" ? "Books" : "Manga"}</h1>
     ${readingTabs(tab, f)}
     <div id="rdlive"></div>
@@ -2137,13 +2221,9 @@ function renderReading(d, tab, animate = true) {
       return n ? `<div class="rd-banner"><span><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8 3v4M16 3v4M3.5 10.3h17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
         ${n} title${n > 1 ? "s are" : " is"} missing read dates — they power your stats</span>
         <button class="btn pri" id="rddates">Fill in</button></div>` : ""; })()}
-    ${(dd.reading.length + dd.want.length + dd.finished.length) > 3 ? rdToolbar([...dd.reading, ...dd.want, ...dd.finished], kind) : ""}
-    ${section("Reading now", rdApplyView(dd.reading, kind), "reading")}
-    ${section("Want to read", rdApplyView(dd.want, kind), "want")}
-    ${section("Finished", rdApplyView(dd.finished, kind), "finished")}
-    ${dd.reading.length + dd.want.length + dd.finished.length ? (
-      rdApplyView(dd.reading, kind).length + rdApplyView(dd.want, kind).length
-        + rdApplyView(dd.finished, kind).length ? "" :
+    ${allShelf.length > 3 ? rdToolbar(allShelf, kind) : ""}
+    ${sectionsHtml}
+    ${allShelf.length ? (rdApplyView(allShelf, kind).length ? "" :
       `<div class="empty">Nothing matches those filters.</div>`) :
       `<div class="empty">Nothing on the shelf yet — search above to add your first ${tab === "books" ? "book" : "series"}.</div>`}`;
 
@@ -2160,11 +2240,9 @@ function renderReading(d, tab, animate = true) {
   if ($("#rddates")) $("#rddates").onclick = () =>
     rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, soft,
       [...dd.reading, ...dd.want, ...dd.finished]);
-  [["rdsort", "sort"], ["rdfauthor", "author"], ["rdfseries", "series"],
-   ["rdforigin", "origin"], ["rdfgenre", "genre"]].forEach(([id, key]) => {
-    const el = $("#" + id);
-    if (el) el.onchange = () => { RD_VIEW[key] = el.value; soft(); };
-  });
+  if ($("#rdsort")) $("#rdsort").onchange = () => { RD_VIEW.sort = $("#rdsort").value; soft(); };
+  if ($("#rdfilter")) $("#rdfilter").onclick = () => rdFilterSheet(allShelf, kind, soft);
+  if ($("#rdgroup")) $("#rdgroup").onclick = () => rdGroupSheet(allShelf, kind, soft);
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
 
   const addResult = async (x, state, btn) => {
