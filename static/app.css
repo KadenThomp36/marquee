@@ -742,6 +742,9 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
   font-weight:500;letter-spacing:normal;text-transform:none;color-scheme:dark;min-height:42px;
   min-width:0;-webkit-min-logical-width:0}
 @media(max-width:700px){.rdw-dates input{font-size:13.5px;padding:10px 8px}}
+/* real-device WebKit date widgets are wider than headless measurements — on phones
+   the side-by-side columns genuinely collide, so stack them */
+@media(max-width:540px){.rdw-dates{grid-template-columns:1fr}}
 .rdw-dates input:focus{outline:none;border-color:var(--amber-dim)}
 .rdw .rd-top{align-items:center;margin-bottom:16px}
 .rdw .rd-top img{width:72px}

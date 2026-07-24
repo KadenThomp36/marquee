@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1849,29 +1849,43 @@ function renderRDetail(d) {
   }
   $$(".rdt-lrow", view).forEach(row => row.onclick = () => {
     const s = d.sessions.find(x => x.id === +row.dataset.sid);
-    if (s) rdSessionSheet(s, unit, rerun);
+    if (s) rdSessionSheet(s, { unit, mode: modeNow, total,
+      chapters: it.chapters, pages: it.pages }, rerun);
   });
   if (it.id) reviewsBlock(kind, it.id).then(el => { const c = $("#rd-reviews"); if (c) c.appendChild(el); });
   rdTickTimers();
 }
 
-/* edit/delete a past session or checkpoint from the reading log */
-function rdSessionSheet(sess, unit, rerun) {
+/* edit/delete a past session or checkpoint from the reading log — fields speak the
+   item's progress mode (pages / % / chapters) and convert back to canonical on save */
+function rdSessionSheet(sess, ctx, rerun) {
+  const { unit, mode, total, chapters, pages } = ctx;
+  const pctMode = mode === "pct" && total;
+  const chMode = mode === "chapters" && chapters && pages;
+  const disp = v => pctMode ? Math.round(100 * v / total)
+    : chMode ? Math.min(chapters, Math.round(v / pages * chapters)) : v;
+  const back = v => pctMode ? Math.round(v / 100 * total)
+    : chMode ? Math.round(v / chapters * pages) : v;
+  const u = pctMode ? "%" : chMode ? "ch" : unit;
   const s = sheet(`<div class="rd-sheet"><div class="sh-t">Edit log entry</div>
     <div class="rdw-dates">
       <label>Date<input type="date" id="esd" value="${sess.date.slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
       <label>Minutes<input type="number" id="esm" min="0" value="${sess.minutes || 0}"></label></div>
     <div class="rdw-dates">
-      <label>From · ${unit}<input type="number" id="esf" min="0" value="${sess.from}"></label>
-      <label>To · ${unit}<input type="number" id="est" min="0" value="${sess.to}"></label></div>
+      <label>From · ${u}<input type="number" id="esf" min="0" ${pctMode ? `max="100"` : ""} value="${disp(sess.from)}"></label>
+      <label>To · ${u}<input type="number" id="est" min="0" ${pctMode ? `max="100"` : ""} value="${disp(sess.to)}"></label></div>
     <div class="rdw-nav">
       <button class="btn danger ghost" id="esdel">${I.x} Delete</button>
       <button class="btn pri" id="essave">${I.check} Save</button></div></div>`);
   const done = () => { delete CACHE["/reading/stats"]; s.close(); rerun(); };
   $("#essave", s.el).onclick = async () => {
+    // only convert fields the user actually changed, so display rounding can't
+    // silently shift an untouched stored value
+    const f = +$("#esf", s.el).value || 0, t2 = +$("#est", s.el).value || 0;
     await api(`/reading/session/${sess.id}`, { body: {
       date: $("#esd", s.el).value, minutes: +$("#esm", s.el).value || 0,
-      from: +$("#esf", s.el).value || 0, to: +$("#est", s.el).value || 0 } }).catch(() => {});
+      from: f === disp(sess.from) ? sess.from : back(f),
+      to: t2 === disp(sess.to) ? sess.to : back(t2) } }).catch(() => {});
     toast("Log entry updated"); done();
   };
   $("#esdel", s.el).onclick = async () => {
