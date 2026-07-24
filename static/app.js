@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1644,10 +1644,11 @@ function rdSheet(it, kind, refresh) {
       <button class="iconbtn" id="rdplus">+</button>
       <span class="hint">${total ? "of " + total : ""} ${unit}</span></div>
     <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(it.rating)}</span></div>
-    <div class="rd-daterow"><label>Started</label><input type="date" id="rdstart"
-        value="${(it.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}">
-      <label>Finished</label><input type="date" id="rdfin"
-        value="${(it.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></div>
+    <div class="rdw-dates">
+      <label>Started<input type="date" id="rdstart"
+        value="${(it.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
+      <label>Finished<input type="date" id="rdfin"
+        value="${(it.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label></div>
     <div class="act-row">${links}</div>
     <button class="btn danger ghost" id="rdremove">${I.x} Remove from my ${kind === "book" ? "books" : "shelf"}</button>
   </div>`);
@@ -1703,9 +1704,10 @@ function rdDatesWizard(items, kind, refresh) {
         <div class="rd-meta"><b>${esc(it.title)}</b>
           <span>${kind === "book" ? esc(it.author || "") : `<span class="o-chip">${esc(it.origin || "manga")}</span>`}</span>
           <span class="hint">${it.state === "finished" ? "When did you read it?" : "When did you start it?"}</span></div></div>
-      <div class="rd-daterow"><label>Started</label><input type="date" id="rdws" value="${startVal}" max="${nowStamp().slice(0, 10)}">
-        ${it.state === "finished" ? `<label>Finished</label><input type="date" id="rdwf"
-          value="${s10(it.finished_at)}" max="${nowStamp().slice(0, 10)}">` : ""}</div>
+      <div class="rdw-dates">
+        <label>Started<input type="date" id="rdws" value="${startVal}" max="${nowStamp().slice(0, 10)}"></label>
+        ${it.state === "finished" ? `<label>Finished<input type="date" id="rdwf"
+          value="${s10(it.finished_at)}" max="${nowStamp().slice(0, 10)}"></label>` : ""}</div>
       <div class="rdw-nav">
         <button class="btn ghost" id="rdwskip">Skip</button>
         <span class="hint">${i + 1} of ${items.length}</span>

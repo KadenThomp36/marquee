@@ -732,11 +732,15 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rd-raterow{display:flex;align-items:center;gap:8px;margin-bottom:14px}
 .rd-sheet .act-row{margin:2px 0 14px}
 .rd-sheet .btn.danger.ghost{width:100%;justify-content:center}
-.rd-daterow{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}
-.rd-daterow label{color:var(--mut);font-size:11.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-.rd-daterow input{flex:1;min-width:118px;padding:9px 10px;border-radius:10px;border:1px solid var(--line-2);
-  background:var(--panel);color:var(--ink);font-size:14px;-webkit-appearance:none;appearance:none}
-.rd-daterow input:focus{outline:none;border-color:var(--amber-dim)}
+.rdw-dates{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+.rdw-dates label{display:flex;flex-direction:column;gap:6px;color:var(--mut);font-size:11.5px;
+  font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.rdw-dates input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:10px;
+  border:1px solid var(--line-2);background:var(--panel);color:var(--ink);font-size:14.5px;
+  font-weight:500;letter-spacing:normal;text-transform:none;color-scheme:dark;min-height:42px}
+.rdw-dates input:focus{outline:none;border-color:var(--amber-dim)}
+.rdw .rd-top{align-items:center;margin-bottom:16px}
+.rdw .rd-top img{width:72px}
 .rd-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 18px;
   padding:12px 14px;border:1px solid var(--amber-dim);border-radius:13px;background:var(--amber-soft)}
 .rd-banner>span{display:flex;align-items:center;gap:9px;color:var(--amber-2);font-size:13px;font-weight:650}
