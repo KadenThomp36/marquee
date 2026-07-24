@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724c";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724d";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1612,6 +1612,26 @@ function rdProgLabel(it, kind) {
     return `ch ${rdChOf(it)}/${it.chapters}`;
   return `${it.progress || 0}${total ? "/" + total : ""} ${kind === "book" ? "p" : "ch"}`;
 }
+/* "Reading now" card — same construction as the home page's Up Next bcards:
+   poster-filling art, scrim, info + progress bar overlaid inside the artwork */
+function rdBigCard(it, kind) {
+  const total = kind === "book" ? it.pages : it.chapters;
+  const pct = total && it.progress ? Math.min(100, Math.round(100 * it.progress / total)) : 0;
+  const plusable = kind === "manga" || (it.mode === "chapters" && it.chapters && it.pages);
+  return `<div class="bcard rdcard" data-id="${it.id}" data-kind="${kind}">
+    <img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
+    <div class="scrim"></div>
+    <button class="punch" data-a="${plusable ? "plus" : "finish"}"
+      title="${plusable ? "+1 chapter" : "Finished it"}">${plusable ? I.plus : I.check}</button>
+    <div class="info">
+      <div class="t">${esc(it.title)}</div>
+      <div class="ep">${kind === "book" ? esc(it.author || "") : esc(it.origin || "manga")} · ${rdProgLabel(it, kind)}</div>
+      ${total ? `<div class="pbar" title="${rdProgLabel(it, kind)}">
+        <div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div>
+        <div class="pbar-num">${pct}%</div></div>` : ""}
+    </div>
+  </div>`;
+}
 function rdCard(it, kind, section) {
   const total = kind === "book" ? it.pages : it.chapters;
   const pct = total && it.progress ? Math.min(100, Math.round(100 * it.progress / total)) : 0;
@@ -2182,8 +2202,11 @@ function renderReading(d, tab, animate = true) {
   const dd = d[tab];
   const rv = animate ? "reveal" : "";
   const section = (title, arr, sec) => arr.length
-    ? `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x =>
-        rdCard(x, kind, sec || (x.state === "want" ? "want" : x.state))).join("")}</div>` : "";
+    ? (sec === "reading"
+      ? `<div class="sub-h">${title} · ${arr.length}</div><div class="rd-biggrid ${rv}">${arr.map(x =>
+          rdBigCard(x, kind)).join("")}</div>`
+      : `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x =>
+          rdCard(x, kind, sec || (x.state === "want" ? "want" : x.state))).join("")}</div>`) : "";
   const allShelf = [...dd.reading, ...dd.want, ...dd.finished];
   const group = RD_VIEW.group || "status";
   const sectionsHtml = group === "status"
@@ -2332,7 +2355,7 @@ function renderReading(d, tab, animate = true) {
   $$(".rdcard", view).forEach(card => {
     const it = [...dd.reading, ...dd.want, ...dd.finished].find(x => x.id === +card.dataset.id);
     card.onclick = e => {
-      const b = e.target.closest(".act button");
+      const b = e.target.closest(".act button, .punch");
       e.preventDefault();
       if (!b) { location.hash = kind === "book" ? `#/book/${it.id}` : `#/manga/${it.id}`; return; }
       const a = b.dataset.a;
