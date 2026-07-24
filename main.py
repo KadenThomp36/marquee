@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724e"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724f"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2161,6 +2161,7 @@ def _state_row(r, kind):
     if kind == "book":
         out.update({"author": r["author"], "pages": r["pages"], "olid": r["olid"],
                     "chapters": r["chapters"] if "chapters" in r.keys() else None,
+                    "series": (r["series"] if "series" in r.keys() else None) or "",
                     "genres": (r["genres"] if "genres" in r.keys() else None) or ""})
     else:
         try:
@@ -2176,14 +2177,32 @@ def _state_row(r, kind):
 def reading(user=Depends(current_user)):
     uid = user["id"]
     with db() as con:
-        books = [_state_row(r, "book") for r in con.execute("""
+        rows = con.execute("""
             SELECT b.*, s.state, s.progress, s.rating, s.started_at, s.finished_at, s.mode
             FROM book_states s JOIN books b ON b.id=s.book_id WHERE s.user_id=?
-            ORDER BY s.updated_at DESC""", (uid,))]
+            ORDER BY s.updated_at DESC""", (uid,)).fetchall()
+        # instant title-suffix series backfill (no network) so grouping has some data;
+        # the full OL-resolved backfill runs once in the background below
+        need_bg = False
+        patched = []
+        for r in rows:
+            if not r["series"]:
+                m = re.search(r"\(([^,()#]+?),? *#?\d+\)\s*$", r["title"] or "")
+                if m:
+                    sn = m.group(1).strip()
+                    con.execute("UPDATE books SET series=? WHERE id=?", (sn, r["id"]))
+                    r = {**dict(r), "series": sn}
+                elif r["olid"]:
+                    need_bg = True
+            patched.append(r)
+        books = [_state_row(r, "book") for r in patched]
         manga = [_state_row(r, "manga") for r in con.execute("""
             SELECT m.*, s.state, s.progress, s.rating, s.started_at, s.finished_at, s.mode
             FROM manga_states s JOIN manga m ON m.id=s.manga_id WHERE s.user_id=?
             ORDER BY s.updated_at DESC""", (uid,))]
+    if need_bg and not _series_bg["running"]:
+        _series_bg["running"] = True
+        threading.Thread(target=_backfill_series, daemon=True).start()
     group = lambda rows: {"reading": [r for r in rows if r["state"] == "reading"],
                           "want": [r for r in rows if r["state"] == "want"],
                           "finished": [r for r in rows if r["state"] == "finished"]}
@@ -2639,6 +2658,41 @@ def _ol_toc(olid):
     return (best_eng or best)[:80]
 
 
+_series_bg = {"running": False}
+
+
+def _backfill_series():
+    """One-shot background sweep: resolve canonical series (OL work lookup) for every
+    book still missing one. Runs off the request path so the shelf loads instantly."""
+    try:
+        with db() as con:
+            todo = con.execute("SELECT id, olid, title FROM books WHERE series IS NULL AND olid IS NOT NULL").fetchall()
+        for r in todo:
+            sn = _series_name(openlibrary(f"/works/{r['olid']}.json") or {}, r["title"])
+            with db() as con:
+                con.execute("UPDATE books SET series=? WHERE id=?", (sn or "", r["id"]))
+            time.sleep(0.2)
+    finally:
+        _series_bg["running"] = False
+
+
+def _series_name(w, title):
+    """Canonical series name for a work: the OL work-level series record (shared
+    across all volumes, so 'Leviathan Wakes' and 'Abaddon's Gate' both resolve to
+    'The Expanse') → the '(Series, #N)' title suffix as a fallback."""
+    ser = w.get("series")
+    if isinstance(ser, list) and ser:
+        key = ((ser[0].get("series") or {}).get("key") if isinstance(ser[0], dict) else None)
+        if isinstance(ser[0], str):        # older OL shape: ["The Expanse"]
+            return re.sub(r"\s*(Bd\.?|#|,).*$", "", ser[0]).strip()
+        if key:
+            s = openlibrary(f"{key}.json")
+            if s and s.get("name"):
+                return s["name"].strip()
+    m = re.search(r"\(([^,()#]+?),? *#?\d+\)\s*$", title or "")
+    return m.group(1).strip() if m else None
+
+
 def _ol_desc(olid):
     w = openlibrary(f"/works/{olid}.json") or {}
     desc = w.get("description")
@@ -2686,17 +2740,26 @@ def book_detail(book_id: int, user=Depends(current_user)):
     except ValueError:
         det = {}
     dirty = False
+    w = None
     if "desc" not in det and b["olid"]:      # lazy description fetch, cached in the row
-        det["desc"], det["subjects"], _ = _ol_desc(b["olid"])
+        det["desc"], det["subjects"], w = _ol_desc(b["olid"])
         dirty = True
     if "toc" not in det and b["olid"]:       # chapter list from OL edition TOCs
         det["toc"] = _ol_toc(b["olid"])
         dirty = True
+    new_series = None
+    if not b["series"] and b["olid"]:        # canonical series name (once), for grouping
+        new_series = _series_name(w if w is not None else (openlibrary(f"/works/{b['olid']}.json") or {}),
+                                  b["title"])
+        if new_series:
+            dirty = True
     if dirty:
         with db() as con:
-            con.execute("UPDATE books SET details=?, chapters=COALESCE(?, chapters) WHERE id=?",
-                        (json.dumps(det), len(det.get("toc") or []) or None, book_id))
+            con.execute("""UPDATE books SET details=?, chapters=COALESCE(?, chapters),
+                series=COALESCE(?, series) WHERE id=?""",
+                (json.dumps(det), len(det.get("toc") or []) or None, new_series, book_id))
     item = {k: b[k] for k in b.keys() if k != "details"}
+    item["series"] = item.get("series") or new_series
     item["chapters"] = item.get("chapters") or (len(det.get("toc") or []) or None)
     item.update({"desc": det.get("desc") or "", "subjects": det.get("subjects") or [],
                  "toc": det.get("toc") or []})
@@ -4389,6 +4452,7 @@ def startup():
                      "ALTER TABLE users ADD COLUMN features TEXT",
                      "ALTER TABLE books ADD COLUMN genres TEXT",
                      "ALTER TABLE books ADD COLUMN chapters INTEGER",
+                     "ALTER TABLE books ADD COLUMN series TEXT",
                      "ALTER TABLE book_states ADD COLUMN mode TEXT",
                      "ALTER TABLE manga_states ADD COLUMN mode TEXT",
                      "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):

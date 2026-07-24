@@ -803,6 +803,14 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rd-biggrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(164px,1fr));gap:13px}
 @media(max-width:700px){.rd-biggrid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:11px}}
 .rd-biggrid .bcard .ep{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
+/* read / reading / not-read badge on every shelf tile */
+.rd-status{position:absolute;left:6px;bottom:6px;z-index:2;display:inline-flex;align-items:center;
+  gap:3px;padding:3px 8px;border-radius:99px;font-size:9.5px;font-weight:800;letter-spacing:.04em;
+  text-transform:uppercase;backdrop-filter:blur(4px);box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.rd-status svg{width:11px;height:11px}
+.rd-status.read{background:rgba(34,168,90,.92);color:#06140b}
+.rd-status.reading{background:rgba(240,181,68,.92);color:#241703}
+.rd-status.unread{background:rgba(20,17,13,.82);color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line-2)}
 /* full-screen book / manga detail page */
 .rdt-hero{position:relative;margin:-22px -18px 0;padding:30px 18px 20px;overflow:hidden;isolation:isolate}
 .rdt-bg{position:absolute;inset:-40px;width:calc(100% + 80px);height:calc(100% + 80px);

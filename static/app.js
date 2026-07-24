@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724e";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724f";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1644,9 +1644,13 @@ function rdCard(it, kind, section) {
     : section === "want" ? `<button title="Start ${kind === "book" ? "reading" : "it"}" data-a="start">${I.eye}</button>
         <button title="Remove" data-a="none">${I.x}</button>`
     : `<button title="Remove" data-a="none">${I.x}</button>`;
+  const status = it.state === "finished" ? ["read", "Read", I.check]
+    : it.state === "reading" ? ["reading", "Reading", null]
+    : ["unread", "Not read", null];
   return `<div class="pcard rdcard" data-id="${it.id}" data-kind="${kind}">
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
       ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
+      <span class="rd-status ${status[0]}">${status[2] || ""}${status[1]}</span>
       <div class="act">${acts}</div>
     </div>
     <a class="t" href="#/reading">${esc(it.title)}</a>
@@ -1685,7 +1689,7 @@ function renderRDetail(d) {
   const live = d.tracked && RD_ACTIVE.find(s => s.item_id === it.id && s.kind === kind);
   const pct = d.tracked && total ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : 0;
   const genres = (it.genres || "").split(",").filter(Boolean);
-  const series = kind === "book" ? seriesOf(it.title) : "";
+  const series = kind === "book" ? seriesOf(it) : "";
   const stars = r => Array.from({ length: 5 }, (_, k) => `<span data-v="${(k + 1) * 2}"
     class="${(r || 0) >= (k + 1) * 2 ? "b" : ""}">${I.star}</span>`).join("");
   // reading-log rows speak the item's progress mode (pages / % / chapters)
@@ -2088,13 +2092,17 @@ function rdDatesWizard(items, kind, refresh, allItems) {
 /* shelf view state: sort + filters (author / series / genre / origin), per session */
 let RD_VIEW = { sort: "recent", author: "", series: "", genre: "", origin: "" };
 let RD_SEARCH = {};   // {tab, q, results} — survives soft re-renders of the shelf
-const seriesOf = t => ((t || "").match(/\(([^,()#]+?),? *#?\d+\)\s*$/) || [])[1] || "";
+const titleSeries = t => ((t || "").match(/\(([^,()#]+?),? *#?\d+\)\s*$/) || [])[1] || "";
+// prefer the canonical series stored on the item (resolved from Open Library, shared
+// across all volumes) over the flaky "(Series, #N)" title suffix
+const seriesOf = it => (typeof it === "string" ? titleSeries(it)
+  : (it.series || titleSeries(it.title)));
 const stripArticle = t => (t || "").replace(/^(the|a|an)\s+/i, "");
 function rdApplyView(arr, kind) {
   const v = RD_VIEW;
   let out = arr.filter(it =>
     (!v.author || kind !== "book" || it.author === v.author) &&
-    (!v.series || kind !== "book" || seriesOf(it.title) === v.series) &&
+    (!v.series || kind !== "book" || seriesOf(it) === v.series) &&
     (!v.origin || kind !== "manga" || it.origin === v.origin) &&
     (!v.genre || (it.genres || "").split(",").includes(v.genre)));
   const by = {
@@ -2115,7 +2123,7 @@ function rdDims(all, kind) {
   const uniq = f => [...new Set(all.map(f).filter(Boolean))].sort();
   return {
     authors: kind === "book" ? uniq(x => x.author) : [],
-    series: kind === "book" ? uniq(x => seriesOf(x.title)) : [],
+    series: kind === "book" ? uniq(x => seriesOf(x)) : [],
     genres: [...new Set(uniq(x => x.genres).flatMap(g => g.split(",")).filter(Boolean))].sort(),
     origins: kind === "manga" ? uniq(x => x.origin) : [],
     years: uniq(x => x.year),
@@ -2216,7 +2224,7 @@ function renderReading(d, tab, animate = true) {
     : (() => {
       const keyFn = {
         author: x => x.author || "Unknown author",
-        series: x => seriesOf(x.title) || "No series",
+        series: x => seriesOf(x) || "No series",
         genre: x => (x.genres || "").split(",")[0] || "No genre",
         origin: x => x.origin || "other",
         year: x => x.year || 0,
