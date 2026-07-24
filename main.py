@@ -35,7 +35,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723b"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2266,9 +2266,16 @@ def _update_reading_state(kind, item_id, body, uid):
         state = body.get("state") or cur["state"]
         progress = body.get("progress", cur["progress"])
         rating = body.get("rating", cur["rating"])
-        started = cur["started_at"] or (now if state in ("reading", "finished") else None)
-        finished = now if (state == "finished" and cur["state"] != "finished") \
-            else (None if state != "finished" else cur["finished_at"])
+        # explicit dates (the sheet's date fields / the fill-in-dates wizard) win outright
+        if "started_at" in body:
+            started = body["started_at"] or None
+        else:
+            started = cur["started_at"] or (now if state in ("reading", "finished") else None)
+        if "finished_at" in body:
+            finished = body["finished_at"] or None
+        else:
+            finished = now if (state == "finished" and cur["state"] != "finished") \
+                else (None if state != "finished" else cur["finished_at"])
         con.execute(f"""UPDATE {tbl} SET state=?, progress=?, rating=?, started_at=?,
             finished_at=?, updated_at=? WHERE user_id=? AND {col}=?""",
             (state, progress, rating, started, finished, now, uid, item_id))
@@ -3015,6 +3022,27 @@ def import_status(user=Depends(current_user)):
     return IMPORT_STATUS.get(user["id"], {"state": "idle"})
 
 
+def _ol_match(title, author):
+    """Open Library lookup that survives Goodreads title decoration: curly quotes,
+    '(Series, #3)' suffixes, and colossal subtitles (Kindle rows export no ISBN,
+    so title search is all we get)."""
+    t = re.sub(r"\s*\([^)]*\)\s*$", "", title.replace("’", "'")).strip()
+    surname = author.split()[-1] if author else ""
+    attempts = [{"title": t, "author": surname} if surname else {"q": t}]
+    if ":" in t:
+        attempts.append({"title": t.split(":")[0].strip(), "author": surname}
+                        if surname else {"q": t.split(":")[0].strip()})
+    attempts.append({"q": f"{t} {author}".strip()})
+    for params in attempts:
+        d = openlibrary("/search.json", limit=1,
+                        fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median",
+                        **params)
+        docs = (d or {}).get("docs") or []
+        if docs:
+            return docs[0]
+    return None
+
+
 def _import_goodreads(uid, raw):
     """Goodreads library-export CSV → books + book_states. Matched against Open
     Library by ISBN13 first, then title+author search. Shelf map: read → finished,
@@ -3043,11 +3071,8 @@ def _import_goodreads(uid, raw):
                             "pages": ed.get("number_of_pages"),
                             "cover": f"https://covers.openlibrary.org/b/id/{cov}-L.jpg" if cov else None}
             if not item:
-                d = openlibrary("/search.json", q=f"{title} {author}", limit=1,
-                                fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median")
-                docs = (d or {}).get("docs") or []
-                if docs:
-                    doc = docs[0]
+                doc = _ol_match(title, author)
+                if doc:
                     item = {"olid": doc["key"].rsplit("/", 1)[-1], "title": title, "author": author,
                             "year": doc.get("first_publish_year"),
                             "pages": doc.get("number_of_pages_median"),
@@ -3072,7 +3097,7 @@ def _import_goodreads(uid, raw):
                       finished_at=COALESCE(excluded.finished_at, book_states.finished_at),
                       updated_at=excluded.updated_at""",
                     (uid, bid, state, item.get("pages") if state == "finished" else 0,
-                     gr_rating, date_read, date_read if state == "finished" else None, now))
+                     gr_rating, None, date_read if state == "finished" else None, now))
         st["state"] = "done"
     except Exception as e:  # noqa: BLE001
         st["state"] = "failed"

@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1644,6 +1644,10 @@ function rdSheet(it, kind, refresh) {
       <button class="iconbtn" id="rdplus">+</button>
       <span class="hint">${total ? "of " + total : ""} ${unit}</span></div>
     <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(it.rating)}</span></div>
+    <div class="rd-daterow"><label>Started</label><input type="date" id="rdstart"
+        value="${(it.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}">
+      <label>Finished</label><input type="date" id="rdfin"
+        value="${(it.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></div>
     <div class="act-row">${links}</div>
     <button class="btn danger ghost" id="rdremove">${I.x} Remove from my ${kind === "book" ? "books" : "shelf"}</button>
   </div>`);
@@ -1666,8 +1670,62 @@ function rdSheet(it, kind, refresh) {
     $$("#rdstars span", s.el).forEach(sp => sp.classList.toggle("b", (it.rating || 0) >= +sp.dataset.v));
     post({ rating: it.rating });
   };
+  $("#rdstart", s.el).onchange = () => { it.started_at = $("#rdstart", s.el).value || null;
+    post({ started_at: it.started_at }); };
+  $("#rdfin", s.el).onchange = () => { it.finished_at = $("#rdfin", s.el).value || null;
+    post({ finished_at: it.finished_at }); };
   $("#rdremove", s.el).onclick = async () => { await post({ state: "none" }); s.close(); refresh(); };
   s.el.addEventListener("click", e => { if (e.target === s.el) refresh(); });
+}
+
+/* fill-in-dates wizard: steps through titles missing read dates (imports carry a
+   Goodreads finish date at best — Goodreads never exports start dates) */
+function rdNeedsDates(it) {
+  const s10 = v => (v || "").slice(0, 10);
+  if (it.state === "reading") return !it.started_at;
+  if (it.state === "finished")
+    return !it.finished_at || !it.started_at || s10(it.started_at) === s10(it.finished_at);
+  return false;
+}
+function rdDatesWizard(items, kind, refresh) {
+  let i = 0, saved = 0;
+  const s = sheet(`<div class="rd-sheet rdw"><div id="rdwbody"></div></div>`);
+  const step = () => {
+    if (i >= items.length) {
+      toast(saved ? `Dates saved for ${saved} title${saved > 1 ? "s" : ""}` : "All done");
+      s.close(); if (saved) refresh(); return;
+    }
+    const it = items[i];
+    const s10 = v => (v || "").slice(0, 10);
+    const startVal = s10(it.started_at) === s10(it.finished_at) ? "" : s10(it.started_at);
+    $("#rdwbody", s.el).innerHTML = `
+      <div class="rd-top"><img src="${POSTER(it.cover)}" alt="">
+        <div class="rd-meta"><b>${esc(it.title)}</b>
+          <span>${kind === "book" ? esc(it.author || "") : `<span class="o-chip">${esc(it.origin || "manga")}</span>`}</span>
+          <span class="hint">${it.state === "finished" ? "When did you read it?" : "When did you start it?"}</span></div></div>
+      <div class="rd-daterow"><label>Started</label><input type="date" id="rdws" value="${startVal}" max="${nowStamp().slice(0, 10)}">
+        ${it.state === "finished" ? `<label>Finished</label><input type="date" id="rdwf"
+          value="${s10(it.finished_at)}" max="${nowStamp().slice(0, 10)}">` : ""}</div>
+      <div class="rdw-nav">
+        <button class="btn ghost" id="rdwskip">Skip</button>
+        <span class="hint">${i + 1} of ${items.length}</span>
+        <button class="btn pri" id="rdwsave">${I.check} Save${i + 1 < items.length ? " & next" : ""}</button>
+      </div>`;
+    $("#rdwskip", s.el).onclick = () => { i++; step(); };
+    $("#rdwsave", s.el).onclick = async () => {
+      const body = {};
+      const sv = $("#rdws", s.el).value, fv = $("#rdwf", s.el)?.value;
+      if (sv) body.started_at = sv;
+      if (fv) body.finished_at = fv;
+      if (Object.keys(body).length) {
+        await api(`/${kind}/${it.id}/state`, { body }).catch(() => {});
+        Object.assign(it, body); saved++;
+        delete CACHE["/reading"];
+      }
+      i++; step();
+    };
+  };
+  step();
 }
 
 function renderReading(d, tab, animate = true) {
@@ -1687,6 +1745,10 @@ function renderReading(d, tab, animate = true) {
         placeholder="${tab === "books" ? "Add a book — search Open Library" : "Add manga · manhwa · manhua — search AniList"}">
       <button class="btn" id="rdgo">${I.plus} Add</button></div>
     <div id="rdresults"></div>
+    ${(() => { const n = [...dd.reading, ...dd.finished].filter(rdNeedsDates).length;
+      return n ? `<div class="rd-banner"><span><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8 3v4M16 3v4M3.5 10.3h17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+        ${n} title${n > 1 ? "s are" : " is"} missing read dates — they power your stats</span>
+        <button class="btn pri" id="rddates">Fill in</button></div>` : ""; })()}
     ${section("Reading now", dd.reading, "reading")}
     ${section("Want to read", dd.want, "want")}
     ${section("Finished", dd.finished, "finished")}
@@ -1694,6 +1756,8 @@ function renderReading(d, tab, animate = true) {
       `<div class="empty">Nothing on the shelf yet — search above to add your first ${tab === "books" ? "book" : "series"}.</div>`}`;
 
   const refresh = () => { delete CACHE["/reading"]; routes.reading(tab); };
+  if ($("#rddates")) $("#rddates").onclick = () =>
+    rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, refresh);
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
   const doSearch = async () => {
     const q = $("#rdq").value.trim(); if (!q) return;
