@@ -770,6 +770,11 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
   animation:rdpulse 1.6s ease-in-out infinite}
 .unitpick{margin-bottom:12px}
 .unitpick button{min-width:72px}
+.rd-tools{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
+.rd-tools select{padding:8px 30px 8px 13px;border-radius:99px;border:1px solid var(--line-2);
+  background:var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m7 10 5 5 5-5' fill='none' stroke='%23b3a88f' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 9px center/15px;
+  color:var(--ink-2);font-size:12.5px;font-weight:650;-webkit-appearance:none;appearance:none;max-width:46vw}
+.rd-tools select:focus{outline:none;border-color:var(--amber-dim)}
 .tabs{display:flex;gap:7px;margin:0 0 16px}
 .tabs button{padding:8px 16px;border-radius:99px;border:1px solid var(--line);color:var(--ink-2);
   font-weight:650;font-size:13.5px;transition:all .13s}

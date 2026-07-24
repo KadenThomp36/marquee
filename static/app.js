@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723g";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723h";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1834,6 +1834,51 @@ function rdDatesWizard(items, kind, refresh, allItems) {
   step();
 }
 
+/* shelf view state: sort + filters (author / series / genre / origin), per session */
+let RD_VIEW = { sort: "recent", author: "", series: "", genre: "", origin: "" };
+const seriesOf = t => ((t || "").match(/\(([^,()#]+?),? *#?\d+\)\s*$/) || [])[1] || "";
+const stripArticle = t => (t || "").replace(/^(the|a|an)\s+/i, "");
+function rdApplyView(arr, kind) {
+  const v = RD_VIEW;
+  let out = arr.filter(it =>
+    (!v.author || kind !== "book" || it.author === v.author) &&
+    (!v.series || kind !== "book" || seriesOf(it.title) === v.series) &&
+    (!v.origin || kind !== "manga" || it.origin === v.origin) &&
+    (!v.genre || (it.genres || "").split(",").includes(v.genre)));
+  const by = {
+    title: (a, b) => stripArticle(a.title).localeCompare(stripArticle(b.title)),
+    author: (a, b) => (a.author || "~").localeCompare(b.author || "~") ||
+      stripArticle(a.title).localeCompare(stripArticle(b.title)),
+    year: (a, b) => (b.year || 0) - (a.year || 0),
+    len: (a, b) => ((b.pages ?? b.chapters) || 0) - ((a.pages ?? a.chapters) || 0),
+    rating: (a, b) => (b.rating || 0) - (a.rating || 0),
+    finished: (a, b) => (b.finished_at || "").localeCompare(a.finished_at || ""),
+  }[v.sort];
+  if (by) out = out.slice().sort(by);
+  return out;
+}
+function rdToolbar(all, kind) {
+  const uniq = f => [...new Set(all.map(f).filter(Boolean))].sort();
+  const authors = kind === "book" ? uniq(x => x.author) : [];
+  const series = kind === "book" ? uniq(x => seriesOf(x.title)) : [];
+  const genres = uniq(x => x.genres).flatMap(g => g.split(",")).filter(Boolean);
+  const genreList = [...new Set(genres)].sort();
+  const origins = kind === "manga" ? uniq(x => x.origin) : [];
+  const sel = (id, cur, empty, opts) => opts.length > 1
+    ? `<select id="${id}"><option value="">${empty}</option>${opts.map(o =>
+        `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>` : "";
+  return `<div class="rd-tools">
+    <select id="rdsort">${[["recent", "Recent"], ["title", "Title A–Z"],
+      ...(kind === "book" ? [["author", "Author"]] : []), ["year", "Year"],
+      ["len", kind === "book" ? "Pages" : "Chapters"], ["rating", "My rating"],
+      ["finished", "Date finished"]].map(([v, l]) =>
+      `<option value="${v}" ${RD_VIEW.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    ${sel("rdfauthor", RD_VIEW.author, "All authors", authors)}
+    ${sel("rdfseries", RD_VIEW.series, "All series", series)}
+    ${sel("rdforigin", RD_VIEW.origin, "All origins", origins)}
+    ${sel("rdfgenre", RD_VIEW.genre, "All genres", genreList)}
+  </div>`;
+}
 function readingTabs(tab, f) {
   const pills = [];
   if (f.books) pills.push(["books", "Books"]);
@@ -1862,16 +1907,25 @@ function renderReading(d, tab, animate = true) {
       return n ? `<div class="rd-banner"><span><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8 3v4M16 3v4M3.5 10.3h17" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
         ${n} title${n > 1 ? "s are" : " is"} missing read dates — they power your stats</span>
         <button class="btn pri" id="rddates">Fill in</button></div>` : ""; })()}
-    ${section("Reading now", dd.reading, "reading")}
-    ${section("Want to read", dd.want, "want")}
-    ${section("Finished", dd.finished, "finished")}
-    ${dd.reading.length + dd.want.length + dd.finished.length ? "" :
+    ${(dd.reading.length + dd.want.length + dd.finished.length) > 3 ? rdToolbar([...dd.reading, ...dd.want, ...dd.finished], kind) : ""}
+    ${section("Reading now", rdApplyView(dd.reading, kind), "reading")}
+    ${section("Want to read", rdApplyView(dd.want, kind), "want")}
+    ${section("Finished", rdApplyView(dd.finished, kind), "finished")}
+    ${dd.reading.length + dd.want.length + dd.finished.length ? (
+      rdApplyView(dd.reading, kind).length + rdApplyView(dd.want, kind).length
+        + rdApplyView(dd.finished, kind).length ? "" :
+      `<div class="empty">Nothing matches those filters.</div>`) :
       `<div class="empty">Nothing on the shelf yet — search above to add your first ${tab === "books" ? "book" : "series"}.</div>`}`;
 
   const refresh = () => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); };
   if ($("#rddates")) $("#rddates").onclick = () =>
     rdDatesWizard([...dd.reading, ...dd.finished].filter(rdNeedsDates), kind, refresh,
       [...dd.reading, ...dd.want, ...dd.finished]);
+  [["rdsort", "sort"], ["rdfauthor", "author"], ["rdfseries", "series"],
+   ["rdforigin", "origin"], ["rdfgenre", "genre"]].forEach(([id, key]) => {
+    const el = $("#" + id);
+    if (el) el.onchange = () => { RD_VIEW[key] = el.value; renderReading(d, tab, false); paintLive(refresh); };
+  });
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
   const doSearch = async () => {
     const q = $("#rdq").value.trim(); if (!q) return;

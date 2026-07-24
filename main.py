@@ -35,7 +35,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723g"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723h"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2150,10 +2150,15 @@ def _state_row(r, kind):
            "state": r["state"], "progress": r["progress"] or 0, "rating": r["rating"],
            "started_at": r["started_at"], "finished_at": r["finished_at"]}
     if kind == "book":
-        out.update({"author": r["author"], "pages": r["pages"], "olid": r["olid"]})
+        out.update({"author": r["author"], "pages": r["pages"], "olid": r["olid"],
+                    "genres": (r["genres"] if "genres" in r.keys() else None) or ""})
     else:
+        try:
+            g = json.loads(r["details"] or "{}").get("genres") or []
+        except (ValueError, TypeError):
+            g = []
         out.update({"chapters": r["chapters"], "volumes": r["volumes"],
-                    "status": r["status"], "origin": r["origin"]})
+                    "status": r["status"], "origin": r["origin"], "genres": ",".join(g[:4])})
     return out
 
 
@@ -2177,24 +2182,56 @@ def reading(user=Depends(current_user)):
 
 @app.get("/api/books/search")
 def books_search(q: str, user=Depends(current_user)):
-    d = openlibrary("/search.json", q=q, limit=20,
-                    fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median")
-    out = []
-    for doc in (d or {}).get("docs", []):
-        olid = (doc.get("key") or "").rsplit("/", 1)[-1]
-        if not olid:
-            continue
-        out.append({"olid": olid, "title": doc.get("title"),
-                    "author": ", ".join((doc.get("author_name") or [])[:2]),
-                    "year": doc.get("first_publish_year"),
-                    "pages": doc.get("number_of_pages_median"),
-                    "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
-                             if doc.get("cover_i") else None})
-    return {"results": out}
+    out, seen = [], set()
+    for v in _q_variants(q):
+        d = openlibrary("/search.json", q=v, limit=20,
+                        fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median")
+        for doc in (d or {}).get("docs", []):
+            olid = (doc.get("key") or "").rsplit("/", 1)[-1]
+            if not olid or olid in seen:
+                continue
+            seen.add(olid)
+            out.append({"olid": olid, "title": doc.get("title"),
+                        "author": ", ".join((doc.get("author_name") or [])[:2]),
+                        "year": doc.get("first_publish_year"),
+                        "pages": doc.get("number_of_pages_median"),
+                        "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
+                                 if doc.get("cover_i") else None})
+        if len(out) >= 5:
+            break
+    # decorate with genuine Apple art + genres (one cached Apple search per query)
+    apple = itunes_ebooks(_clean_title(q)) or itunes_ebooks(q)
+    for r in out[:20]:
+        hit = next((a for a in apple if _title_matches(_clean_title(r["title"] or ""),
+                                                       a.get("trackName") or "")), None)
+        if hit:
+            if hit.get("artworkUrl100"):
+                r["cover"] = hit["artworkUrl100"].replace("100x100bb", "600x600bb")
+            r["genres"] = ",".join(_apple_genres(hit))
+    return {"results": out[:20]}
 
 
 def _clean_title(t):
     return re.sub(r"\s*\([^)]*\)\s*$", "", (t or "").replace("’", "'")).split(":")[0].strip()
+
+
+def _q_variants(q):
+    """Progressively looser takes on a search query — punctuation stripped, then
+    word-dropped — so a slightly-off query still finds the thing."""
+    out = [q]
+    c = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", q)).strip()
+    if c and c.lower() != q.lower():
+        out.append(c)
+    w = (c or q).split()
+    if len(w) > 3:
+        out.append(" ".join(w[:3]))
+    if len(w) > 1:
+        out.append(" ".join(w[:-1]))
+    seen, uniq = set(), []
+    for v in out:
+        if v.lower() not in seen:
+            seen.add(v.lower()); uniq.append(v)
+    return uniq
 
 
 def _title_matches(a, b):
@@ -2206,26 +2243,40 @@ def _title_matches(a, b):
         or len(set(a.split()) & set(b.split())) >= min(len(a.split()), len(b.split()), 3)
 
 
-def itunes_cover(title, author):
-    """Apple Books artwork — publisher-supplied, so it's the genuine storefront
-    cover (Open Library's are user-uploaded scans of whatever edition someone had).
-    Guarded by a loose title match so a wrong search hit can't attach a wrong cover."""
-    t = _clean_title(title)
-    if not t:
-        return None
-
+def itunes_ebooks(term):
+    """One cached Apple Books search — list of {trackName, artistName, artworkUrl100,
+    genres} used for cover art (publisher-supplied = genuine) and genre tags."""
     def fetch():
         try:
             r = httpx.get("https://itunes.apple.com/search", timeout=15, headers=OL_UA,
-                          params={"term": f"{t} {author}".strip(), "entity": "ebook", "limit": 3})
+                          params={"term": term, "entity": "ebook", "limit": 20})
             r.raise_for_status()
-            for res in r.json().get("results") or []:
-                if _title_matches(t, res.get("trackName") or "") and res.get("artworkUrl100"):
-                    return res["artworkUrl100"].replace("100x100bb", "600x600bb")
-            return None
+            return r.json().get("results") or []
         except httpx.HTTPError:
             return None
-    return _cached_get(f"it:{t}:{author}", fetch)
+    return _cached_get(f"itl:{term}", fetch) or []
+
+
+def _apple_genres(res):
+    return [g for g in (res.get("genres") or []) if g not in ("Books", "Ebooks")][:3]
+
+
+def itunes_match(title, author):
+    """Best Apple Books hit for a title, guarded by a loose title match so a wrong
+    search result can't attach the wrong art/genres."""
+    t = _clean_title(title)
+    if not t:
+        return None
+    for res in itunes_ebooks(f"{t} {author}".strip())[:5]:
+        if _title_matches(t, res.get("trackName") or ""):
+            return res
+    return None
+
+
+def itunes_cover(title, author):
+    res = itunes_match(title, author)
+    art = res and res.get("artworkUrl100")
+    return art.replace("100x100bb", "600x600bb") if art else None
 
 
 def resolve_book_cover(olid, title="", author="", ol_cover=None):
@@ -2251,12 +2302,17 @@ def upsert_book(con, item):
     if item.get("olid"):
         item["cover"] = resolve_book_cover(item["olid"], item.get("title") or "",
                                            item.get("author") or "", item.get("cover"))
-    con.execute("""INSERT INTO books(olid,title,author,cover,year,pages,details)
-        VALUES(?,?,?,?,?,?,?) ON CONFLICT(olid) DO UPDATE SET title=excluded.title,
+        if not item.get("genres"):
+            m = itunes_match(item.get("title") or "", item.get("author") or "")
+            if m:
+                item["genres"] = ",".join(_apple_genres(m))
+    con.execute("""INSERT INTO books(olid,title,author,cover,year,pages,genres,details)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(olid) DO UPDATE SET title=excluded.title,
           author=excluded.author, cover=COALESCE(excluded.cover, books.cover),
-          year=COALESCE(excluded.year, books.year), pages=COALESCE(excluded.pages, books.pages)""",
+          year=COALESCE(excluded.year, books.year), pages=COALESCE(excluded.pages, books.pages),
+          genres=COALESCE(excluded.genres, books.genres)""",
         (item["olid"], item.get("title"), item.get("author"), item.get("cover"),
-         item.get("year"), item.get("pages"), None))
+         item.get("year"), item.get("pages"), item.get("genres") or None, None))
     return con.execute("SELECT id FROM books WHERE olid=?", (item["olid"],)).fetchone()["id"]
 
 
@@ -2281,13 +2337,16 @@ def refresh_covers(user=Depends(current_user)):
     """Re-resolve every book's cover through the Apple-first chain (upgrades the
     user-scan OL covers to genuine artwork). Paced to respect Apple's rate limit."""
     with db() as con:
-        rows = con.execute("SELECT id, olid, title, author, cover FROM books").fetchall()
+        rows = con.execute("SELECT id, olid, title, author, cover, genres FROM books").fetchall()
     updated = 0
     for r in rows:
         new = resolve_book_cover(r["olid"], r["title"] or "", r["author"] or "", r["cover"])
-        if new and new != r["cover"]:
+        m = itunes_match(r["title"] or "", r["author"] or "") if not r["genres"] else None
+        genres = ",".join(_apple_genres(m)) if m else None
+        if (new and new != r["cover"]) or genres:
             with db() as con:
-                con.execute("UPDATE books SET cover=? WHERE id=?", (new, r["id"]))
+                con.execute("UPDATE books SET cover=COALESCE(?,cover), genres=COALESCE(?,genres) WHERE id=?",
+                            (new, genres, r["id"]))
             updated += 1
         time.sleep(0.35)
     return {"updated": updated, "total": len(rows)}
@@ -2295,10 +2354,16 @@ def refresh_covers(user=Depends(current_user)):
 
 @app.get("/api/manga/search")
 def manga_search(q: str, user=Depends(current_user)):
-    d = anilist("query($q:String){Page(perPage:20){media(search:$q,type:MANGA,sort:SEARCH_MATCH){"
-                + AL_MEDIA_FIELDS + "}}}", {"q": q})
-    rows = [al_media_row(m) for m in ((d or {}).get("Page") or {}).get("media", [])]
-    return {"results": rows}
+    rows, seen = [], set()
+    for v in _q_variants(q)[:2]:      # AniList's SEARCH_MATCH is already forgiving
+        d = anilist("query($q:String){Page(perPage:20){media(search:$q,type:MANGA,sort:SEARCH_MATCH){"
+                    + AL_MEDIA_FIELDS + "}}}", {"q": v})
+        for m in ((d or {}).get("Page") or {}).get("media", []):
+            if m["id"] not in seen:
+                seen.add(m["id"]); rows.append(al_media_row(m))
+        if len(rows) >= 5:
+            break
+    return {"results": rows[:20]}
 
 
 @app.post("/api/manga/add")
@@ -2549,7 +2614,17 @@ def reading_stats(user=Depends(current_user)):
 
 @app.get("/api/search")
 def search(q: str, user=Depends(current_user)):
-    res = tmdb("/search/multi", query=q) or {}
+    # TMDB is strict about wording — retry progressively looser variants when thin
+    res, merged, seen = {}, [], set()
+    for v in _q_variants(q):
+        res = tmdb("/search/multi", query=v) or {}
+        for r in res.get("results") or []:
+            k = (r.get("media_type"), r.get("id"))
+            if k not in seen:
+                seen.add(k); merged.append(r)
+        if len(merged) >= 5:
+            break
+    res = {"results": merged}
     uid = user["id"]
     out = []
     with db() as con:
@@ -3963,6 +4038,7 @@ def startup():
                      "ALTER TABLE movies ADD COLUMN details TEXT",
                      "ALTER TABLE users ADD COLUMN banner TEXT",
                      "ALTER TABLE users ADD COLUMN features TEXT",
+                     "ALTER TABLE books ADD COLUMN genres TEXT",
                      "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
             try:
                 con.execute(stmt)
