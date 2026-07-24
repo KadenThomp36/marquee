@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724d";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260724e";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1625,7 +1625,7 @@ function rdBigCard(it, kind) {
       title="${plusable ? "+1 chapter" : "Finished it"}">${plusable ? I.plus : I.check}</button>
     <div class="info">
       <div class="t">${esc(it.title)}</div>
-      <div class="ep">${kind === "book" ? esc(it.author || "") : esc(it.origin || "manga")} · ${rdProgLabel(it, kind)}</div>
+      <div class="ep">${kind === "book" ? esc(it.author || "") : esc(it.origin || "manga")}${total ? "" : ` · ${rdProgLabel(it, kind)}`}</div>
       ${total ? `<div class="pbar" title="${rdProgLabel(it, kind)}">
         <div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div>
         <div class="pbar-num">${pct}%</div></div>` : ""}
