@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724f"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260724g"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2668,7 +2668,7 @@ def _backfill_series():
         with db() as con:
             todo = con.execute("SELECT id, olid, title FROM books WHERE series IS NULL AND olid IS NOT NULL").fetchall()
         for r in todo:
-            sn = _series_name(openlibrary(f"/works/{r['olid']}.json") or {}, r["title"])
+            sn = _series_name(openlibrary(f"/works/{r['olid']}.json") or {}, r["title"], r["olid"])
             with db() as con:
                 con.execute("UPDATE books SET series=? WHERE id=?", (sn or "", r["id"]))
             time.sleep(0.2)
@@ -2676,21 +2676,49 @@ def _backfill_series():
         _series_bg["running"] = False
 
 
-def _series_name(w, title):
-    """Canonical series name for a work: the OL work-level series record (shared
-    across all volumes, so 'Leviathan Wakes' and 'Abaddon's Gate' both resolve to
-    'The Expanse') → the '(Series, #N)' title suffix as a fallback."""
+def _norm_series(s):
+    """Strip volume/number decoration from a raw series string so all volumes of a
+    series collapse to one label: 'Earthsea Cycle (4)' / 'Earthsea Cycle -- 6' → 'Earthsea Cycle'."""
+    s = re.split(r"\s*(?:[-–—]{1,2}|,|;|:|#|\bBd\.?|\bBook\b|\bVol\.?|\bBand\b)\s*\d", s, maxsplit=1)[0]
+    s = re.sub(r"\s*\(\s*\d+\s*\)\s*$", "", s)          # trailing "(6)"
+    s = re.sub(r"\s*[·|/].*$", "", s)
+    return re.sub(r"\s+", " ", s).strip(" .-–—")
+
+
+def _editions_series(olid):
+    """Most consistent series name across a work's editions (they carry series far
+    more often than the work record). ASCII-only, seen on ≥2 editions, longest wins
+    among ties — filters out one-off foreign-language series names."""
+    eds = openlibrary(f"/works/{olid}/editions.json", limit=50)
+    counts = {}
+    for e in (eds or {}).get("entries", []):
+        for raw in (e.get("series") or []):
+            n = _norm_series(raw)
+            if n and len(n) > 2 and n.isascii() and not re.search(r"[=]", n):
+                counts[n] = counts.get(n, 0) + 1
+    good = {n: c for n, c in counts.items() if c >= 2}
+    if not good:
+        return None
+    return max(good, key=lambda n: (good[n], len(n)))
+
+
+def _series_name(w, title, olid=None):
+    """Canonical series name for a work: OL work-level series record (shared across
+    volumes) → '(Series, #N)' title suffix → most-common edition series name."""
     ser = w.get("series")
     if isinstance(ser, list) and ser:
-        key = ((ser[0].get("series") or {}).get("key") if isinstance(ser[0], dict) else None)
-        if isinstance(ser[0], str):        # older OL shape: ["The Expanse"]
-            return re.sub(r"\s*(Bd\.?|#|,).*$", "", ser[0]).strip()
+        first = ser[0]
+        if isinstance(first, str):         # older OL shape: ["The Expanse"]
+            return _norm_series(first)
+        key = (first.get("series") or {}).get("key") if isinstance(first, dict) else None
         if key:
             s = openlibrary(f"{key}.json")
             if s and s.get("name"):
                 return s["name"].strip()
     m = re.search(r"\(([^,()#]+?),? *#?\d+\)\s*$", title or "")
-    return m.group(1).strip() if m else None
+    if m:
+        return m.group(1).strip()
+    return _editions_series(olid or (w.get("key") or "").rsplit("/", 1)[-1])
 
 
 def _ol_desc(olid):
@@ -2750,7 +2778,7 @@ def book_detail(book_id: int, user=Depends(current_user)):
     new_series = None
     if not b["series"] and b["olid"]:        # canonical series name (once), for grouping
         new_series = _series_name(w if w is not None else (openlibrary(f"/works/{b['olid']}.json") or {}),
-                                  b["title"])
+                                  b["title"], b["olid"])
         if new_series:
             dirty = True
     if dirty:
