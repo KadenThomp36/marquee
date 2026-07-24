@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260723j"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723k"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -1243,7 +1243,9 @@ def push_notif(con, user_id, ntype, title, body, link, dedup=None, seed=False):
 def review_link(item_type, item_id):
     if item_type == "episode":
         return f"show/{item_id // 1000000}/e/{(item_id % 1000000) // 1000}/{item_id % 1000}"
-    return f"{'movie' if item_type == 'movie' else 'show'}/{item_id}"
+    if item_type in ("movie", "book", "manga"):
+        return f"{item_type}/{item_id}"
+    return f"show/{item_id}"
 
 
 def _actor_name(actor):
@@ -1275,6 +1277,9 @@ def notify_new_review(item_type, item_id, actor):
             sh, se, nu = item_id // 1000000, (item_id % 1000000) // 1000, item_id % 1000
             rows = con.execute("SELECT DISTINCT user_id FROM watches WHERE show_id=? AND season=? AND number=?",
                                (sh, se, nu)).fetchall()
+        elif item_type in ("book", "manga"):
+            rows = con.execute(f"SELECT DISTINCT user_id FROM {item_type}_states WHERE {item_type}_id=?",
+                               (item_id,)).fetchall()
         else:
             rows = con.execute("SELECT DISTINCT user_id FROM watches WHERE show_id=?", (item_id,)).fetchall()
         link, title = review_link(item_type, item_id), f"{_actor_name(actor)} reviewed something you watched"
@@ -2298,7 +2303,11 @@ def itunes_ebooks(term):
 
 
 def _apple_genres(res):
-    return [g for g in (res.get("genres") or []) if g not in ("Books", "Ebooks")][:3]
+    out = []
+    for g in res.get("genres") or []:
+        if g not in ("Books", "Ebooks") and g not in out:
+            out.append(g)
+    return out[:3]
 
 
 def itunes_match(title, author):
@@ -2365,10 +2374,11 @@ async def books_add(request: Request, user=Depends(current_user)):
     now = datetime.now().isoformat()
     with db() as con:
         bid = upsert_book(con, body)
+        prog = (body.get("pages") or 0) if state == "finished" else 0
         con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,updated_at,started_at)
-            VALUES(?,?,?,0,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
+            VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
               state=excluded.state, updated_at=excluded.updated_at""",
-            (user["id"], bid, state, now, now if state == "reading" else None))
+            (user["id"], bid, state, prog, now, now if state == "reading" else None))
     return {"ok": True, "id": bid}
 
 
@@ -2428,10 +2438,11 @@ async def manga_add(request: Request, user=Depends(current_user)):
             (row["id"], row["title"], row["cover"], row["chapters"], row["volumes"],
              row["status"], row["origin"], row["year"],
              json.dumps({"genres": row["genres"], "score": row["score"], "desc": row["desc"]})))
+        prog = (row["chapters"] or 0) if state == "finished" else 0
         con.execute("""INSERT INTO manga_states(user_id,manga_id,state,progress,updated_at,started_at)
-            VALUES(?,?,?,0,?,?) ON CONFLICT(user_id,manga_id) DO UPDATE SET
+            VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,manga_id) DO UPDATE SET
               state=excluded.state, updated_at=excluded.updated_at""",
-            (user["id"], mid, state, now, now if state == "reading" else None))
+            (user["id"], mid, state, prog, now, now if state == "reading" else None))
     return {"ok": True, "id": mid}
 
 
@@ -2480,6 +2491,152 @@ async def book_state(book_id: int, request: Request, user=Depends(current_user))
 async def manga_state(manga_id: int, request: Request, user=Depends(current_user)):
     _update_reading_state("manga", manga_id, await request.json(), user["id"])
     return {"ok": True}
+
+
+# --- full detail pages (shelf items AND search-result previews) -------------------
+
+def _sessions_for(uid, kind, item_id):
+    with db() as con:
+        rows = con.execute("""SELECT id, started_at, ended_at, start_pos, end_pos
+            FROM reading_sessions WHERE user_id=? AND kind=? AND item_id=?
+            AND ended_at IS NOT NULL ORDER BY started_at DESC LIMIT 30""",
+            (uid, kind, item_id)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            m = (datetime.fromisoformat(r["ended_at"])
+                 - datetime.fromisoformat(r["started_at"])).total_seconds() / 60
+        except (ValueError, TypeError):
+            m = 0
+        out.append({"id": r["id"], "date": r["started_at"], "minutes": round(m),
+                    "from": r["start_pos"] or 0, "to": r["end_pos"] or 0})
+    return out
+
+
+@app.post("/api/reading/session/{sid}")
+async def edit_session(sid: int, request: Request, user=Depends(current_user)):
+    """Edit or delete a past session/checkpoint from the reading log."""
+    body = await request.json()
+    with db() as con:
+        s = con.execute("SELECT * FROM reading_sessions WHERE id=? AND user_id=?",
+                        (sid, user["id"])).fetchone()
+        if not s:
+            raise HTTPException(404, "no such session")
+        if body.get("delete"):
+            con.execute("DELETE FROM reading_sessions WHERE id=?", (sid,))
+            return {"ok": True, "deleted": True}
+        started, ended = s["started_at"], s["ended_at"] or s["started_at"]
+        if body.get("date"):
+            nd = body["date"][:10]
+            started = nd + (started[10:] if len(started) > 10 else "T20:00:00")
+            ended = nd + (ended[10:] if len(ended) > 10 else "T20:00:00")
+        if "minutes" in body:
+            try:
+                ended = (datetime.fromisoformat(started)
+                         + timedelta(minutes=max(0, int(body["minutes"] or 0)))).isoformat()
+            except (ValueError, TypeError):
+                pass
+        con.execute("""UPDATE reading_sessions SET started_at=?, ended_at=?,
+            start_pos=?, end_pos=? WHERE id=?""",
+            (started, ended, int(body.get("from", s["start_pos"] or 0)),
+             int(body.get("to", s["end_pos"] or 0)), sid))
+    return {"ok": True}
+
+
+def _household_states(uid, kind, item_id):
+    tbl, col = (f"{kind}_states", f"{kind}_id")
+    with db() as con:
+        rows = con.execute(f"""SELECT u.username, u.display_name, u.avatar, s.state, s.rating
+            FROM {tbl} s JOIN users u ON u.id=s.user_id
+            WHERE s.{col}=? AND s.user_id<>?""", (item_id, uid)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _ol_desc(olid):
+    w = openlibrary(f"/works/{olid}.json") or {}
+    desc = w.get("description")
+    if isinstance(desc, dict):
+        desc = desc.get("value")
+    return (desc or "")[:1400], (w.get("subjects") or [])[:6], w
+
+
+@app.get("/api/book/ol/{olid}")
+def book_preview(olid: str, user=Depends(current_user)):
+    with db() as con:
+        row = con.execute("SELECT id FROM books WHERE olid=?", (olid,)).fetchone()
+    if row:
+        return book_detail(row["id"], user)
+    desc, subjects, w = _ol_desc(olid)
+    title = w.get("title") or ""
+    author = ""
+    try:
+        ak = ((w.get("authors") or [{}])[0].get("author") or {}).get("key")
+        if ak:
+            author = (openlibrary(f"{ak}.json") or {}).get("name") or ""
+    except (AttributeError, TypeError):
+        pass
+    cover = f"https://covers.openlibrary.org/b/id/{w['covers'][0]}-L.jpg" if w.get("covers") else None
+    m = itunes_match(title, author)
+    if m and m.get("artworkUrl100"):
+        cover = m["artworkUrl100"].replace("100x100bb", "600x600bb")
+    return {"tracked": False, "kind": "book", "state": None, "sessions": [], "household": [],
+            "item": {"olid": olid, "title": title, "author": author, "cover": cover,
+                     "genres": ",".join(_apple_genres(m)) if m else "",
+                     "desc": desc, "subjects": subjects, "year": None, "pages": None}}
+
+
+@app.get("/api/book/{book_id}")
+def book_detail(book_id: int, user=Depends(current_user)):
+    uid = user["id"]
+    with db() as con:
+        b = con.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+        if not b:
+            raise HTTPException(404, "unknown book")
+        st = con.execute("SELECT * FROM book_states WHERE user_id=? AND book_id=?",
+                         (uid, book_id)).fetchone()
+    try:
+        det = json.loads(b["details"] or "{}")
+    except ValueError:
+        det = {}
+    if "desc" not in det and b["olid"]:      # lazy description fetch, cached in the row
+        det["desc"], det["subjects"], _ = _ol_desc(b["olid"])
+        with db() as con:
+            con.execute("UPDATE books SET details=? WHERE id=?", (json.dumps(det), book_id))
+    item = {k: b[k] for k in b.keys() if k != "details"}
+    item.update({"desc": det.get("desc") or "", "subjects": det.get("subjects") or []})
+    return {"tracked": bool(st), "kind": "book", "item": item,
+            "state": dict(st) if st else None,
+            "sessions": _sessions_for(uid, "book", book_id) if st else [],
+            "household": _household_states(uid, "book", book_id)}
+
+
+@app.get("/api/manga/{manga_id}")
+def manga_detail(manga_id: int, user=Depends(current_user)):
+    uid = user["id"]
+    with db() as con:
+        m = con.execute("SELECT * FROM manga WHERE id=?", (manga_id,)).fetchone()
+        st = con.execute("SELECT * FROM manga_states WHERE user_id=? AND manga_id=?",
+                         (uid, manga_id)).fetchone() if m else None
+    if m:
+        try:
+            det = json.loads(m["details"] or "{}")
+        except ValueError:
+            det = {}
+        item = {k: m[k] for k in m.keys() if k != "details"}
+        item.update({"desc": det.get("desc") or "", "score": det.get("score"),
+                     "genres": ",".join(det.get("genres") or [])})
+    else:                                     # search-result preview, straight from AniList
+        d = anilist("query($id:Int){Media(id:$id,type:MANGA){" + AL_MEDIA_FIELDS + "}}",
+                    {"id": manga_id})
+        md = (d or {}).get("Media")
+        if not md:
+            raise HTTPException(404, "not found")
+        row = al_media_row(md)
+        item = {**row, "genres": ",".join(row["genres"])}
+    return {"tracked": bool(st), "kind": "manga", "item": item,
+            "state": dict(st) if st else None,
+            "sessions": _sessions_for(uid, "manga", manga_id) if st else [],
+            "household": _household_states(uid, "manga", manga_id)}
 
 
 # --- timed reading sessions: start now, end with where you got to -----------------
@@ -2563,27 +2720,69 @@ def reading_stats(user=Depends(current_user)):
 
     def crunch(kind, states_tbl, items_tbl, id_col, total_col):
         with db() as con:
-            ses = con.execute("""SELECT started_at, ended_at, start_pos, end_pos
+            ses = con.execute("""SELECT item_id, started_at, ended_at, start_pos, end_pos
                 FROM reading_sessions WHERE user_id=? AND kind=? AND ended_at IS NOT NULL
-                ORDER BY started_at""", (uid, kind)).fetchall()
+                ORDER BY item_id, started_at""", (uid, kind)).fetchall()
             st = con.execute(f"""SELECT s.*, i.title, i.{total_col} AS total
                 FROM {states_tbl} s JOIN {items_tbl} i ON i.id=s.{id_col}
                 WHERE s.user_id=?""", (uid,)).fetchall()
         daily, clock, wd = {}, [0.0] * 24, [0.0] * 7
         total_units = total_min = timed_units = 0
         timed = []
+
+        def spread(units, first_day, last_day):
+            """Distribute units evenly across [first_day, last_day] inclusive."""
+            n = max(1, (last_day - first_day).days + 1)
+            per = units / n
+            for i in range(n):
+                e = daily.setdefault((first_day + timedelta(days=i)).isoformat(),
+                                     {"units": 0.0, "min": 0.0})
+                e["units"] += per
+
+        start_by_item = {r[id_col]: (r["started_at"] or "")[:10] for r in st}
+        prev_by_item, sessioned = {}, set()
         for s in ses:
+            sessioned.add(s["item_id"])
             delta = max(0, (s["end_pos"] or 0) - (s["start_pos"] or 0))
             day = s["started_at"][:10]
+            try:
+                d_obj = date.fromisoformat(day)
+            except ValueError:
+                continue
             m = mins(s["started_at"], s["ended_at"])
-            d0 = daily.setdefault(day, {"units": 0, "min": 0.0})
-            d0["units"] += delta; d0["min"] += m
+            prev = prev_by_item.get(s["item_id"])
+            if prev is None:
+                sa = start_by_item.get(s["item_id"]) or ""
+                try:
+                    prev = date.fromisoformat(sa) if sa and sa < day else None
+                except ValueError:
+                    prev = None
+            prev_by_item[s["item_id"]] = d_obj
             total_units += delta; total_min += m
-            if m >= 3:
-                timed.append((m, delta))
-                timed_units += delta
+            daily.setdefault(day, {"units": 0.0, "min": 0.0})["min"] += m
+            if m >= 3:                                   # a real timed session → its day
+                daily[day]["units"] += delta
+                timed.append((m, delta)); timed_units += delta
                 dt0 = datetime.fromisoformat(s["started_at"])
                 clock[dt0.hour] += m; wd[dt0.weekday()] += m
+            elif delta and prev and (d_obj - prev).days > 1:
+                # ad-hoc catch-up after a gap: level the pages across the gap days
+                spread(delta, prev + timedelta(days=1), d_obj)
+            else:
+                daily[day]["units"] += delta
+        # finished items with dates but no session log at all (imports + wizard):
+        # level the whole book across started→finished so history feeds the charts
+        for r in st:
+            if r["state"] != "finished" or r[id_col] in sessioned or not r["total"]:
+                continue
+            sa, fa = (r["started_at"] or "")[:10], (r["finished_at"] or "")[:10]
+            if not sa or not fa or sa > fa or sa == fa:
+                continue
+            try:
+                spread(r["total"], date.fromisoformat(sa), date.fromisoformat(fa))
+                total_units += r["total"]
+            except ValueError:
+                pass
         days_sorted = sorted(daily)
         # streak: consecutive days (ending today or yesterday) with any activity
         streak_cur = streak_max = 0
@@ -2598,19 +2797,21 @@ def reading_stats(user=Depends(current_user)):
                 streak_cur += 1; i -= 1
         def units_since(days):
             lo = (t - timedelta(days=days)).isoformat()
-            return sum(v["units"] for d, v in daily.items() if d >= lo)
+            return round(sum(v["units"] for d, v in daily.items() if d >= lo))
         def min_since(days):
             lo = (t - timedelta(days=days)).isoformat()
             return sum(v["min"] for d, v in daily.items() if d >= lo)
         last30 = [( (t - timedelta(days=i)).isoformat(),
-                    daily.get((t - timedelta(days=i)).isoformat(), {}).get("units", 0))
+                    round(daily.get((t - timedelta(days=i)).isoformat(), {}).get("units", 0), 1))
                   for i in range(29, -1, -1)]
         monthly = {}
         for d0, v in daily.items():
             monthly[d0[:7]] = monthly.get(d0[:7], 0) + v["units"]
+        monthly = {k: round(v) for k, v in monthly.items()}
         yearly = {}
         for d0, v in daily.items():
             yearly[d0[:4]] = yearly.get(d0[:4], 0) + v["units"]
+        yearly = {k: round(v) for k, v in yearly.items()}
         fins = [r for r in st if r["state"] == "finished"]
         fin_year = sum(1 for r in fins if (r["finished_at"] or "").startswith(str(t.year)))
         fastest = longest = None
@@ -2629,7 +2830,7 @@ def reading_stats(user=Depends(current_user)):
                 rating_hist[r["rating"]] = rating_hist.get(r["rating"], 0) + 1
         return {
             "totals": {"week": units_since(7), "month": units_since(30), "year": units_since(365),
-                       "all": total_units, "hours_all": round(total_min / 60, 1),
+                       "all": round(total_units), "hours_all": round(total_min / 60, 1),
                        "hours_month": round(min_since(30) / 60, 1),
                        "sessions": len(ses), "timed_sessions": len(timed)},
             "pace": round(timed_units / (timed_min / 60), 1) if timed_min >= 15 else None,
@@ -2642,7 +2843,7 @@ def reading_stats(user=Depends(current_user)):
             "finished": {"all": len(fins), "year": fin_year},
             "reading_now": sum(1 for r in st if r["state"] == "reading"),
             "fastest": fastest, "longest": longest,
-            "big_day": {"date": big[0], "units": big[1]["units"]} if big and big[1]["units"] else None,
+            "big_day": {"date": big[0], "units": round(big[1]["units"])} if big and round(big[1]["units"]) else None,
             "rating_hist": rating_hist,
         }
 

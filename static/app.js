@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260723j";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723k";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -581,6 +581,8 @@ function parseHash() {
   if (p[0] === "show" && p[2] === "e") routes.episode(p[1], p[3], p[4]);
   else if (p[0] === "show") routes.show(p[1]);
   else if (p[0] === "movie") routes.movie(p[1]);
+  else if (p[0] === "book" && p[1] === "ol") routes.bookol(p[2]);
+  else if (p[0] === "book") routes.book(p[1]);
   else if (p[0] === "person") routes.person(p[1]);
   else if (p[0] === "list") routes.list(p[1]);
   else if (p[0] === "u" && p[2] === "recap") routes.recap(p[1], p[3]);
@@ -1622,100 +1624,221 @@ function rdCard(it, kind, section) {
   </div>`;
 }
 
-function rdSheet(it, kind, view) {   // view: {soft, hard, regroup} — soft = redraw from
-  const total = kind === "book" ? it.pages : it.chapters;   // local data, no refetch
+/* shelf-cache patcher: keep CACHE["/reading"] coherent after detail-page changes
+   without a refetch (the shelf redraws instantly from it on back-navigation) */
+function patchShelf(kind, id, fn) {
+  delete CACHE["/reading/stats"];
+  const c = CACHE["/reading"]; if (!c) return;
+  const dd = c[kind === "book" ? "books" : "manga"];
+  let it = null;
+  for (const k of ["reading", "want", "finished"]) {
+    const i = dd[k].findIndex(x => x.id === id);
+    if (i > -1) { it = dd[k].splice(i, 1)[0]; break; }
+  }
+  it = fn(it) || it;
+  if (it && ["reading", "want", "finished"].includes(it.state)) dd[it.state].unshift(it);
+}
+
+/* ---------- full-screen detail page for a book / manga (shelf item or search hit) --- */
+function renderRDetail(d) {
+  const { kind, item: it } = d;
+  const st = d.state || {};
+  const total = kind === "book" ? it.pages : it.chapters;
   const unit = kind === "book" ? "pages" : "chapters";
+  const rerun = () => (kind === "book"
+    ? (d.tracked || it.id ? routes.book(it.id) : routes.bookol(it.olid))
+    : routes.manga(it.id));
+  const live = d.tracked && RD_ACTIVE.find(s => s.item_id === it.id && s.kind === kind);
+  const pct = d.tracked && total ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : 0;
+  const genres = (it.genres || "").split(",").filter(Boolean);
+  const series = kind === "book" ? seriesOf(it.title) : "";
   const stars = r => Array.from({ length: 5 }, (_, k) => `<span data-v="${(k + 1) * 2}"
     class="${(r || 0) >= (k + 1) * 2 ? "b" : ""}">${I.star}</span>`).join("");
-  const links = kind === "book"
-    ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://openlibrary.org/works/${it.olid}">Open Library</a>
-       <a class="chip-btn" target="_blank" rel="noopener" href="https://www.goodreads.com/search?q=${encodeURIComponent(it.title + " " + (it.author || ""))}"><b>goodreads</b></a>`
-    : `<a class="chip-btn" target="_blank" rel="noopener" href="https://anilist.co/manga/${it.id}">AniList</a>`;
-  const s = sheet(`<div class="rd-sheet">
-    <div class="rd-top"><img src="${POSTER(it.cover)}" alt="">
-      <div class="rd-meta"><b>${esc(it.title)}</b>
-        <span>${kind === "book" ? esc(it.author || "") : `<span class="o-chip">${esc(it.origin || "manga")}</span> ${esc(it.status || "")}`}${it.year ? ` · ${it.year}` : ""}</span>
-        ${total ? `<span class="hint">${total} ${unit}</span>` : ""}</div></div>
-    <div class="rd-sesrow" id="rdses">${RD_ACTIVE.some(s => s.item_id === it.id && s.kind === kind)
-      ? `<span class="rd-livechip"><span class="rd-pulse"></span>reading for
-           <b class="rd-el" data-t="${(RD_ACTIVE.find(s => s.item_id === it.id && s.kind === kind) || {}).started_at}"></b></span>
-         <button class="btn pri" id="sesend">End session</button>`
-      : `<button class="btn" id="sesstart">${PLAY_ICO} Start a reading session</button>`}</div>
-    <div class="rd-states">${["want", "reading", "finished"].map(st =>
-      `<button class="rd-st ${it.state === st ? "on" : ""}" data-st="${st}">${st === "want" ? (kind === "book" ? "Want to read" : "Want to read") : st === "reading" ? "Reading" : "Finished"}</button>`).join("")}</div>
-    <div class="rd-progrow"><label>Progress</label>
-      <button class="iconbtn" id="rdminus">−</button>
-      <input id="rdprog" type="number" min="0" ${total ? `max="${total}"` : ""} value="${it.progress || 0}">
-      <button class="iconbtn" id="rdplus">+</button>
-      ${total ? `<button class="iconbtn" id="rdpct" title="Enter as percent">%</button>` : ""}
-      <span class="hint">${total ? "of " + total : ""} ${unit}</span></div>
-    <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(it.rating)}</span></div>
-    <div class="rdw-dates">
-      <label>Started<input type="date" id="rdstart"
-        value="${(it.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
-      <label>Finished<input type="date" id="rdfin"
-        value="${(it.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label></div>
-    <div class="act-row">${links}</div>
-    <button class="btn danger ghost" id="rdremove">${I.x} Remove from my ${kind === "book" ? "books" : "shelf"}</button>
-  </div>`);
-  let dirty = false;   // only redraw the shelf on close if something actually changed
-  const post = body => { dirty = true; delete CACHE["/reading/stats"];
+  view.innerHTML = `
+    <div class="rdt-hero">${it.cover ? `<img class="rdt-bg" src="${it.cover}" alt="">` : ""}
+      <div class="rdt-head">
+        <img class="rdt-cover" src="${POSTER(it.cover)}" alt="">
+        <div class="rdt-meta reveal">
+          <a class="crumb" href="#/reading">${I.chevS} ${kind === "book" ? "Books" : "Manga"}</a>
+          <h1>${esc(it.title)}</h1>
+          <div class="rdt-by">${kind === "book" ? esc(it.author || "")
+            : `<span class="o-chip">${esc(it.origin || "manga")}</span> ${esc(it.status || "")}`}${it.year ? ` · ${it.year}` : ""}</div>
+          <div class="rdt-chips">
+            ${total ? `<span class="chip">${total} ${unit}</span>` : ""}
+            ${it.volumes ? `<span class="chip">${it.volumes} vols</span>` : ""}
+            ${it.score ? `<span class="chip star">${I.star} ${it.score}</span>` : ""}
+            ${series ? `<span class="chip">${esc(series)}</span>` : ""}
+            ${genres.slice(0, 3).map(g => `<span class="chip">${esc(g)}</span>`).join("")}
+          </div>
+        </div>
+      </div></div>
+    <div class="rdt-body reveal">
+      ${d.tracked ? `
+      <div class="rd-states" id="rdtstates">${["want", "reading", "finished"].map(x =>
+        `<button class="rd-st ${st.state === x ? "on" : ""}" data-st="${x}">${x === "want" ? "Want to read" : x === "reading" ? "Reading" : "Finished"}</button>`).join("")}</div>
+      ${st.state !== "want" ? `
+      <div class="rdt-bar"><i style="width:${pct}%"></i></div>
+      <div class="rd-progrow"><label>Progress</label>
+        <button class="iconbtn" id="rdminus">−</button>
+        <input id="rdprog" type="number" min="0" ${total ? `max="${total}"` : ""} value="${st.progress || 0}">
+        <button class="iconbtn" id="rdplus">+</button>
+        ${total ? `<button class="iconbtn" id="rdpct" title="Enter as percent">%</button>` : ""}
+        <span class="hint">${total ? `of ${total}` : ""} ${unit}${total ? ` · ${pct}%` : ""}</span></div>
+      <div class="rd-sesrow">${live
+        ? `<span class="rd-livechip"><span class="rd-pulse"></span>reading for <b class="rd-el" data-t="${live.started_at}"></b></span>
+           <button class="btn pri" id="sesend">End session</button>`
+        : `<button class="btn" id="sesstart">${PLAY_ICO} Start a reading session</button>`}</div>` : ""}
+      <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(st.rating)}</span></div>
+      <div class="rdw-dates">
+        <label>Started<input type="date" id="rdstart" value="${(st.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
+        <label>Finished<input type="date" id="rdfin" value="${(st.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label></div>`
+      : `
+      <div class="act-main">
+        <button class="btn pri" data-add="reading">${PLAY_ICO} Start reading</button>
+        <button class="btn" data-add="want">${I.bookmark} Want to read</button>
+        <button class="btn" data-add="finished">${I.check} I\u2019ve read this</button>
+      </div>`}
+      ${it.desc ? `<div class="sub-h" style="margin-top:22px">About</div><p class="overview">${esc(it.desc)}</p>` : ""}
+      ${(it.subjects || []).length ? `<div class="rdt-chips" style="margin-top:10px">${it.subjects.map(x => `<span class="chip">${esc(x)}</span>`).join("")}</div>` : ""}
+      ${d.sessions.length ? `<div class="sub-h" style="margin-top:22px">Reading log <i class="rdt-edithint">tap a row to edit</i></div>
+      <div class="rdt-log">${d.sessions.map(s => `
+        <button class="rdt-lrow" data-sid="${s.id}"><b>${fmtDate(s.date)}</b>
+          <span>${s.minutes >= 3 ? `${s.minutes} min \u00b7 ` : ""}${s.from !== s.to
+            ? `${s.from} \u2192 ${s.to}<i> \u00b7 ${Math.max(0, s.to - s.from)} ${unit}</i>` : `at ${s.to}`}</span></button>`).join("")}</div>` : ""}
+      ${(d.household || []).length ? `<div class="sub-h" style="margin-top:22px">Around the house</div><div class="rdt-house">${d.household.map(h => `
+        <span class="rdt-hrow">${avatarHTML(h, "tiny")} <b>${esc(h.display_name || h.username)}</b>
+          <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${h.rating}` : ""}</i></span>`).join("")}</div>` : ""}
+      <div class="act-row" style="margin-top:18px">${kind === "book"
+        ? `${it.olid ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://openlibrary.org/works/${it.olid}">Open Library</a>` : ""}
+           <a class="chip-btn" target="_blank" rel="noopener" href="https://www.goodreads.com/search?q=${encodeURIComponent((it.title || "") + " " + (it.author || ""))}"><b>goodreads</b></a>`
+        : `<a class="chip-btn" target="_blank" rel="noopener" href="https://anilist.co/manga/${it.id}">AniList</a>`}
+        ${d.tracked ? `<button class="chip-btn danger" id="rdtremove">${I.x} Remove</button>` : ""}</div>
+      <div id="rd-reviews"></div>
+    </div>`;
+
+  const syncShelf = () => patchShelf(kind, it.id, sh => {
+    if (sh) Object.assign(sh, { state: st.state, progress: st.progress, rating: st.rating,
+      started_at: st.started_at, finished_at: st.finished_at });
+    return sh;
+  });
+  const post = body => { syncShelf();
     return api(`/${kind}/${it.id}/state`, { body }).catch(() => {}); };
-  $$(".rd-st", s.el).forEach(b => b.onclick = () => {
-    $$(".rd-st", s.el).forEach(x => x.classList.remove("on")); b.classList.add("on");
-    it.state = b.dataset.st;
-    // mirror the server's date stamping so the local redraw matches
-    if (it.state === "finished") {
-      if (total) { it.progress = total; $("#rdprog", s.el).value = total; }
-      if (!it.finished_at) { it.finished_at = nowStamp(); $("#rdfin", s.el).value = it.finished_at.slice(0, 10); }
-    } else it.finished_at = null;
-    if (it.state !== "want" && !it.started_at) {
-      it.started_at = nowStamp(); $("#rdstart", s.el).value = it.started_at.slice(0, 10);
-    }
-    post({ state: it.state, progress: it.progress });
+  if (d.tracked) {
+    $$("#rdtstates .rd-st").forEach(b => b.onclick = () => {
+      st.state = b.dataset.st;
+      if (st.state === "finished") { if (total) st.progress = total;
+        if (!st.finished_at) st.finished_at = nowStamp(); }
+      else st.finished_at = null;
+      if (st.state !== "want" && !st.started_at) st.started_at = nowStamp();
+      post({ state: st.state, progress: st.progress }); syncShelf();
+      d.state = st; renderRDetail(d);
+    });
+    const setProg = v => { st.progress = Math.max(0, total ? Math.min(total, v) : v);
+      post({ progress: st.progress }); d.state = st; renderRDetail(d); };
+    if ($("#rdminus")) $("#rdminus").onclick = () => setProg((st.progress || 0) - 1);
+    if ($("#rdplus")) $("#rdplus").onclick = () => setProg((st.progress || 0) + 1);
+    if ($("#rdprog")) $("#rdprog").onchange = () => setProg(+$("#rdprog").value || 0);
+    if ($("#rdpct")) $("#rdpct").onclick = () =>
+      posSheet({ title: `How far through ${it.title}?`, total, unit, cur: st.progress || 0,
+        onSave: setProg });
+    $("#rdstars").onclick = e => {
+      const t = e.target.closest("[data-v]"); if (!t) return;
+      st.rating = st.rating === +t.dataset.v ? null : +t.dataset.v;
+      $$("#rdstars span").forEach(sp => sp.classList.toggle("b", (st.rating || 0) >= +sp.dataset.v));
+      post({ rating: st.rating });
+    };
+    $("#rdstart").onchange = () => { st.started_at = $("#rdstart").value || null;
+      post({ started_at: st.started_at }); };
+    $("#rdfin").onchange = () => { st.finished_at = $("#rdfin").value || null;
+      post({ finished_at: st.finished_at }); };
+    if ($("#sesstart")) $("#sesstart").onclick = async () => {
+      await api(`/${kind}/${it.id}/session/start`, { body: {} }).catch(() => {});
+      toast("Session started \u2014 happy reading");
+      if (st.state !== "reading") { st.state = "reading"; if (!st.started_at) st.started_at = nowStamp(); syncShelf(); }
+      const a = await api("/reading/active").catch(() => null);
+      if (a) RD_ACTIVE = a.sessions || [];
+      renderRDetail(d);
+    };
+    if ($("#sesend")) $("#sesend").onclick = () =>
+      rdEndSession({ ...live, pages: kind === "book" ? total : null,
+        chapters: kind === "manga" ? total : null }, rerun);
+    $("#rdtremove").onclick = async () => {
+      await api(`/${kind}/${it.id}/state`, { body: { state: "none" } }).catch(() => {});
+      patchShelf(kind, it.id, () => null);
+      location.hash = "#/reading";
+    };
+  } else {
+    $$("[data-add]").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      const body = kind === "book"
+        ? { olid: it.olid, title: it.title, author: it.author, year: it.year,
+            pages: it.pages, cover: it.cover, genres: it.genres, state: b.dataset.add }
+        : { id: it.id, state: b.dataset.add };
+      const r = await api(kind === "book" ? "/books/add" : "/manga/add", { body }).catch(() => null);
+      if (!r) { b.disabled = false; return; }
+      toast(`${it.title} \u2014 on the shelf`);
+      delete CACHE["/reading"]; delete CACHE["/reading/stats"];
+      if (kind === "book") { it.id = r.id; routes.book(r.id); } else rerun();
+    });
+  }
+  $$(".rdt-lrow", view).forEach(row => row.onclick = () => {
+    const s = d.sessions.find(x => x.id === +row.dataset.sid);
+    if (s) rdSessionSheet(s, unit, rerun);
   });
-  const setProg = v => { it.progress = Math.max(0, total ? Math.min(total, v) : v);
-    $("#rdprog", s.el).value = it.progress; post({ progress: it.progress }); };
-  $("#rdminus", s.el).onclick = () => setProg((it.progress || 0) - 1);
-  $("#rdplus", s.el).onclick = () => setProg((it.progress || 0) + 1);
-  $("#rdprog", s.el).onchange = () => setProg(+$("#rdprog", s.el).value || 0);
-  if ($("#rdpct", s.el)) $("#rdpct", s.el).onclick = () =>
-    posSheet({ title: `How far through ${it.title}?`, total, unit, cur: it.progress || 0,
-      onSave: pos => setProg(pos) });
-  if ($("#sesstart", s.el)) $("#sesstart", s.el).onclick = async () => {
-    await api(`/${kind}/${it.id}/session/start`, { body: {} }).catch(() => {});
-    toast("Session started — happy reading"); s.close();
-    if (it.state !== "reading") { it.state = "reading"; if (!it.started_at) it.started_at = nowStamp(); }
-    view.regroup(it); delete CACHE["/reading/stats"];
-    const a = await api("/reading/active").catch(() => null);
-    if (a) RD_ACTIVE = a.sessions || [];
-    view.soft();
-  };
-  if ($("#sesend", s.el)) $("#sesend", s.el).onclick = () => {
-    const ses = RD_ACTIVE.find(x => x.item_id === it.id && x.kind === kind);
-    s.close();
-    if (ses) rdEndSession({ ...ses, pages: kind === "book" ? total : null,
-      chapters: kind === "manga" ? total : null }, view.hard);
-  };
+  if (it.id) reviewsBlock(kind, it.id).then(el => { const c = $("#rd-reviews"); if (c) c.appendChild(el); });
   rdTickTimers();
-  $("#rdstars", s.el).onclick = e => {
-    const t = e.target.closest("[data-v]"); if (!t) return;
-    it.rating = it.rating === +t.dataset.v ? null : +t.dataset.v;
-    $$("#rdstars span", s.el).forEach(sp => sp.classList.toggle("b", (it.rating || 0) >= +sp.dataset.v));
-    post({ rating: it.rating });
-  };
-  $("#rdstart", s.el).onchange = () => { it.started_at = $("#rdstart", s.el).value || null;
-    post({ started_at: it.started_at }); };
-  $("#rdfin", s.el).onchange = () => { it.finished_at = $("#rdfin", s.el).value || null;
-    post({ finished_at: it.finished_at }); };
-  $("#rdremove", s.el).onclick = async () => {
-    await post({ state: "none" }); s.close();
-    it.state = "none"; view.regroup(it); view.soft();
-  };
-  s.el.addEventListener("click", e => {
-    if (e.target === s.el && dirty) { view.regroup(it); view.soft(); }
-  });
 }
+
+/* edit/delete a past session or checkpoint from the reading log */
+function rdSessionSheet(sess, unit, rerun) {
+  const s = sheet(`<div class="rd-sheet"><div class="sh-t">Edit log entry</div>
+    <div class="rdw-dates">
+      <label>Date<input type="date" id="esd" value="${sess.date.slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
+      <label>Minutes<input type="number" id="esm" min="0" value="${sess.minutes || 0}"></label></div>
+    <div class="rdw-dates">
+      <label>From · ${unit}<input type="number" id="esf" min="0" value="${sess.from}"></label>
+      <label>To · ${unit}<input type="number" id="est" min="0" value="${sess.to}"></label></div>
+    <div class="rdw-nav">
+      <button class="btn danger ghost" id="esdel">${I.x} Delete</button>
+      <button class="btn pri" id="essave">${I.check} Save</button></div></div>`);
+  const done = () => { delete CACHE["/reading/stats"]; s.close(); rerun(); };
+  $("#essave", s.el).onclick = async () => {
+    await api(`/reading/session/${sess.id}`, { body: {
+      date: $("#esd", s.el).value, minutes: +$("#esm", s.el).value || 0,
+      from: +$("#esf", s.el).value || 0, to: +$("#est", s.el).value || 0 } }).catch(() => {});
+    toast("Log entry updated"); done();
+  };
+  $("#esdel", s.el).onclick = async () => {
+    await api(`/reading/session/${sess.id}`, { body: { delete: true } }).catch(() => {});
+    toast("Log entry removed"); done();
+  };
+}
+routes.book = async id => {
+  if (!id) return routes.reading("books");
+  const un = deferSkeleton(`<div class="sk" style="height:320px;border-radius:18px"></div>`);
+  try {
+    const [d, a] = await Promise.all([api(`/book/${id}`), api("/reading/active").catch(() => null)]);
+    if (a) RD_ACTIVE = a.sessions || [];
+    un(); if (seg()[0] === "book") renderRDetail(d);
+  } catch { un(); }
+};
+routes.bookol = async olid => {
+  if (!olid) return routes.reading("books");
+  const un = deferSkeleton(`<div class="sk" style="height:320px;border-radius:18px"></div>`);
+  try {
+    const d = await api(`/book/ol/${olid}`);
+    un(); if (seg()[0] === "book") renderRDetail(d);
+  } catch { un(); }
+};
+routes.manga = async id => {
+  if (!id) return routes.reading("manga");
+  const un = deferSkeleton(`<div class="sk" style="height:320px;border-radius:18px"></div>`);
+  try {
+    const [d, a] = await Promise.all([api(`/manga/${id}`), api("/reading/active").catch(() => null)]);
+    if (a) RD_ACTIVE = a.sessions || [];
+    un(); if (seg()[0] === "manga") renderRDetail(d);
+  } catch { un(); }
+};
 
 /* ---- reading sessions: start/end timed sessions, ad-hoc progress in pages or % ---- */
 let RD_ACTIVE = [];
@@ -1955,37 +2078,65 @@ function renderReading(d, tab, animate = true) {
   });
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
 
+  const addResult = async (x, state, btn) => {
+    if (btn) { btn.disabled = true; sparks(btn); }
+    const r = await api(tab === "books" ? "/books/add" : "/manga/add",
+      { body: { ...x, state } }).catch(() => null);
+    if (!r) { if (btn) btn.disabled = false; return; }
+    toast(`${x.title} — ${state === "reading" ? "started" : state === "finished" ? "marked finished" : "on the shelf"}`);
+    x._added = true;
+    delete CACHE["/reading/stats"];
+    dd[state].unshift({
+      id: r.id, title: x.title, cover: x.cover, year: x.year, state,
+      progress: state === "finished" ? (x.pages || x.chapters || 0) : 0, rating: null,
+      finished_at: null, started_at: state === "reading" ? nowStamp() : null,
+      ...(tab === "books"
+        ? { olid: x.olid, author: x.author, pages: x.pages, genres: x.genres || "" }
+        : { chapters: x.chapters, volumes: x.volumes, status: x.status, origin: x.origin,
+            genres: Array.isArray(x.genres) ? x.genres.join(",") : (x.genres || "") }),
+    });
+    soft();   // search box + results are restored by renderReading via RD_SEARCH
+  };
+  const resultMenu = x => {
+    const link = tab === "books"
+      ? `https://www.goodreads.com/search?q=${encodeURIComponent(x.title + " " + (x.author || ""))}`
+      : `https://anilist.co/manga/${x.id}`;
+    const s = sheet(`<div class="sh-t">${esc(x.title)}</div>
+      <button class="list-opt" data-a="detail"><span class="lo-ic">${BOOK_ICO}</span><span class="lo-name">View details</span></button>
+      <button class="list-opt" data-a="want"><span class="lo-ic">${I.bookmark}</span><span class="lo-name">Want to read</span></button>
+      <button class="list-opt" data-a="reading"><span class="lo-ic">${I.eye}</span><span class="lo-name">Start reading now</span></button>
+      <button class="list-opt" data-a="finished"><span class="lo-ic">${I.check}</span><span class="lo-name">I’ve read this — add as finished</span></button>
+      <a class="list-opt" href="${link}" target="_blank" rel="noopener"><span class="lo-ic">${I.globe}</span><span class="lo-name">Open on ${tab === "books" ? "Goodreads" : "AniList"}</span></a>`);
+    $$(".list-opt[data-a]", s.el).forEach(b => b.onclick = () => {
+      s.close();
+      if (b.dataset.a === "detail")
+        location.hash = tab === "books" ? `#/book/ol/${x.olid}` : `#/manga/${x.id}`;
+      else addResult(x, b.dataset.a);
+    });
+  };
+  const KEBAB = `<svg viewBox="0 0 24 24"><circle cx="12" cy="5.2" r="1.9" fill="currentColor"/><circle cx="12" cy="12" r="1.9" fill="currentColor"/><circle cx="12" cy="18.8" r="1.9" fill="currentColor"/></svg>`;
   const paintResults = results => {
     $("#rdresults").innerHTML = results.length ? `<div class="sub-h">Results</div>
       <div class="pgrid reveal">${results.map((x, i) => `
         <div class="pcard rdres" data-i="${i}">
           <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
             ${x._added ? `<span class="badge">${I.check}</span>` : x.score ? `<span class="badge">${x.score}</span>` : ""}
-            ${x._added ? "" : `<div class="act"><button title="Want to read" data-a="want">${I.bookmark}</button>
-              <button title="Start now" data-a="reading">${I.eye}</button></div>`}</div>
+            <div class="act">${x._added ? "" : `<button title="Want to read" data-a="want">${I.bookmark}</button>
+              <button title="Start now" data-a="reading">${I.eye}</button>`}
+              <button title="More" data-a="menu">${KEBAB}</button></div></div>
           <span class="t">${esc(x.title)}</span>
           <div class="y">${tab === "books" ? esc(x.author || "") : `<span class="o-chip">${esc(x.origin)}</span>`}${x.year ? ` · ${x.year}` : ""}</div>
         </div>`).join("")}</div>`
       : `<div class="empty">No matches for “${esc(RD_SEARCH.q)}”.</div>`;
-    $$(".rdres .act button", view).forEach(b => b.onclick = async () => {
-      const x = results[+b.closest(".rdres").dataset.i];
-      b.disabled = true; sparks(b);
-      const r = await api(tab === "books" ? "/books/add" : "/manga/add",
-        { body: { ...x, state: b.dataset.a } }).catch(() => null);
-      if (!r) { b.disabled = false; return; }
-      toast(`${x.title} — ${b.dataset.a === "want" ? "on the shelf" : "started"}`);
-      x._added = true;
-      delete CACHE["/reading/stats"];
-      dd[b.dataset.a].unshift({
-        id: r.id, title: x.title, cover: x.cover, year: x.year, state: b.dataset.a,
-        progress: 0, rating: null, finished_at: null,
-        started_at: b.dataset.a === "reading" ? nowStamp() : null,
-        ...(tab === "books"
-          ? { olid: x.olid, author: x.author, pages: x.pages, genres: x.genres || "" }
-          : { chapters: x.chapters, volumes: x.volumes, status: x.status, origin: x.origin,
-              genres: Array.isArray(x.genres) ? x.genres.join(",") : (x.genres || "") }),
-      });
-      soft();   // search box + results are restored by renderReading via RD_SEARCH
+    $$(".rdres", view).forEach(card => card.onclick = e => {
+      const x = results[+card.dataset.i];
+      const b = e.target.closest(".act button");
+      if (!b) {   // tap the card itself → full detail page
+        location.hash = tab === "books" ? `#/book/ol/${x.olid}` : `#/manga/${x.id}`;
+        return;
+      }
+      if (b.dataset.a === "menu") resultMenu(x);
+      else addResult(x, b.dataset.a, b);
     });
   };
   const doSearch = async () => {
@@ -2016,7 +2167,7 @@ function renderReading(d, tab, animate = true) {
     card.onclick = e => {
       const b = e.target.closest(".act button");
       e.preventDefault();
-      if (!b) { rdSheet(it, kind, vw); return; }
+      if (!b) { location.hash = kind === "book" ? `#/book/${it.id}` : `#/manga/${it.id}`; return; }
       const a = b.dataset.a;
       const total = kind === "book" ? it.pages : it.chapters;
       const body = a === "plus" ? { progress: Math.min(total || 1e9, (it.progress || 0) + 1) }
