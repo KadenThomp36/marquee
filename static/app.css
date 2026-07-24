@@ -701,6 +701,37 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
   border:1px solid var(--line-2);color:var(--ink-2);backdrop-filter:blur(4px);display:grid;place-items:center}
 .pcard .act button svg{width:14px;height:14px}
 .pcard .act button:hover{color:var(--amber);border-color:var(--amber-dim)}
+/* reading (books + manga) — opt-in tab */
+.rd-search{display:flex;gap:8px;margin:0 0 18px}
+.rd-search input{flex:1;min-width:0;padding:11px 16px;border-radius:13px;border:1px solid var(--line-2);
+  background:var(--panel);color:var(--ink);font-size:15px}
+.rd-search input:focus{outline:none;border-color:var(--amber-dim);box-shadow:0 0 0 3px var(--amber-soft)}
+.rd-search input::-webkit-search-cancel-button{-webkit-appearance:none}
+.o-chip{display:inline-block;background:var(--amber-soft);color:var(--amber-2);border-radius:99px;
+  padding:1px 7px;font-size:10px;font-weight:750;letter-spacing:.06em;text-transform:uppercase}
+.rd-prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(15,13,10,.65)}
+.rd-prog i{display:block;height:100%;background:var(--amber);border-radius:0 2px 2px 0;
+  transition:width .3s cubic-bezier(.2,.9,.3,1)}
+.rdcard{cursor:pointer}
+.rd-sheet .rd-top{display:flex;gap:14px;margin-bottom:14px}
+.rd-sheet .rd-top img{width:84px;aspect-ratio:2/3;object-fit:cover;border-radius:9px;background:var(--panel-2)}
+.rd-meta{display:flex;flex-direction:column;gap:3px;min-width:0}
+.rd-meta b{font-size:16px;line-height:1.25}
+.rd-meta>span{color:var(--ink-2);font-size:12.5px}
+.rd-states{display:flex;gap:7px;margin-bottom:14px}
+.rd-st{flex:1;padding:9px 4px;border-radius:99px;border:1px solid var(--line);color:var(--ink-2);
+  background:none;font-size:12.5px;font-weight:650}
+.rd-st.on{background:var(--amber);border-color:var(--amber);color:#221703}
+.rd-progrow{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.rd-progrow label,.rd-raterow label{color:var(--mut);font-size:11.5px;font-weight:700;
+  letter-spacing:.08em;text-transform:uppercase;min-width:72px}
+.rd-progrow input{width:76px;text-align:center;padding:9px 6px;border-radius:10px;
+  border:1px solid var(--line-2);background:var(--panel);color:var(--ink);font-size:15px}
+.rd-progrow input:focus{outline:none;border-color:var(--amber-dim)}
+.rd-progrow .iconbtn{width:34px;height:34px;font-size:18px;line-height:1}
+.rd-raterow{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.rd-sheet .act-row{margin:2px 0 14px}
+.rd-sheet .btn.danger.ghost{width:100%;justify-content:center}
 .tabs{display:flex;gap:7px;margin:0 0 16px}
 .tabs button{padding:8px 16px;border-radius:99px;border:1px solid var(--line);color:var(--ink-2);
   font-weight:650;font-size:13.5px;transition:all .13s}

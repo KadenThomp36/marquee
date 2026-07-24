@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260718a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260723a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1580,6 +1580,180 @@ routes.movies = (tab = "watched") => {
   if (c.stale) renderMovies(c.stale, tab);
   else view.innerHTML = `<h1>Movies</h1><div class="pgrid">${Array.from({ length: 12 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
   c.refresh(() => seg()[0] === "movies", d => renderMovies(d, tab, !c.stale));
+};
+
+/* ---------- reading (books + manga/manhwa/manhua) — per-user opt-in ---------- */
+const BOOK_ICO = `<svg viewBox="0 0 24 24"><path d="M4 5.5C6.7 4.6 9.6 4.9 12 6.6c2.4-1.7 5.3-2 8-1.1v12.9c-2.7-.9-5.6-.6-8 1.1-2.4-1.7-5.3-2-8-1.1z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="M12 6.6v12.9" stroke="currentColor" stroke-width="1.9"/></svg>`;
+// the Reading destination only exists in the DOM for users who switched a tracking
+// feature on — everyone else's nav is untouched
+function applyFeatureNav() {
+  $$('a[data-r="reading"]').forEach(a => a.remove());
+  const f = (ME && ME.features) || {};
+  if (!f.books && !f.manga) return;
+  const label = f.books && f.manga ? "Reading" : f.books ? "Books" : "Manga";
+  const link = `<a href="#/reading" data-r="reading">${BOOK_ICO}<span>${label}</span></a>`;
+  const moviesPill = $('#nav a[data-r="movies"]');
+  if (moviesPill) moviesPill.insertAdjacentHTML("afterend", link);
+  const tabAvatar = $("#tabavatar");
+  if (tabAvatar) tabAvatar.insertAdjacentHTML("beforebegin", link);
+}
+
+function rdCard(it, kind, section) {
+  const total = kind === "book" ? it.pages : it.chapters;
+  const unit = kind === "book" ? "p" : "ch";
+  const pct = total && it.progress ? Math.min(100, Math.round(100 * it.progress / total)) : 0;
+  const sub = kind === "book" ? esc(it.author || "") :
+    `<span class="o-chip">${esc(it.origin || "manga")}</span>${it.status ? " " + esc(it.status) : ""}`;
+  const acts =
+    section === "reading" ? (kind === "manga" ? `<button title="+1 chapter" data-a="plus">${I.plus}</button>` : "")
+      + `<button title="Finished it" data-a="finish">${I.check}</button>`
+    : section === "want" ? `<button title="Start ${kind === "book" ? "reading" : "it"}" data-a="start">${I.eye}</button>
+        <button title="Remove" data-a="none">${I.x}</button>`
+    : `<button title="Remove" data-a="none">${I.x}</button>`;
+  return `<div class="pcard rdcard" data-id="${it.id}" data-kind="${kind}">
+    <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
+      ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
+      <div class="act">${acts}</div>
+      ${section === "reading" ? `<div class="rd-prog" title="${it.progress || 0}${total ? " of " + total : ""} ${unit}"><i style="width:${pct}%"></i></div>` : ""}
+    </div>
+    <a class="t" href="#/reading">${esc(it.title)}</a>
+    <div class="y">${sub}${section === "reading" ? ` · ${it.progress || 0}${total ? "/" + total : ""} ${unit}` : ""}
+      ${section === "finished" && it.finished_at ? esc(fmtDate(it.finished_at.slice(0, 10))) : ""}</div>
+  </div>`;
+}
+
+function rdSheet(it, kind, refresh) {
+  const total = kind === "book" ? it.pages : it.chapters;
+  const unit = kind === "book" ? "pages" : "chapters";
+  const stars = r => Array.from({ length: 5 }, (_, k) => `<span data-v="${(k + 1) * 2}"
+    class="${(r || 0) >= (k + 1) * 2 ? "b" : ""}">${I.star}</span>`).join("");
+  const links = kind === "book"
+    ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://openlibrary.org/works/${it.olid}">Open Library</a>
+       <a class="chip-btn" target="_blank" rel="noopener" href="https://www.goodreads.com/search?q=${encodeURIComponent(it.title + " " + (it.author || ""))}"><b>goodreads</b></a>`
+    : `<a class="chip-btn" target="_blank" rel="noopener" href="https://anilist.co/manga/${it.id}">AniList</a>`;
+  const s = sheet(`<div class="rd-sheet">
+    <div class="rd-top"><img src="${POSTER(it.cover)}" alt="">
+      <div class="rd-meta"><b>${esc(it.title)}</b>
+        <span>${kind === "book" ? esc(it.author || "") : `<span class="o-chip">${esc(it.origin || "manga")}</span> ${esc(it.status || "")}`}${it.year ? ` · ${it.year}` : ""}</span>
+        ${total ? `<span class="hint">${total} ${unit}</span>` : ""}</div></div>
+    <div class="rd-states">${["want", "reading", "finished"].map(st =>
+      `<button class="rd-st ${it.state === st ? "on" : ""}" data-st="${st}">${st === "want" ? (kind === "book" ? "Want to read" : "Want to read") : st === "reading" ? "Reading" : "Finished"}</button>`).join("")}</div>
+    <div class="rd-progrow"><label>Progress</label>
+      <button class="iconbtn" id="rdminus">−</button>
+      <input id="rdprog" type="number" min="0" ${total ? `max="${total}"` : ""} value="${it.progress || 0}">
+      <button class="iconbtn" id="rdplus">+</button>
+      <span class="hint">${total ? "of " + total : ""} ${unit}</span></div>
+    <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(it.rating)}</span></div>
+    <div class="act-row">${links}</div>
+    <button class="btn danger ghost" id="rdremove">${I.x} Remove from my ${kind === "book" ? "books" : "shelf"}</button>
+  </div>`);
+  const post = body => api(`/${kind}/${it.id}/state`, { body })
+    .then(() => { delete CACHE["/reading"]; }).catch(() => {});
+  $$(".rd-st", s.el).forEach(b => b.onclick = () => {
+    $$(".rd-st", s.el).forEach(x => x.classList.remove("on")); b.classList.add("on");
+    it.state = b.dataset.st;
+    if (it.state === "finished" && total) { it.progress = total; $("#rdprog", s.el).value = total; }
+    post({ state: it.state, progress: it.progress });
+  });
+  const setProg = v => { it.progress = Math.max(0, total ? Math.min(total, v) : v);
+    $("#rdprog", s.el).value = it.progress; post({ progress: it.progress }); };
+  $("#rdminus", s.el).onclick = () => setProg((it.progress || 0) - 1);
+  $("#rdplus", s.el).onclick = () => setProg((it.progress || 0) + 1);
+  $("#rdprog", s.el).onchange = () => setProg(+$("#rdprog", s.el).value || 0);
+  $("#rdstars", s.el).onclick = e => {
+    const t = e.target.closest("[data-v]"); if (!t) return;
+    it.rating = it.rating === +t.dataset.v ? null : +t.dataset.v;
+    $$("#rdstars span", s.el).forEach(sp => sp.classList.toggle("b", (it.rating || 0) >= +sp.dataset.v));
+    post({ rating: it.rating });
+  };
+  $("#rdremove", s.el).onclick = async () => { await post({ state: "none" }); s.close(); refresh(); };
+  s.el.addEventListener("click", e => { if (e.target === s.el) refresh(); });
+}
+
+function renderReading(d, tab, animate = true) {
+  const f = (ME && ME.features) || {};
+  const both = f.books && f.manga;
+  if (!f[tab]) tab = f.books ? "books" : "manga";
+  const kind = tab === "books" ? "book" : "manga";
+  const dd = d[tab];
+  const rv = animate ? "reveal" : "";
+  const section = (title, arr, sec) => arr.length
+    ? `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x => rdCard(x, kind, sec)).join("")}</div>` : "";
+  view.innerHTML = `<h1>${both ? "Reading" : tab === "books" ? "Books" : "Manga"}</h1>
+    ${both ? `<div class="tabs">
+      <button data-t="books" class="${tab === "books" ? "on" : ""}">Books</button>
+      <button data-t="manga" class="${tab === "manga" ? "on" : ""}">Manga</button></div>` : ""}
+    <div class="rd-search"><input id="rdq" type="search" enterkeyhint="search"
+        placeholder="${tab === "books" ? "Add a book — search Open Library" : "Add manga · manhwa · manhua — search AniList"}">
+      <button class="btn" id="rdgo">${I.plus} Add</button></div>
+    <div id="rdresults"></div>
+    ${section("Reading now", dd.reading, "reading")}
+    ${section("Want to read", dd.want, "want")}
+    ${section("Finished", dd.finished, "finished")}
+    ${dd.reading.length + dd.want.length + dd.finished.length ? "" :
+      `<div class="empty">Nothing on the shelf yet — search above to add your first ${tab === "books" ? "book" : "series"}.</div>`}`;
+
+  const refresh = () => { delete CACHE["/reading"]; routes.reading(tab); };
+  $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
+  const doSearch = async () => {
+    const q = $("#rdq").value.trim(); if (!q) return;
+    $("#rdresults").innerHTML = `<div class="hint" style="margin:10px 0">Searching…</div>`;
+    const r = await api(`/${tab === "books" ? "books" : "manga"}/search?q=${encodeURIComponent(q)}`).catch(() => ({ results: [] }));
+    $("#rdresults").innerHTML = r.results.length ? `<div class="sub-h">Results</div>
+      <div class="pgrid reveal">${r.results.map((x, i) => `
+        <div class="pcard rdres" data-i="${i}">
+          <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
+            ${x.score ? `<span class="badge">${x.score}</span>` : ""}
+            <div class="act"><button title="Want to read" data-a="want">${I.bookmark}</button>
+              <button title="Start now" data-a="reading">${I.eye}</button></div></div>
+          <span class="t">${esc(x.title)}</span>
+          <div class="y">${tab === "books" ? esc(x.author || "") : `<span class="o-chip">${esc(x.origin)}</span>`}${x.year ? ` · ${x.year}` : ""}</div>
+        </div>`).join("")}</div>`
+      : `<div class="empty">No matches for “${esc(q)}”.</div>`;
+    $$(".rdres .act button", view).forEach(b => b.onclick = async () => {
+      const x = r.results[+b.closest(".rdres").dataset.i];
+      b.disabled = true; sparks(b);
+      await api(tab === "books" ? "/books/add" : "/manga/add",
+        { body: { ...x, state: b.dataset.a } }).catch(() => {});
+      toast(`${x.title} — ${b.dataset.a === "want" ? "on the shelf" : "started"}`);
+      refresh();
+    });
+  };
+  $("#rdgo").onclick = doSearch;
+  $("#rdq").onkeydown = e => { if (e.key === "Enter") doSearch(); };
+
+  $$(".rdcard", view).forEach(card => {
+    const it = [...dd.reading, ...dd.want, ...dd.finished].find(x => x.id === +card.dataset.id);
+    card.onclick = e => {
+      const b = e.target.closest(".act button");
+      e.preventDefault();
+      if (!b) { rdSheet(it, kind, refresh); return; }
+      const a = b.dataset.a;
+      const total = kind === "book" ? it.pages : it.chapters;
+      const body = a === "plus" ? { progress: Math.min(total || 1e9, (it.progress || 0) + 1) }
+        : a === "finish" ? { state: "finished", progress: total || it.progress }
+        : a === "start" ? { state: "reading" } : { state: "none" };
+      if (a === "plus" || a === "finish") sparks(b);
+      api(`/${kind}/${it.id}/state`, { body }).then(() => {
+        if (a === "plus") { it.progress = body.progress;
+          const y = card.querySelector(".y"), pr = card.querySelector(".rd-prog i");
+          if (y) y.innerHTML = y.innerHTML.replace(/\d+(?=\/|\s)/, it.progress);
+          if (pr && total) pr.style.width = Math.min(100, Math.round(100 * it.progress / total)) + "%";
+          if (total && it.progress >= total) { delete CACHE["/reading"]; routes.reading(tab); }
+          delete CACHE["/reading"];
+        } else { refresh(); }
+      }).catch(() => refresh());
+    };
+  });
+}
+routes.reading = (tab) => {
+  const f = (ME && ME.features) || {};
+  if (!f.books && !f.manga) { location.hash = "#/"; return; }
+  tab = tab || (f.books ? "books" : "manga");
+  const c = cached("/reading");
+  if (c.stale) renderReading(c.stale, tab);
+  else view.innerHTML = `<h1>Reading</h1><div class="pgrid">${Array.from({ length: 6 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
+  c.refresh(() => seg()[0] === "reading", d => renderReading(d, tab, !c.stale));
 };
 
 /* ---------- lists ---------- */
@@ -3367,10 +3541,26 @@ routes.settings = async () => {
     <h1>Settings</h1><div class="reveal">
     ${plexPanel}
     ${notifPanel}
+    <div class="panel"><h3><span class="h3-ic">${BOOK_ICO}</span> Tracking extras</h3>
+      <p class="hint">Off by default. Switching one on adds a tab to your own menu — nobody else’s changes.</p>
+      <label class="toggle-row"><span>Books
+          <span class="hint">Reads, to-reads, page progress and ratings — search by Open Library, import your Goodreads library below.</span></span>
+        <button class="switch-btn ${ME.features?.books ? "on" : ""}" data-feat="books" role="switch"
+          aria-checked="${!!ME.features?.books}"><span></span></button></label>
+      <label class="toggle-row"><span>Manga · manhwa · manhua
+          <span class="hint">Chapter-by-chapter progress via AniList — covers Japanese, Korean and Chinese series.</span></span>
+        <button class="switch-btn ${ME.features?.manga ? "on" : ""}" data-feat="manga" role="switch"
+          aria-checked="${!!ME.features?.manga}"><span></span></button></label>
+    </div>
     <div class="panel"><h3>Import</h3>
       <label>TV Time export (.zip)<span class="hint">Shows, movies, watch dates and ratings.</span></label>
       <input type="file" id="tvt" accept=".zip">
       <div class="hint" id="imps"></div>
+      <div id="grblock" ${ME.features?.books ? "" : "hidden"}>
+        <label style="margin-top:14px">Goodreads library (.csv)<span class="hint">From goodreads.com → My Books → Import/Export. Goodreads closed its API in 2020, so the CSV export is the official way out — shelves, ratings and read-dates come across.</span></label>
+        <input type="file" id="grcsv" accept=".csv,text/csv">
+        <div class="hint" id="grs"></div>
+      </div>
     </div>${usersHtml}</div>
     <div class="build-tag">Marquee · build ${BUILD}</div>`;
 
@@ -3405,6 +3595,29 @@ routes.settings = async () => {
       $("#imps").textContent = `${s.state} — ${s.done || 0}/${s.total || "?"}` +
         (s.errors?.length ? ` · ${s.errors.length} skipped` : "");
       if (s.state !== "running") { clearInterval(poll); Object.keys(CACHE).forEach(k => delete CACHE[k]); toast("Import " + s.state); }
+    }, 2500);
+  };
+  $$(".switch-btn[data-feat]", view).forEach(btn => btn.onclick = async () => {
+    const on = !btn.classList.contains("on");
+    btn.classList.toggle("on", on); btn.setAttribute("aria-checked", on);
+    const r = await api("/profile/features", { body: { [btn.dataset.feat]: on ? 1 : 0 } }).catch(() => null);
+    if (!r) { btn.classList.toggle("on", !on); return; }
+    ME.features = r.features;
+    applyFeatureNav();
+    if ($("#grblock")) $("#grblock").hidden = !ME.features.books;
+    delete CACHE["/reading"];
+    toast(on ? `${btn.dataset.feat === "books" ? "Books" : "Manga"} tracking is on — check your menu` : "Turned off");
+  });
+  if ($("#grcsv")) $("#grcsv").onchange = async () => {
+    const f = $("#grcsv").files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    await api("/import/goodreads", { method: "POST", body: fd });
+    $("#grs").textContent = "Matching your library against Open Library…";
+    const poll = setInterval(async () => {
+      const s = await api("/import/status");
+      $("#grs").textContent = `${s.state} — ${s.done || 0}/${s.total || "?"}` +
+        (s.errors?.length ? ` · ${s.errors.length} unmatched` : "");
+      if (s.state !== "running") { clearInterval(poll); delete CACHE["/reading"]; toast("Goodreads import " + s.state); }
     }, 2500);
   };
   if ($("#mkuser")) $("#mkuser").onclick = async () => {
@@ -3466,6 +3679,7 @@ async function boot() {
   try { ME = await api("/me"); } catch { return; }
   topbar.hidden = false; tabbar.hidden = false;
   paintAvatars();
+  applyFeatureNav();
   parseHash();
   refreshBell();
   setInterval(refreshBell, 60000);

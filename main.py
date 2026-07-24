@@ -2,6 +2,8 @@
 """Marquee — self-hosted episode tracker (TV Time style) for the Thompson homelab."""
 import base64
 import hashlib
+import csv
+import io
 import json
 import logging
 import os
@@ -33,7 +35,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260718a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260723a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -107,6 +109,20 @@ CREATE INDEX IF NOT EXISTS idx_watches_user ON watches(user_id, watched_at);
 CREATE INDEX IF NOT EXISTS idx_eps_show ON episodes(show_id, air_date);
 CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_type, item_id);
 CREATE INDEX IF NOT EXISTS idx_listitems ON list_items(list_id);
+CREATE TABLE IF NOT EXISTS books(
+  id INTEGER PRIMARY KEY, olid TEXT UNIQUE, title TEXT, author TEXT, cover TEXT,
+  year INTEGER, pages INTEGER, details TEXT);
+CREATE TABLE IF NOT EXISTS book_states(
+  user_id INTEGER, book_id INTEGER, state TEXT, progress INTEGER DEFAULT 0,
+  rating INTEGER, started_at TEXT, finished_at TEXT, updated_at TEXT,
+  PRIMARY KEY(user_id, book_id));
+CREATE TABLE IF NOT EXISTS manga(
+  id INTEGER PRIMARY KEY, title TEXT, cover TEXT, chapters INTEGER, volumes INTEGER,
+  status TEXT, origin TEXT, year INTEGER, details TEXT);
+CREATE TABLE IF NOT EXISTS manga_states(
+  user_id INTEGER, manga_id INTEGER, state TEXT, progress INTEGER DEFAULT 0,
+  rating INTEGER, started_at TEXT, finished_at TEXT, updated_at TEXT,
+  PRIMARY KEY(user_id, manga_id));
 """
 
 
@@ -180,6 +196,78 @@ def tmdb(path, **params):
 
 def img(path, size="w342"):
     return f"{IMG}/{size}{path}" if path else None
+
+
+# ------------------------------------------------- open library + anilist (reading)
+
+OL_UA = {"User-Agent": "Marquee/1.0 (self-hosted household media tracker)"}
+_read_cache = {}   # url/key -> (fetched_ts, data); tiny in-memory 6h cache
+READ_CACHE_TTL = 6 * 3600
+
+
+def _cached_get(key, fetch):
+    hit = _read_cache.get(key)
+    if hit and time.time() - hit[0] < READ_CACHE_TTL:
+        return hit[1]
+    data = fetch()
+    if data is not None:
+        _read_cache[key] = (time.time(), data)
+    return data
+
+
+def openlibrary(path, **params):
+    def fetch():
+        for attempt in range(3):
+            try:
+                r = httpx.get(f"https://openlibrary.org{path}", params=params,
+                              timeout=20, headers=OL_UA, follow_redirects=True)
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPError:
+                if attempt == 2:
+                    return None
+                time.sleep(1 + attempt)
+    return _cached_get(f"ol:{path}:{sorted(params.items())}", fetch)
+
+
+def anilist(query, variables):
+    def fetch():
+        for attempt in range(3):
+            try:
+                r = httpx.post("https://graphql.anilist.co", timeout=20,
+                               json={"query": query, "variables": variables})
+                if r.status_code == 429:
+                    time.sleep(3 + attempt * 3)
+                    continue
+                r.raise_for_status()
+                return r.json().get("data")
+            except httpx.HTTPError:
+                if attempt == 2:
+                    return None
+                time.sleep(1 + attempt)
+    return _cached_get(f"al:{query[:40]}:{sorted(variables.items())}", fetch)
+
+
+ORIGIN_LABEL = {"JP": "manga", "KR": "manhwa", "CN": "manhua", "TW": "manhua"}
+
+AL_MEDIA_FIELDS = """id title { romaji english } coverImage { large } countryOfOrigin
+  chapters volumes status averageScore startDate { year } genres
+  description(asHtml: false)"""
+
+
+def al_media_row(m):
+    return {"id": m["id"],
+            "title": (m["title"].get("english") or m["title"].get("romaji") or "").strip(),
+            "cover": (m.get("coverImage") or {}).get("large"),
+            "chapters": m.get("chapters"), "volumes": m.get("volumes"),
+            "status": (m.get("status") or "").title().replace("_", " "),
+            "origin": ORIGIN_LABEL.get(m.get("countryOfOrigin"), "manga"),
+            "year": (m.get("startDate") or {}).get("year"),
+            "score": round((m.get("averageScore") or 0) / 10, 1) or None,
+            "genres": m.get("genres") or [],
+            "desc": re.sub(r"<[^>]+>", "", m.get("description") or "")[:600]}
 
 
 def upsert_show(con, tmdb_id, fetch_episodes=True):
@@ -376,10 +464,15 @@ async def register(request: Request, response: Response):
 
 
 def user_public(u):
+    try:
+        feats = json.loads(u["features"]) if "features" in u.keys() and u["features"] else {}
+    except (ValueError, TypeError):
+        feats = {}
     return {"id": u["id"], "username": u["username"],
             "display_name": (u["display_name"] if "display_name" in u.keys() else None) or u["username"],
             "avatar": (u["avatar"] if "avatar" in u.keys() else None),
-            "banner": (u["banner"] if "banner" in u.keys() else None)}
+            "banner": (u["banner"] if "banner" in u.keys() else None),
+            "features": feats}
 
 
 @app.get("/api/me")
@@ -2027,6 +2120,172 @@ async def movie_state(movie_id: int, request: Request, user=Depends(current_user
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- reading (books + manga)
+# Opt-in per user via users.features JSON ({"books":1,"manga":1}); UI hides everything
+# unless enabled. Books: Open Library metadata (Goodreads' API was shut down in 2020 —
+# Goodreads integration = CSV library import + link-outs). Manga/manhwa/manhua: AniList.
+
+@app.post("/api/profile/features")
+async def set_features(request: Request, user=Depends(current_user)):
+    body = await request.json()
+    with db() as con:
+        u = con.execute("SELECT features FROM users WHERE id=?", (user["id"],)).fetchone()
+        try:
+            feats = json.loads(u["features"]) if u and u["features"] else {}
+        except ValueError:
+            feats = {}
+        for k in ("books", "manga"):
+            if k in body:
+                feats[k] = 1 if body[k] else 0
+        con.execute("UPDATE users SET features=? WHERE id=?", (json.dumps(feats), user["id"]))
+    return {"ok": True, "features": feats}
+
+
+def _state_row(r, kind):
+    out = {"id": r["id"], "title": r["title"], "cover": r["cover"], "year": r["year"],
+           "state": r["state"], "progress": r["progress"] or 0, "rating": r["rating"],
+           "started_at": r["started_at"], "finished_at": r["finished_at"]}
+    if kind == "book":
+        out.update({"author": r["author"], "pages": r["pages"], "olid": r["olid"]})
+    else:
+        out.update({"chapters": r["chapters"], "volumes": r["volumes"],
+                    "status": r["status"], "origin": r["origin"]})
+    return out
+
+
+@app.get("/api/reading")
+def reading(user=Depends(current_user)):
+    uid = user["id"]
+    with db() as con:
+        books = [_state_row(r, "book") for r in con.execute("""
+            SELECT b.*, s.state, s.progress, s.rating, s.started_at, s.finished_at
+            FROM book_states s JOIN books b ON b.id=s.book_id WHERE s.user_id=?
+            ORDER BY s.updated_at DESC""", (uid,))]
+        manga = [_state_row(r, "manga") for r in con.execute("""
+            SELECT m.*, s.state, s.progress, s.rating, s.started_at, s.finished_at
+            FROM manga_states s JOIN manga m ON m.id=s.manga_id WHERE s.user_id=?
+            ORDER BY s.updated_at DESC""", (uid,))]
+    group = lambda rows: {"reading": [r for r in rows if r["state"] == "reading"],
+                          "want": [r for r in rows if r["state"] == "want"],
+                          "finished": [r for r in rows if r["state"] == "finished"]}
+    return {"books": group(books), "manga": group(manga)}
+
+
+@app.get("/api/books/search")
+def books_search(q: str, user=Depends(current_user)):
+    d = openlibrary("/search.json", q=q, limit=20,
+                    fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median")
+    out = []
+    for doc in (d or {}).get("docs", []):
+        olid = (doc.get("key") or "").rsplit("/", 1)[-1]
+        if not olid:
+            continue
+        out.append({"olid": olid, "title": doc.get("title"),
+                    "author": ", ".join((doc.get("author_name") or [])[:2]),
+                    "year": doc.get("first_publish_year"),
+                    "pages": doc.get("number_of_pages_median"),
+                    "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
+                             if doc.get("cover_i") else None})
+    return {"results": out}
+
+
+def upsert_book(con, item):
+    con.execute("""INSERT INTO books(olid,title,author,cover,year,pages,details)
+        VALUES(?,?,?,?,?,?,?) ON CONFLICT(olid) DO UPDATE SET title=excluded.title,
+          author=excluded.author, cover=COALESCE(excluded.cover, books.cover),
+          year=COALESCE(excluded.year, books.year), pages=COALESCE(excluded.pages, books.pages)""",
+        (item["olid"], item.get("title"), item.get("author"), item.get("cover"),
+         item.get("year"), item.get("pages"), None))
+    return con.execute("SELECT id FROM books WHERE olid=?", (item["olid"],)).fetchone()["id"]
+
+
+@app.post("/api/books/add")
+async def books_add(request: Request, user=Depends(current_user)):
+    body = await request.json()
+    if not body.get("olid"):
+        raise HTTPException(400, "missing olid")
+    state = body.get("state") or "want"
+    now = datetime.now().isoformat()
+    with db() as con:
+        bid = upsert_book(con, body)
+        con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,updated_at,started_at)
+            VALUES(?,?,?,0,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
+              state=excluded.state, updated_at=excluded.updated_at""",
+            (user["id"], bid, state, now, now if state == "reading" else None))
+    return {"ok": True, "id": bid}
+
+
+@app.get("/api/manga/search")
+def manga_search(q: str, user=Depends(current_user)):
+    d = anilist("query($q:String){Page(perPage:20){media(search:$q,type:MANGA,sort:SEARCH_MATCH){"
+                + AL_MEDIA_FIELDS + "}}}", {"q": q})
+    rows = [al_media_row(m) for m in ((d or {}).get("Page") or {}).get("media", [])]
+    return {"results": rows}
+
+
+@app.post("/api/manga/add")
+async def manga_add(request: Request, user=Depends(current_user)):
+    body = await request.json()
+    mid = int(body.get("id") or 0)
+    if not mid:
+        raise HTTPException(400, "missing id")
+    d = anilist("query($id:Int){Media(id:$id,type:MANGA){" + AL_MEDIA_FIELDS + "}}", {"id": mid})
+    m = (d or {}).get("Media")
+    if not m:
+        raise HTTPException(404, "not found on AniList")
+    row = al_media_row(m)
+    state = body.get("state") or "want"
+    now = datetime.now().isoformat()
+    with db() as con:
+        con.execute("""INSERT INTO manga(id,title,cover,chapters,volumes,status,origin,year,details)
+            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,
+              cover=excluded.cover, chapters=excluded.chapters, volumes=excluded.volumes,
+              status=excluded.status, origin=excluded.origin, year=excluded.year,
+              details=excluded.details""",
+            (row["id"], row["title"], row["cover"], row["chapters"], row["volumes"],
+             row["status"], row["origin"], row["year"],
+             json.dumps({"genres": row["genres"], "score": row["score"], "desc": row["desc"]})))
+        con.execute("""INSERT INTO manga_states(user_id,manga_id,state,progress,updated_at,started_at)
+            VALUES(?,?,?,0,?,?) ON CONFLICT(user_id,manga_id) DO UPDATE SET
+              state=excluded.state, updated_at=excluded.updated_at""",
+            (user["id"], mid, state, now, now if state == "reading" else None))
+    return {"ok": True, "id": mid}
+
+
+def _update_reading_state(kind, item_id, body, uid):
+    tbl, col = ("book_states", "book_id") if kind == "book" else ("manga_states", "manga_id")
+    now = datetime.now().isoformat()
+    with db() as con:
+        if body.get("state") == "none":
+            con.execute(f"DELETE FROM {tbl} WHERE user_id=? AND {col}=?", (uid, item_id))
+            return
+        cur = con.execute(f"SELECT * FROM {tbl} WHERE user_id=? AND {col}=?",
+                          (uid, item_id)).fetchone()
+        if not cur:
+            raise HTTPException(404, "not tracked")
+        state = body.get("state") or cur["state"]
+        progress = body.get("progress", cur["progress"])
+        rating = body.get("rating", cur["rating"])
+        started = cur["started_at"] or (now if state in ("reading", "finished") else None)
+        finished = now if (state == "finished" and cur["state"] != "finished") \
+            else (None if state != "finished" else cur["finished_at"])
+        con.execute(f"""UPDATE {tbl} SET state=?, progress=?, rating=?, started_at=?,
+            finished_at=?, updated_at=? WHERE user_id=? AND {col}=?""",
+            (state, progress, rating, started, finished, now, uid, item_id))
+
+
+@app.post("/api/book/{book_id}/state")
+async def book_state(book_id: int, request: Request, user=Depends(current_user)):
+    _update_reading_state("book", book_id, await request.json(), user["id"])
+    return {"ok": True}
+
+
+@app.post("/api/manga/{manga_id}/state")
+async def manga_state(manga_id: int, request: Request, user=Depends(current_user)):
+    _update_reading_state("manga", manga_id, await request.json(), user["id"])
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- search + add
 
 @app.get("/api/search")
@@ -2756,6 +3015,79 @@ def import_status(user=Depends(current_user)):
     return IMPORT_STATUS.get(user["id"], {"state": "idle"})
 
 
+def _import_goodreads(uid, raw):
+    """Goodreads library-export CSV → books + book_states. Matched against Open
+    Library by ISBN13 first, then title+author search. Shelf map: read → finished,
+    currently-reading → reading, to-read → want. GR stars (0-5) ×2 → /10."""
+    st = IMPORT_STATUS[uid] = {"state": "running", "done": 0, "total": 0, "errors": []}
+    try:
+        rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig", errors="replace"))))
+        st["total"] = len(rows)
+        shelf_map = {"read": "finished", "currently-reading": "reading", "to-read": "want"}
+        now = datetime.now().isoformat()
+        for r in rows:
+            st["done"] += 1
+            title = (r.get("Title") or "").strip()
+            author = (r.get("Author") or "").strip()
+            state = shelf_map.get((r.get("Exclusive Shelf") or "").strip())
+            if not title or not state:
+                continue
+            isbn = re.sub(r"\D", "", r.get("ISBN13") or "") or re.sub(r"\D", "", r.get("ISBN") or "")
+            item = None
+            if isbn:
+                ed = openlibrary(f"/isbn/{isbn}.json")
+                if ed and ed.get("works"):
+                    olid = ed["works"][0]["key"].rsplit("/", 1)[-1]
+                    cov = (ed.get("covers") or [None])[0]
+                    item = {"olid": olid, "title": title, "author": author,
+                            "pages": ed.get("number_of_pages"),
+                            "cover": f"https://covers.openlibrary.org/b/id/{cov}-L.jpg" if cov else None}
+            if not item:
+                d = openlibrary("/search.json", q=f"{title} {author}", limit=1,
+                                fields="key,title,author_name,first_publish_year,cover_i,number_of_pages_median")
+                docs = (d or {}).get("docs") or []
+                if docs:
+                    doc = docs[0]
+                    item = {"olid": doc["key"].rsplit("/", 1)[-1], "title": title, "author": author,
+                            "year": doc.get("first_publish_year"),
+                            "pages": doc.get("number_of_pages_median"),
+                            "cover": f"https://covers.openlibrary.org/b/id/{doc['cover_i']}-L.jpg"
+                                     if doc.get("cover_i") else None}
+            if not item:
+                st["errors"].append(title)
+                continue
+            item.setdefault("year", int(r["Original Publication Year"])
+                            if (r.get("Original Publication Year") or "").strip().isdigit() else None)
+            if not item.get("pages") and (r.get("Number of Pages") or "").strip().isdigit():
+                item["pages"] = int(r["Number of Pages"])
+            gr_rating = int(r["My Rating"]) * 2 if (r.get("My Rating") or "").strip().isdigit() \
+                and int(r["My Rating"]) > 0 else None
+            date_read = (r.get("Date Read") or "").strip().replace("/", "-") or None  # plain date, no tz shift
+            with db() as con:
+                bid = upsert_book(con, item)
+                con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,rating,
+                    started_at,finished_at,updated_at) VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(user_id,book_id) DO UPDATE SET state=excluded.state,
+                      rating=COALESCE(excluded.rating, book_states.rating),
+                      finished_at=COALESCE(excluded.finished_at, book_states.finished_at),
+                      updated_at=excluded.updated_at""",
+                    (uid, bid, state, item.get("pages") if state == "finished" else 0,
+                     gr_rating, date_read, date_read if state == "finished" else None, now))
+        st["state"] = "done"
+    except Exception as e:  # noqa: BLE001
+        st["state"] = "failed"
+        st["errors"].append(str(e))
+
+
+@app.post("/api/import/goodreads")
+async def import_goodreads(file: UploadFile, user=Depends(current_user)):
+    data = await file.read()
+    if IMPORT_STATUS.get(user["id"], {}).get("state") == "running":
+        raise HTTPException(409, "an import is already running")
+    threading.Thread(target=_import_goodreads, args=(user["id"], data), daemon=True).start()
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- plex account linking (PIN flow)
 
 def plex_client_id(con):
@@ -3353,6 +3685,7 @@ def startup():
                      "ALTER TABLE users ADD COLUMN display_name TEXT",
                      "ALTER TABLE movies ADD COLUMN details TEXT",
                      "ALTER TABLE users ADD COLUMN banner TEXT",
+                     "ALTER TABLE users ADD COLUMN features TEXT",
                      "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
             try:
                 con.execute(stmt)
