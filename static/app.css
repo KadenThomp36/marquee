@@ -1969,3 +1969,27 @@ body.recap-open{overflow:hidden}
   .cele-timer{animation-duration:4.2s}
   .cele-bulbs i{animation:none;opacity:.7}
 }
+
+/* ── IMDb ratings ──
+   The chip carries IMDb's own badge plus its vote count, so a 500k-vote 9.9 reads
+   differently from a 40-vote 9.9. TMDB chips stay as they were where IMDb has nothing. */
+.srclogo.imdb{height:15px;width:auto;border-radius:3px}
+.chip.star.imdb{color:var(--ink);border-color:#5a4a12;background:rgba(245,197,24,.09);
+  gap:5px;padding:2px 8px 2px 5px}
+.chip.star.imdb .srclogo.imdb{height:15px}
+.chip.star.imdb i{font-style:normal;color:var(--mut);font-weight:600;font-size:10px;
+  letter-spacing:.02em}
+.section .cnt{white-space:nowrap}
+.section .cnt .srclogo.imdb{vertical-align:-4px;height:16px}
+.rat-mix{font-style:normal;color:var(--mut);font-size:10px;font-weight:700;margin-left:4px;
+  vertical-align:1px}
+/* an episode/season IMDb hasn't rated is drawn hollow — the number is TMDB's */
+.ratspark .pt.tmdb{fill:none;stroke:var(--amber);stroke-width:1.2;opacity:.6}
+.savg.tmdb .savg-v{color:var(--mut)}
+.h3-ic.imdb-ic{display:inline-flex;align-items:center}
+.h3-ic.imdb-ic .srclogo.imdb{height:17px}
+.imdb-row{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:12px}
+.imdb-stat{display:flex;flex-direction:column;gap:2px}
+.imdb-stat b{font-size:17px;color:var(--amber-2);font-variant-numeric:tabular-nums;line-height:1.1}
+.imdb-stat span{font-size:11.5px;color:var(--mut)}
+.imdb-row .btn{margin-left:auto}

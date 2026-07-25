@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import csv
+import gzip
 import io
 import json
 import logging
@@ -36,7 +37,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260725a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260725b"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -223,6 +224,154 @@ def _cached_get(key, fetch):
     if data is not None:
         _read_cache[key] = (time.time(), data)
     return data
+
+
+# ---- IMDb ratings ---------------------------------------------------------------
+# IMDb's own non-commercial datasets (datasets.imdbws.com), refreshed daily: two TSVs
+# give ratings + vote counts for every title AND every episode, keyed by tconst, with
+# title.episode mapping each episode to its series + season/episode number. That's the
+# whole job — no key, no rate limit, no per-title requests. The official IMDb API is
+# AWS Data Exchange at ~$150k/yr; scraping is against their terms. Personal use only.
+
+IMDB_DATASETS = "https://datasets.imdbws.com/"
+IMDB_SYNC_HOURS = 24          # the source itself only changes once a day
+_imdb_lock = threading.Lock()
+_imdb_state = {"running": False, "last_try": 0}
+
+
+def _imdb_download(name, dest_dir):
+    path = os.path.join(dest_dir, name)
+    with httpx.stream("GET", IMDB_DATASETS + name, timeout=300, follow_redirects=True) as r:
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            for chunk in r.iter_bytes(1 << 20):
+                f.write(chunk)
+    return path
+
+
+def imdb_fill_missing_ids(limit=500):
+    """Shows and movies carry their IMDb id in their details JSON; copy it into a real
+    column, then fetch the stragglers from TMDB (external_ids is a cheap call)."""
+    with db() as con:
+        for table in ("shows", "movies"):
+            con.execute(f"""UPDATE {table} SET imdb_id=json_extract(details,'$.imdb_id')
+                WHERE imdb_id IS NULL AND json_extract(details,'$.imdb_id') LIKE 'tt%'""")
+        todo = [("tv", r["id"]) for r in con.execute(
+            "SELECT id FROM shows WHERE imdb_id IS NULL LIMIT ?", (limit,))]
+        todo += [("movie", r["id"]) for r in con.execute(
+            "SELECT id FROM movies WHERE imdb_id IS NULL LIMIT ?", (limit,))]
+    found = []
+    for kind, tid in todo:
+        d = tmdb(f"/{kind}/{tid}/external_ids")
+        imdb = (d or {}).get("imdb_id")
+        if imdb and imdb.startswith("tt"):
+            found.append(("shows" if kind == "tv" else "movies", imdb, tid))
+    with db() as con:
+        for table, imdb, tid in found:
+            con.execute(f"UPDATE {table} SET imdb_id=? WHERE id=?", (imdb, tid))
+    return len(found)
+
+
+def imdb_sync(force=False):
+    """Pull the two datasets and stamp ratings onto our shows, movies and episodes."""
+    with _imdb_lock:
+        if _imdb_state["running"]:
+            return {"ok": False, "reason": "already running"}
+        with db() as con:
+            last = setting(con, "imdb_synced_at")
+        if not force and last:
+            age = (datetime.now() - datetime.fromisoformat(last)).total_seconds() / 3600
+            if age < IMDB_SYNC_HOURS:
+                return {"ok": True, "skipped": True, "last": last}
+        _imdb_state["running"] = True
+    t0 = time.time()
+    try:
+        new_ids = imdb_fill_missing_ids()
+        with db() as con:
+            shows = {r["imdb_id"]: r["id"] for r in
+                     con.execute("SELECT id, imdb_id FROM shows WHERE imdb_id IS NOT NULL")}
+            movies = {r["imdb_id"]: r["id"] for r in
+                      con.execute("SELECT id, imdb_id FROM movies WHERE imdb_id IS NOT NULL")}
+        tmp = os.path.join(DATA, "imdb")
+        os.makedirs(tmp, exist_ok=True)
+        # pass 1 — every episode belonging to a show we track, by (season, number)
+        ep_key = {}
+        path = _imdb_download("title.episode.tsv.gz", tmp)
+        try:
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+                next(f, None)
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) != 4:
+                        continue
+                    tc, parent, season, number = parts
+                    sid = shows.get(parent)
+                    if sid and season != "\\N" and number != "\\N":
+                        ep_key[tc] = (sid, int(season), int(number))
+        finally:
+            os.remove(path)
+        # pass 2 — ratings for those episodes, plus the series and films themselves
+        eps, series, films = [], [], []
+        path = _imdb_download("title.ratings.tsv.gz", tmp)
+        try:
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+                next(f, None)
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) != 3:
+                        continue
+                    tc, avg, votes = parts
+                    hit = ep_key.get(tc)
+                    if hit:
+                        eps.append((float(avg), int(votes), *hit))
+                    elif tc in shows:
+                        series.append((float(avg), int(votes), shows[tc]))
+                    elif tc in movies:
+                        films.append((float(avg), int(votes), movies[tc]))
+        finally:
+            os.remove(path)
+        with db() as con:
+            con.executemany("""UPDATE episodes SET imdb_rating=?, imdb_votes=?
+                WHERE show_id=? AND season=? AND number=?""", eps)
+            con.executemany("UPDATE shows SET imdb_rating=?, imdb_votes=? WHERE id=?", series)
+            # stamp every show the pass covered, rated or not — that's what stops a show
+            # IMDb simply doesn't rate from re-triggering a 60 MB pull on every visit
+            con.execute("UPDATE shows SET imdb_checked=? WHERE imdb_id IS NOT NULL",
+                        (datetime.now().isoformat(),))
+            con.executemany("UPDATE movies SET imdb_rating=?, imdb_votes=? WHERE id=?", films)
+            stats = {"episodes": len(eps), "shows": len(series), "movies": len(films),
+                     "new_ids": new_ids, "seconds": round(time.time() - t0, 1)}
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('imdb_synced_at',?)",
+                        (datetime.now().isoformat(),))
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('imdb_stats',?)",
+                        (json.dumps(stats),))
+        log.info("imdb sync: %s", stats)
+        return {"ok": True, **stats}
+    except (httpx.HTTPError, OSError, EOFError, ValueError) as e:
+        log.warning("imdb sync failed: %s", e)
+        return {"ok": False, "error": str(e)}
+    finally:
+        _imdb_state["running"] = False
+
+
+def imdb_sync_bg(force=False):
+    """Fire a sync in the background, at most once an hour on the non-forced path."""
+    now = time.time()
+    if not force and now - _imdb_state["last_try"] < 3600:
+        return False
+    _imdb_state["last_try"] = now
+    threading.Thread(target=imdb_sync, kwargs={"force": force}, daemon=True).start()
+    return True
+
+
+def imdb_loop():
+    time.sleep(25)          # let startup settle
+    while True:
+        try:
+            imdb_sync()
+        except Exception as e:  # noqa: BLE001
+            log.warning("imdb loop: %s", e)
+        time.sleep(6 * 3600)
 
 
 # ---- Hardcover (primary book source: metadata, covers, series, community ratings) ----
@@ -1998,6 +2147,9 @@ def show_detail(show_id: int, user=Depends(current_user)):
             info = json.loads(s["details"] or "{}")
         except (json.JSONDecodeError, TypeError):
             pass
+        if "imdb_rating" in s.keys() and s["imdb_rating"]:
+            info["imdb"] = {"rating": s["imdb_rating"], "votes": s["imdb_votes"],
+                            "id": s["imdb_id"]}
         return {**{k: s[k] for k in s.keys() if k != "details"}, "info": info,
                 "followed": bool(f), "archived": bool(f and f["archived"]),
                 "rating": f["rating"] if f else None,
@@ -2238,18 +2390,61 @@ def show_ratings(show_id: int, user=Depends(current_user)):
                         con.execute("""UPDATE episodes SET rating=? WHERE show_id=? AND season=? AND number=?""",
                                     (rat, show_id, e["season_number"], e["episode_number"]))
     with db() as con:
-        rows = con.execute("""SELECT season, number, title, rating FROM episodes
-            WHERE show_id=? AND season>0 AND rating IS NOT NULL ORDER BY season, number""",
-            (show_id,)).fetchall()
-    by_season = {}
-    flat = []
+        rows = con.execute("""SELECT season, number, title, rating, imdb_rating, imdb_votes
+            FROM episodes WHERE show_id=? AND season>0
+              AND (rating IS NOT NULL OR imdb_rating IS NOT NULL)
+            ORDER BY season, number""", (show_id,)).fetchall()
+        sh = con.execute("SELECT imdb_id, imdb_checked FROM shows WHERE id=?",
+                         (show_id,)).fetchone()
+    # a show added since the last dataset pull hasn't been looked at yet — go get it
+    if sh and sh["imdb_id"] and not sh["imdb_checked"]:
+        imdb_sync_bg()
+    by_season, flat = {}, []
     for r in rows:
-        by_season.setdefault(r["season"], []).append(r["rating"])
-        flat.append({"season": r["season"], "number": r["number"],
-                     "title": r["title"], "rating": r["rating"]})
-    season_avg = [{"season": s, "avg": round(sum(v) / len(v), 2), "count": len(v)}
-                  for s, v in sorted(by_season.items()) if v]
-    return {"episodes": flat, "season_avg": season_avg}
+        imdb = r["imdb_rating"] is not None
+        rating = r["imdb_rating"] if imdb else r["rating"]
+        by_season.setdefault(r["season"], []).append(
+            (rating, r["imdb_votes"] if imdb else 0, imdb))
+        flat.append({"season": r["season"], "number": r["number"], "title": r["title"],
+                     "rating": rating, "src": "imdb" if imdb else "tmdb",
+                     "votes": r["imdb_votes"] if imdb else None,
+                     "tmdb_rating": r["rating"]})
+    season_avg = []
+    for s, v in sorted(by_season.items()):
+        if not v:
+            continue
+        # IMDb seasons average by votes — one 500k-vote finale shouldn't weigh the same
+        # as a 40-vote filler episode; TMDB-only seasons keep the plain mean
+        weighted = [(x, w) for x, w, i in v if i and w]
+        avg = (sum(x * w for x, w in weighted) / sum(w for _, w in weighted)) if weighted \
+            else (sum(x for x, _, _ in v) / len(v))
+        season_avg.append({"season": s, "avg": round(avg, 2), "count": len(v),
+                           "src": "imdb" if weighted else "tmdb"})
+    n_imdb = sum(1 for e in flat if e["src"] == "imdb")
+    return {"episodes": flat, "season_avg": season_avg,
+            "source": "imdb" if n_imdb > len(flat) / 2 else "tmdb",
+            "imdb_count": n_imdb, "count": len(flat)}
+
+
+@app.get("/api/imdb/status")
+def imdb_status(user=Depends(current_user)):
+    with db() as con:
+        last = setting(con, "imdb_synced_at")
+        try:
+            stats = json.loads(setting(con, "imdb_stats") or "{}")
+        except ValueError:
+            stats = {}
+        cov = con.execute("""SELECT COUNT(*) total, SUM(imdb_rating IS NOT NULL) imdb
+            FROM episodes WHERE season>0""").fetchone()
+    return {"last": last, "running": _imdb_state["running"], "stats": stats,
+            "episodes": cov["total"], "episodes_rated": cov["imdb"] or 0}
+
+
+@app.post("/api/imdb/sync")
+def imdb_sync_now(user=Depends(admin_user)):
+    if not imdb_sync_bg(force=True):
+        return {"ok": False, "reason": "already running"}
+    return {"ok": True, "started": True}
 
 
 @app.get("/api/show/{show_id}/episode/{season}/{number}")
@@ -2449,6 +2644,13 @@ def movie_detail(movie_id: int, user=Depends(current_user)):
         info = json.loads(m["details"] or "{}")
     except (json.JSONDecodeError, TypeError):
         pass
+    if "imdb_rating" in m.keys() and m["imdb_rating"]:
+        info["imdb"] = {"rating": m["imdb_rating"], "votes": m["imdb_votes"],
+                        "id": m["imdb_id"]}
+    elif info.get("imdb_id") and not ("imdb_id" in m.keys() and m["imdb_id"]):
+        with db() as con:          # a film added since the last pull — adopt its id now
+            con.execute("UPDATE movies SET imdb_id=? WHERE id=?", (info["imdb_id"], movie_id))
+        imdb_sync_bg()
     with db() as con:
         st = con.execute("SELECT state, rating FROM movie_states WHERE user_id=? AND movie_id=?",
                         (uid, movie_id)).fetchone()
@@ -4987,7 +5189,18 @@ def startup():
                      "CREATE UNIQUE INDEX IF NOT EXISTS idx_books_hc ON books(hardcover_id)",
                      "ALTER TABLE book_states ADD COLUMN mode TEXT",
                      "ALTER TABLE manga_states ADD COLUMN mode TEXT",
-                     "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'"):
+                     "ALTER TABLE lists ADD COLUMN visibility TEXT DEFAULT 'private'",
+                     "ALTER TABLE shows ADD COLUMN imdb_id TEXT",
+                     "ALTER TABLE shows ADD COLUMN imdb_rating REAL",
+                     "ALTER TABLE shows ADD COLUMN imdb_votes INTEGER",
+                     "ALTER TABLE shows ADD COLUMN imdb_checked TEXT",
+                     "ALTER TABLE movies ADD COLUMN imdb_id TEXT",
+                     "ALTER TABLE movies ADD COLUMN imdb_rating REAL",
+                     "ALTER TABLE movies ADD COLUMN imdb_votes INTEGER",
+                     "ALTER TABLE episodes ADD COLUMN imdb_rating REAL",
+                     "ALTER TABLE episodes ADD COLUMN imdb_votes INTEGER",
+                     "CREATE INDEX IF NOT EXISTS idx_shows_imdb ON shows(imdb_id)",
+                     "CREATE INDEX IF NOT EXISTS idx_movies_imdb ON movies(imdb_id)"):
             try:
                 con.execute(stmt)
             except sqlite3.OperationalError:
@@ -5001,6 +5214,7 @@ def startup():
     threading.Thread(target=refresh_loop, daemon=True).start()
     threading.Thread(target=plex_poll_loop, daemon=True).start()
     threading.Thread(target=notif_loop, daemon=True).start()
+    threading.Thread(target=imdb_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

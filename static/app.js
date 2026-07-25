@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260725a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260725b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -42,8 +42,21 @@ const isEnded = st => st === "Ended" || st === "Canceled";
 const SRC_LOGO = {
   Trakt: `<svg class="srclogo trakt" viewBox="0 0 24 24" aria-label="Trakt"><circle cx="12" cy="12" r="11.2" fill="#ed1c24"/><path d="M5.2 16.8 13 9l-1.1-1.1-8 8zM8 6.2l6.6 6.6M18.8 7.4 12.4 13.8l6 6" fill="none" stroke="#fff" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" opacity=".95"/></svg>`,
   TMDB: `<svg class="srclogo tmdb" viewBox="0 0 62 16" aria-label="TMDB"><defs><linearGradient id="tmdbg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#90cea1"/><stop offset=".56" stop-color="#3cbec9"/><stop offset="1" stop-color="#01b4e4"/></linearGradient></defs><rect width="62" height="16" rx="3.2" fill="url(#tmdbg)"/><text x="31" y="11.6" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="800" font-size="9.5" letter-spacing=".3" fill="#0d253f">TMDB</text></svg>`,
+  IMDb: `<svg class="srclogo imdb" viewBox="0 0 48 24" aria-label="IMDb"><rect width="48" height="24" rx="4" fill="#f5c518"/><text x="24" y="17.4" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="900" font-size="13" letter-spacing="-.3" fill="#000">IMDb</text></svg>`,
   MyAnimeList: `<svg class="srclogo mal" viewBox="0 0 48 16" aria-label="MyAnimeList"><rect width="48" height="16" rx="3" fill="#2e51a2"/><text x="24" y="11.8" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="800" font-size="9.5" letter-spacing=".4" fill="#fff">MAL</text></svg>`,
 };
+
+/* One rating chip, one rule: IMDb when the dataset has it (with its vote count),
+   TMDB otherwise — the fallback keeps small/foreign titles from going blank. */
+const kVotes = n => n >= 1e6 ? (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + "M"
+  : n >= 1000 ? Math.round(n / 1000) + "k" : String(n || "");
+function ratingChip(info) {
+  const im = info && info.imdb;
+  if (im && im.rating)
+    return `<span class="chip star imdb" title="IMDb${im.votes ? ` · ${im.votes.toLocaleString()} votes` : ""}">${
+      SRC_LOGO.IMDb}${im.rating.toFixed(1)}${im.votes ? `<i>${kVotes(im.votes)}</i>` : ""}</span>`;
+  return info && info.vote ? `<span class="chip star" title="TMDB">${I.star} ${info.vote}</span>` : "";
+}
 
 /* ---------- utils ---------- */
 async function api(path, opts = {}) {
@@ -1024,22 +1037,26 @@ async function ratingsPanel(id) {
     const line = es.map((e, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(e.rating).toFixed(1)}`).join(" ");
     const area = `M${X(0).toFixed(1)} ${H - pb} ` + es.map((e, i) => `L${X(i).toFixed(1)} ${Y(e.rating).toFixed(1)}`).join(" ") + ` L${X(N - 1).toFixed(1)} ${H - pb} Z`;
     const r = N <= 24 ? 2.4 : 1.8;
-    const dots = es.map((e, i) => `<circle class="pt" cx="${X(i).toFixed(1)}" cy="${Y(e.rating).toFixed(1)}" r="${r}"><title>E${e.number}${e.title ? " · " + e.title.replace(/"/g, "") : ""} · ${e.rating}</title></circle>`).join("");
+    const dots = es.map((e, i) => `<circle class="pt ${e.src === "tmdb" ? "tmdb" : ""}" cx="${X(i).toFixed(1)}" cy="${Y(e.rating).toFixed(1)}" r="${r}"><title>E${e.number}${e.title ? " · " + e.title.replace(/"/g, "") : ""} · ${e.rating}${e.votes ? " · " + e.votes.toLocaleString() + " votes" : ""}${e.src === "tmdb" ? " (TMDB)" : ""}</title></circle>`).join("");
     const peak = es.reduce((m, e, i) => e.rating > es[m].rating ? i : m, 0);
     return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="ratspark">${grid}${avgLine}` +
       `<path class="rarea" d="${area}"/><path class="rline" d="${line}"/>${dots}` +
       `<circle class="rpeak" cx="${X(peak).toFixed(1)}" cy="${Y(es[peak].rating).toFixed(1)}" r="3"/>${labels}${xl}</svg>`;
   }
 
-  const capHTML = sn => `Season ${sn}${bySeason[sn] ? " · " + bySeason[sn].length + " episodes" : ""}
-    <span class="rat-savg">avg ${(sa.find(x => x.season === sn) || {}).avg ?? "–"}</span>`;
+  const capHTML = sn => { const s = sa.find(x => x.season === sn) || {};
+    return `Season ${sn}${bySeason[sn] ? " · " + bySeason[sn].length + " episodes" : ""}
+      <span class="rat-savg">avg ${s.avg != null ? (+s.avg).toFixed(2) : "–"}</span>
+      ${s.src === "tmdb" ? `<i class="rat-mix">TMDB</i>` : ""}`; };
 
+  const srcLogo = d.source === "imdb" ? SRC_LOGO.IMDb : SRC_LOGO.TMDB;
+  const mixed = d.imdb_count && d.imdb_count < d.count;
   host.innerHTML = `<div class="section"><h2>Ratings</h2><div class="rule"></div>
-      <span class="cnt">${avg} avg${sa.length ? " · " + SRC_LOGO.TMDB : ""}</span></div>
+      <span class="cnt" ${mixed ? `title="${d.imdb_count} of ${d.count} episodes rated on IMDb — the rest fall back to TMDB"` : ""}>${avg} avg · ${srcLogo}${mixed ? `<i class="rat-mix">+TMDB</i>` : ""}</span></div>
     <div class="ratings">
       ${sa.length > 1 ? `<div class="savg-strip">${sa.map(s => `
-        <button class="savg ${s.season === active ? "on" : ""}" data-s="${s.season}" title="Season ${s.season} average: ${s.avg}">
-          <span class="savg-s">S${s.season}</span><span class="savg-v">${s.avg}</span>
+        <button class="savg ${s.season === active ? "on" : ""} ${s.src === "tmdb" ? "tmdb" : ""}" data-s="${s.season}" title="Season ${s.season} average: ${s.avg}${s.src === "imdb" ? " (IMDb, weighted by votes)" : " (TMDB)"}">
+          <span class="savg-s">S${s.season}</span><span class="savg-v">${(+s.avg).toFixed(2)}</span>
           <span class="savg-u"><i style="width:${Math.round((s.avg - lo) / (hi - lo) * 100)}%;background:${grade(s.avg)}"></i></span>
         </button>`).join("")}</div>` : ""}
       <div class="rat-cap" id="ratcap">${capHTML(active)}</div>
@@ -1136,7 +1153,7 @@ routes.show = async id => {
   const chips = [
     ended ? `<span class="chip ended">${I.flag} Ended${endYear ? " · " + endYear : ""}</span>` : "",
     info.content_rating && `<span class="chip">${esc(info.content_rating)}</span>`,
-    info.vote ? `<span class="chip star">${I.star} ${info.vote}</span>` : "",
+    ratingChip(info),
     info.networks?.length && `<span class="chip">${esc(info.networks.join(" · "))}</span>`,
     info.n_episodes && `<span class="chip">${info.n_seasons} season${info.n_seasons > 1 ? "s" : ""} · ${info.n_episodes} eps</span>`,
     info.origin && `<span class="chip">${esc(info.origin)}</span>`,
@@ -1510,7 +1527,9 @@ routes.episode = async (id, season, number) => {
       <a class="crumb" href="#/show/${id}">${I.chevS} ${esc(e.show_title)}</a>
       <h1>${esc(e.title || "Episode " + e.number)}</h1>
       <div class="epmeta"><b>${sxe(e.season, e.number)}</b> · ${dur}${e.air_date ? fmtDate(e.air_date) : "TBA"}
-        ${x.vote ? ` · <span class="chip star">${I.star} ${x.vote}</span>` : ""}
+        ${(() => { const c = ratingChip({ vote: x.vote || e.rating,
+          imdb: e.imdb_rating ? { rating: e.imdb_rating, votes: e.imdb_votes } : null });
+          return c ? ` · ${c}` : ""; })()}
         ${e.watched && e.watched_at ? ` · watched ${fmtDate(e.watched_at)}` : ""}</div>
       ${e.overview ? veil(`<p class="overview">${esc(e.overview)}</p>`,
         { watched: e.watched, cls: "sp-overview", label: "Episode spoilers" }) : ""}
@@ -2926,7 +2945,7 @@ routes.movie = async id => {
   const i = m.info || {};
   const chips = [
     i.content_rating && `<span class="chip">${esc(i.content_rating)}</span>`,
-    i.vote ? `<span class="chip star">${I.star} ${i.vote}</span>` : "",
+    ratingChip(i),
     i.runtime && `<span class="chip">${Math.floor(i.runtime / 60)}h ${i.runtime % 60}m</span>`,
     (i.genres || []).length && `<span class="chip">${esc(i.genres.slice(0, 2).join(" · "))}</span>`,
   ].filter(Boolean).join("");
@@ -4297,6 +4316,7 @@ routes.settings = async () => {
   const plex = await api("/plex/status").catch(() => ({}));
   const oseer = await api("/overseerr/me").catch(() => ({ enabled: false }));
   const nprefs = (await api("/notifications/prefs").catch(() => ({ prefs: [] }))).prefs;
+  const imdb = await api("/imdb/status").catch(() => null);
   const LEADS = [["0", "When it airs"], ["1", "1 day before"], ["3", "3 days before"], ["7", "1 week before"]];
   const notifPanel = `<div class="panel notif-panel"><h3><span class="h3-ic">${I.bell}</span> Notifications</h3>
     <p class="hint">Off by default — switch on only what you want. Alerts appear in your bell inbox, and as push if you enable it below.</p>
@@ -4377,6 +4397,17 @@ routes.settings = async () => {
   view.innerHTML = `<div class="page-head"><a class="crumb" href="#/profile">${I.chevS} Profile</a></div>
     <h1>Settings</h1><div class="reveal">
     ${plexPanel}
+    ${imdb ? `<div class="panel"><h3><span class="h3-ic imdb-ic">${SRC_LOGO.IMDb}</span> IMDb ratings</h3>
+      <p class="hint">Episode, season, show and film ratings come from IMDb's daily dataset —
+        no account, no API key. TMDB fills the gaps for anything IMDb hasn't rated.</p>
+      <div class="imdb-row">
+        <div class="imdb-stat"><b>${(imdb.episodes_rated || 0).toLocaleString()}</b>
+          <span>of ${(imdb.episodes || 0).toLocaleString()} episodes rated</span></div>
+        <div class="imdb-stat"><b>${imdb.last ? fmtDate(imdb.last.slice(0, 10)) : "never"}</b>
+          <span>last sync${imdb.stats && imdb.stats.seconds ? ` · took ${imdb.stats.seconds}s` : ""}</span></div>
+        ${ME.is_admin ? `<button class="btn" id="imdbsync" ${imdb.running ? "disabled" : ""}>
+          ${imdb.running ? "Syncing…" : "Sync now"}</button>` : ""}
+      </div></div>` : ""}
     ${notifPanel}
     <div class="panel"><h3><span class="h3-ic">${BOOK_ICO}</span> Tracking extras</h3>
       <p class="hint">Off by default. Switching one on adds a tab to your own menu — nobody else’s changes.</p>
@@ -4418,6 +4449,17 @@ routes.settings = async () => {
         } catch { clearInterval(poll); b.disabled = false; $("#plexwait").textContent = "Link expired — try again."; }
       }, 3000);
     } catch { b.disabled = false; }
+  };
+  if ($("#imdbsync")) $("#imdbsync").onclick = async e => {
+    const b = e.currentTarget;
+    b.disabled = true; b.textContent = "Syncing…";
+    await api("/imdb/sync", { body: {} }).catch(() => {});
+    toast("Pulling IMDb ratings — this takes a few seconds");
+    setTimeout(async () => {
+      const st = await api("/imdb/status").catch(() => null);
+      b.textContent = "Sync now"; b.disabled = false;
+      if (st) toast(`${(st.episodes_rated || 0).toLocaleString()} episodes rated from IMDb`);
+    }, 12000);
   };
   if ($("#plexunlink")) $("#plexunlink").onclick = async () => {
     await api("/plex/unlink", { body: {} }); routes.settings();
