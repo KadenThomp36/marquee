@@ -1870,3 +1870,102 @@ body.recap-open{overflow:hidden}
 @media(max-width:700px){
   input:not([type=checkbox]):not([type=radio]),textarea,select{font-size:16px}
 }
+
+/* ── celebration: finishing a season / a series ──
+   Deliberately over the top — the payoff for weeks of watching. Marquee bulbs,
+   a slammed foil stamp, spotlight rays and a lot of confetti. */
+.cele{position:fixed;inset:0;z-index:120;display:grid;place-items:center;
+  padding:max(18px,env(safe-area-inset-top)) 18px max(18px,env(safe-area-inset-bottom));
+  background:radial-gradient(120% 90% at 50% 40%,rgba(43,32,12,.86),rgba(8,7,5,.97) 70%);
+  opacity:0;transition:opacity .32s ease}
+.cele.in{opacity:1}
+.cele.out{opacity:0}
+.cele-bg{position:absolute;inset:0;background-size:cover;background-position:center;
+  filter:blur(34px) brightness(.34) saturate(1.25);opacity:.55;transform:scale(1.16)}
+.cele-rays{position:absolute;width:190vmax;height:190vmax;left:50%;top:50%;margin:-95vmax;
+  background:conic-gradient(from 0deg,rgba(240,181,68,.17) 0 6deg,transparent 6deg 22deg);
+  animation:cele-spin 26s linear infinite;opacity:0;transition:opacity .8s ease .15s}
+.cele.in .cele-rays{opacity:.85}
+@keyframes cele-spin{to{transform:rotate(360deg)}}
+.cele-confetti{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.cele-card{position:relative;z-index:2;width:min(430px,100%);max-height:100%;overflow:auto;
+  text-align:center;padding:26px 22px 20px;border-radius:22px;
+  background:linear-gradient(180deg,rgba(31,26,19,.95),rgba(15,13,10,.97));
+  box-shadow:0 30px 80px rgba(0,0,0,.65),inset 0 0 0 1px rgba(240,181,68,.35),
+    0 0 90px rgba(240,181,68,.18);
+  transform:scale(.86) translateY(14px);opacity:0;
+  transition:transform .5s cubic-bezier(.18,1.5,.42,1),opacity .3s ease}
+.cele.in .cele-card{transform:none;opacity:1}
+.cele.stamped .cele-card{animation:cele-shake .5s cubic-bezier(.36,.07,.19,.97)}
+@keyframes cele-shake{
+  10%{transform:translate3d(-7px,3px,0) rotate(-.6deg)}
+  30%{transform:translate3d(6px,-3px,0) rotate(.5deg)}
+  55%{transform:translate3d(-4px,2px,0) rotate(-.3deg)}
+  80%{transform:translate3d(3px,-1px,0)}
+  100%{transform:none}
+}
+/* running marquee bulbs around the frame */
+.cele-bulbs{position:absolute;inset:8px;border-radius:16px;pointer-events:none}
+.cele-bulbs i{position:absolute;width:5px;height:5px;border-radius:50%;background:var(--amber-2);
+  box-shadow:0 0 8px rgba(255,217,138,.9);opacity:.25;
+  animation:cele-bulb 1.1s steps(1,end) infinite;animation-delay:calc(var(--i)*.085s)}
+@keyframes cele-bulb{0%,45%{opacity:1}46%,100%{opacity:.22}}
+.cele-bulbs i:nth-child(-n+8){top:-2px;left:calc(var(--i)*12.5% + 3%)}
+.cele-bulbs i:nth-child(n+9):nth-child(-n+13){right:-2px;top:calc((var(--i) - 8)*20% + 4%)}
+.cele-bulbs i:nth-child(n+14):nth-child(-n+21){bottom:-2px;left:calc((21 - var(--i))*12.5% + 3%)}
+.cele-bulbs i:nth-child(n+22){left:-2px;top:calc((26 - var(--i))*20% + 4%)}
+.cele-kicker{font-size:11px;font-weight:800;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--amber);margin-bottom:14px}
+.cele-art{position:relative;display:inline-block;margin-bottom:16px;perspective:800px}
+.cele-poster{width:150px;aspect-ratio:2/3;object-fit:cover;border-radius:12px;
+  box-shadow:0 18px 44px rgba(0,0,0,.6),0 0 0 1px rgba(240,181,68,.4);
+  transform:rotateY(-62deg) scale(.8);opacity:0;
+  transition:transform .72s cubic-bezier(.2,1.2,.3,1) .1s,opacity .4s ease .1s}
+.cele.in .cele-poster{transform:none;opacity:1}
+.cele-stamp{position:absolute;left:50%;top:58%;
+  padding:9px 14px;border:3px solid var(--amber-2);border-radius:7px;
+  background:rgba(24,17,6,.72);color:var(--amber-2);text-shadow:0 2px 10px rgba(0,0,0,.7);
+  font-family:var(--disp);line-height:1;white-space:nowrap;
+  box-shadow:0 8px 26px rgba(0,0,0,.55),inset 0 0 22px rgba(240,181,68,.2);
+  transform:translate(-50%,-50%) rotate(-11deg) scale(2.7);opacity:0;filter:blur(6px)}
+.cele.in .cele-stamp{animation:cele-slam .42s cubic-bezier(.2,1.1,.3,1) .58s forwards}
+@keyframes cele-slam{to{transform:translate(-50%,-50%) rotate(-11deg) scale(1);opacity:1;filter:none}}
+.cele-stamp b{display:block;font-size:15px;letter-spacing:.14em}
+.cele-stamp span{display:block;font-size:22px;letter-spacing:.06em}
+.cele-title{font-family:var(--disp);font-size:26px;line-height:1.15;margin:0 0 6px;color:var(--ink)}
+.cele-title span{display:inline-block;opacity:0;transform:translateY(14px);
+  animation:cele-letter .42s cubic-bezier(.2,1.1,.3,1) forwards;
+  animation-delay:calc(.72s + var(--i)*.028s)}
+@keyframes cele-letter{to{opacity:1;transform:none}}
+.cele-sub{color:var(--ink-2);font-size:13.5px}
+.cele-stats{display:flex;justify-content:center;gap:10px;margin:18px 0 10px;flex-wrap:wrap}
+.cele-stats span{display:flex;flex-direction:column;gap:2px;min-width:78px;padding:9px 12px;
+  border-radius:12px;background:rgba(240,181,68,.09);box-shadow:inset 0 0 0 1px rgba(240,181,68,.22);
+  font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-2)}
+.cele-stats b{font-size:19px;letter-spacing:0;text-transform:none;color:var(--amber-2);
+  font-variant-numeric:tabular-nums}
+.cele-nth{color:var(--mut);font-size:12px;font-style:italic}
+.cele-acts{display:flex;gap:9px;justify-content:center;margin-top:18px}
+.cele-acts .btn{flex:none}
+.cele-timer{height:2px;margin:16px -22px -20px;border-radius:2px;background:var(--amber-dim);
+  transform-origin:left;animation:cele-timer 9s linear forwards;opacity:.5}
+@keyframes cele-timer{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+/* a series finale gets the red-velvet treatment */
+.cele.series{background:radial-gradient(120% 90% at 50% 40%,rgba(60,17,24,.86),rgba(8,7,5,.97) 70%)}
+.cele.series .cele-rays{background:conic-gradient(from 0deg,rgba(176,64,79,.2) 0 5deg,
+  transparent 5deg 14deg,rgba(240,181,68,.16) 14deg 19deg,transparent 19deg 30deg)}
+.cele.series .cele-card{box-shadow:0 30px 80px rgba(0,0,0,.65),inset 0 0 0 1px rgba(240,181,68,.4),
+  0 0 110px rgba(176,64,79,.3)}
+@media(max-width:700px){
+  .cele-poster{width:124px}
+  .cele-title{font-size:22px}
+  .cele-stamp span{font-size:19px}
+  .cele-stats span{min-width:70px;padding:8px 10px}
+}
+@media(prefers-reduced-motion:reduce){
+  .cele-rays{animation:none}
+  .cele-card,.cele-poster,.cele-stamp,.cele-title span{transition:opacity .3s ease!important;
+    animation:none!important;transform:none!important;opacity:1;filter:none}
+  .cele-timer{animation-duration:4.2s}
+  .cele-bulbs i{animation:none;opacity:.7}
+}

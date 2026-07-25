@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260724n";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260725a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -59,7 +59,11 @@ async function api(path, opts = {}) {
     try { msg = (await r.json()).detail || msg; } catch {}
     toast(msg); throw new Error(msg);
   }
-  return r.json();
+  const data = await r.json();
+  // any endpoint that finishes a season/series hands back a celebration — catching it
+  // here means every punch, mark-all and season toggle triggers the fanfare
+  if (data && data.celebrate && data.celebrate.length) celebrate(data.celebrate);
+  return data;
 }
 function cached(path) {
   const stale = CACHE[path];
@@ -4489,6 +4493,170 @@ routes.settings = async () => {
   wirePush();
 };
 
+/* ---------- celebrations: you finished a season / a whole series ----------
+   Milestones are recorded server-side, so one that happened while the app was closed
+   (Plex marking your last episode) still gets its moment the next time you open it. */
+let CELE_Q = [], CELE_BUSY = false;
+const REDUCED = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+async function checkCelebrations() {
+  if (!ME || document.hidden) return;
+  try {
+    const d = await api("/celebrations");
+    if (d.celebrations && d.celebrations.length) celebrate(d.celebrations);
+  } catch { /* offline — they keep until next time */ }
+}
+function celebrate(list) {
+  const queued = new Set(CELE_Q.map(c => c.id));
+  list.forEach(c => { if (!queued.has(c.id)) CELE_Q.push(c); });
+  if (!CELE_BUSY) celeNext();
+}
+function celeNext() {
+  const c = CELE_Q.shift();
+  if (!c) { CELE_BUSY = false; return; }
+  CELE_BUSY = true;
+  celeShow(c, () => setTimeout(celeNext, 220));
+}
+const celeHours = m => m >= 60
+  ? `${Math.floor(m / 60)}h${m % 60 ? " " + (m % 60) + "m" : ""}` : `${m || 0}m`;
+const celeSpan = d => d == null ? null
+  : d <= 1 ? "in a single day" : d < 31 ? `over ${d} days`
+  : d < 400 ? `over ${Math.round(d / 30.4)} months` : `over ${(d / 365).toFixed(1)} years`;
+const celeOrdinal = n => {
+  const s = ["th", "st", "nd", "rd"], v = n % 100;
+  return n + (s[(v - 20) % 10] || s[v] || s[0]);
+};
+
+function celeShow(c, done) {
+  const isShow = c.kind === "show";
+  const title = c.show.title || "";
+  const wrap = document.createElement("div");
+  wrap.className = `cele ${isShow ? "series" : ""}`;
+  const stats = [
+    [c.episodes, c.episodes === 1 ? "episode" : "episodes"],
+    [celeHours(c.minutes), "watched"],
+    ...(isShow ? [[c.seasons, c.seasons === 1 ? "season" : "seasons"]] : []),
+  ];
+  wrap.innerHTML = `
+    ${c.show.backdrop ? `<div class="cele-bg" style="background-image:url(${c.show.backdrop})"></div>` : ""}
+    <div class="cele-rays"></div>
+    <div class="cele-card">
+      <div class="cele-bulbs">${Array.from({ length: 26 }, (_, i) =>
+        `<i style="--i:${i}"></i>`).join("")}</div>
+      <div class="cele-kicker">${isShow ? "That’s a wrap" : "Season complete"}</div>
+      <div class="cele-art">
+        <img class="cele-poster" src="${POSTER(c.show.poster)}" alt="">
+        <div class="cele-stamp"><b>${isShow ? "SERIES" : "SEASON"}</b><span>COMPLETE</span></div>
+      </div>
+      <h2 class="cele-title">${title.split("").map((ch, i) =>
+        `<span style="--i:${i}">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("")}</h2>
+      <div class="cele-sub">${isShow ? "The complete series" : esc(c.season_name || "")}${
+        c.days != null ? ` · ${celeSpan(c.days)}` : ""}</div>
+      <div class="cele-stats">${stats.map(([v, l]) =>
+        `<span><b>${v}</b>${l}</span>`).join("")}</div>
+      <div class="cele-nth">your ${celeOrdinal(c.nth_this_year)} ${isShow ? "series" : "season"}
+        finished in ${c.year}</div>
+      <div class="cele-acts">
+        <button class="btn pri" data-a="ok">Nice</button>
+        <a class="btn" href="#/show/${c.show.id}" data-a="go">See the show</a>
+      </div>
+      <div class="cele-timer"></div>
+    </div>
+    <canvas class="cele-confetti"></canvas>`;
+  document.body.appendChild(wrap);
+  document.body.style.overflow = "hidden";
+
+  const stopConfetti = REDUCED() ? () => {} : celeConfetti($(".cele-confetti", wrap), isShow);
+  if (!REDUCED()) {
+    setTimeout(() => { hapticTick(); wrap.classList.add("stamped"); }, 620);
+    setTimeout(hapticTick, 760);
+  }
+  requestAnimationFrame(() => wrap.classList.add("in"));
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(autoT);
+    stopConfetti();
+    wrap.classList.remove("in");
+    wrap.classList.add("out");
+    document.body.style.overflow = "";
+    setTimeout(() => wrap.remove(), 420);
+    api("/celebrations/seen", { body: { ids: [c.id] } }).catch(() => {});
+    done();
+  };
+  const autoT = setTimeout(close, REDUCED() ? 4200 : 9000);
+  wrap.onclick = e => {
+    if (e.target.closest('[data-a="go"]')) { close(); return; }   // let the link through
+    close();
+  };
+}
+
+/* Canvas confetti — foil rectangles + discs, gravity, flutter. Two bursts, then it
+   rains out. Returns a stop() that cancels the loop and frees the canvas. */
+function celeConfetti(cv, rich) {
+  const ctx = cv.getContext("2d");
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  let w, h;
+  const size = () => {
+    w = cv.clientWidth; h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+  size();
+  addEventListener("resize", size);
+  const GOLD = ["#f0b544", "#ffd98a", "#c08118", "#f2ecdf"];
+  const POP = rich ? ["#b0404f", "#8f7fe8", "#3987e5", "#22a85a"] : ["#b0404f", "#8f7fe8"];
+  const bits = [];
+  const spawn = (n, x, y, spread, power) => {
+    for (let i = 0; i < n; i++) {
+      const a = -Math.PI / 2 + (Math.random() - .5) * spread;
+      const v = power * (.55 + Math.random() * .75);
+      bits.push({
+        x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v,
+        w: 5 + Math.random() * 7, h: 9 + Math.random() * 12,
+        rot: Math.random() * Math.PI, vr: (Math.random() - .5) * .34,
+        col: (arr => arr[Math.floor(Math.random() * arr.length)])(
+          Math.random() < (rich ? .34 : .22) ? POP : GOLD),
+        disc: Math.random() < .22, life: 0,
+      });
+    }
+  };
+  spawn(70, w * .5, h * .52, 2.4, 15);                       // centre burst
+  setTimeout(() => { spawn(46, 0, h, 1.1, 21); spawn(46, w, h, 1.1, 21); }, 260);   // cannons
+  setTimeout(() => spawn(40, w * .5, -20, 3.1, 3), 1500);    // and then it rains
+  const drift = setInterval(() => spawn(9, Math.random() * w, -20, 3.1, 2), 900);
+  setTimeout(() => clearInterval(drift), 6000);
+  let raf, last = performance.now();
+  const tick = now => {
+    const dt = Math.min(40, now - last) / 16.7;
+    last = now;
+    ctx.clearRect(0, 0, w, h);
+    for (let i = bits.length - 1; i >= 0; i--) {
+      const b = bits[i];
+      b.life += dt;
+      b.vy += .34 * dt;                       // gravity
+      b.vx += Math.sin((b.life + b.rot) * .12) * .06 * dt;   // flutter
+      b.vx *= .995; b.vy *= .992;
+      b.x += b.vx * dt; b.y += b.vy * dt; b.rot += b.vr * dt;
+      if (b.y > h + 40 || b.x < -60 || b.x > w + 60) { bits.splice(i, 1); continue; }
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(b.rot);
+      ctx.globalAlpha = Math.max(0, Math.min(1, 1.6 - b.life / 190));
+      ctx.fillStyle = b.col;
+      const squash = Math.abs(Math.cos(b.life * .11));       // foil catching the light
+      if (b.disc) { ctx.beginPath(); ctx.ellipse(0, 0, b.w / 2, b.w / 2 * squash, 0, 0, 7); ctx.fill(); }
+      else ctx.fillRect(-b.w / 2, -b.h / 2 * squash, b.w, b.h * squash);
+      ctx.restore();
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+  return () => { cancelAnimationFrame(raf); clearInterval(drift); removeEventListener("resize", size); };
+}
+
 /* ---------- boot ---------- */
 // if the running JS is older than the server's build, clear caches and hard-reload once —
 // permanently ends the "stale PWA didn't pick up new code" problem
@@ -4517,6 +4685,7 @@ async function boot() {
   refreshBell();
   setInterval(refreshBell, 60000);
   setTimeout(checkRecapPopup, 1400);   // December: auto-present this year's recap once
+  setTimeout(checkCelebrations, 900);  // anything finished while the app was closed
   setTimeout(() => ["/dashboard", "/upcoming", "/movies", "/lists", "/stats"].forEach(p =>
     api(p).then(d => { CACHE[p] = d; }).catch(() => {})), 600);
 }
@@ -4527,6 +4696,10 @@ if ("serviceWorker" in navigator)
   addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 // a long-lived PWA never re-runs boot(), so it'd stay on old code until relaunched —
 // re-check the build whenever the app returns to the foreground (or from bfcache)
-document.addEventListener("visibilitychange", () => { if (!document.hidden && ME) checkBuild(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || !ME) return;
+  checkBuild();
+  checkCelebrations();   // Plex may have finished a season for you while you were away
+});
 addEventListener("pageshow", e => { if (e.persisted) checkBuild(); });
 boot();

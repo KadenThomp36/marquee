@@ -36,7 +36,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260724n"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260725a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS favorites(
   user_id INTEGER, item_type TEXT, item_id INTEGER, position INTEGER, created_at TEXT,
   PRIMARY KEY(user_id, item_type, item_id));
 CREATE INDEX IF NOT EXISTS idx_favorites_user ON favorites(user_id, position);
+CREATE TABLE IF NOT EXISTS milestones(
+  id INTEGER PRIMARY KEY, user_id INTEGER, kind TEXT, show_id INTEGER,
+  season INTEGER DEFAULT 0, created_at TEXT, seen_at TEXT,
+  UNIQUE(user_id, kind, show_id, season));
+CREATE INDEX IF NOT EXISTS idx_milestones_unseen ON milestones(user_id, seen_at);
 CREATE TABLE IF NOT EXISTS recap_seen(
   user_id INTEGER, year INTEGER, seen_at TEXT, PRIMARY KEY(user_id, year));
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
@@ -2028,6 +2033,144 @@ def show_summary(con, uid, show_id):
             "next_ep": dict(nxt) if nxt else None}
 
 
+# ------------------------------------------------- milestones (finishing something!)
+# Finishing a season or a whole series is the good bit of watching TV, and it can happen
+# while the app is closed (Plex sync marks the last episode). So completions are recorded
+# server-side as milestones and stay unseen until the app has actually celebrated them.
+
+ENDED_STATUSES = ("ended", "canceled", "cancelled")
+
+
+def _season_progress(con, uid, show_id):
+    """Per season: how much has aired, how much this user has watched, and how long it
+    took. A season still airing is never 'complete' — pending counts unaired episodes."""
+    return con.execute("""
+        SELECT e.season AS season,
+               SUM(CASE WHEN e.air_date IS NOT NULL AND e.air_date<=? THEN 1 ELSE 0 END) AS aired,
+               SUM(CASE WHEN e.air_date IS NULL OR e.air_date>? THEN 1 ELSE 0 END) AS pending,
+               SUM(CASE WHEN w.user_id IS NOT NULL THEN 1 ELSE 0 END) AS seen,
+               SUM(CASE WHEN w.user_id IS NOT NULL THEN COALESCE(e.runtime,0) ELSE 0 END) AS minutes,
+               MIN(w.watched_at) AS first_w, MAX(w.watched_at) AS last_w
+        FROM episodes e
+        LEFT JOIN watches w ON w.user_id=? AND w.show_id=e.show_id
+             AND w.season=e.season AND w.number=e.number
+        WHERE e.show_id=? AND e.season>0
+        GROUP BY e.season ORDER BY e.season""",
+        (today(), today(), uid, show_id)).fetchall()
+
+
+def record_milestones(con, uid, show_id, seen=False):
+    """Record any season/series this user just finished. UNIQUE(user,kind,show,season)
+    makes it fire once; `seen` backdates it (used to seed history without a confetti
+    storm). Returns the new milestone ids."""
+    rows = [r for r in _season_progress(con, uid, show_id) if r["aired"] or r["pending"]]
+    if not rows:
+        return []
+    now = datetime.now().isoformat()
+    done = [r for r in rows if r["aired"] and not r["pending"] and r["seen"] >= r["aired"]]
+    made = []
+    for r in done:
+        cur = con.execute("""INSERT OR IGNORE INTO milestones(user_id,kind,show_id,season,
+            created_at,seen_at) VALUES(?,'season',?,?,?,?)""",
+            (uid, show_id, r["season"], now, now if seen else None))
+        if cur.rowcount:
+            made.append(cur.lastrowid)
+    show = con.execute("SELECT status FROM shows WHERE id=?", (show_id,)).fetchone()
+    ended = (show["status"] or "").lower() in ENDED_STATUSES if show else False
+    if ended and len(done) == len(rows):
+        cur = con.execute("""INSERT OR IGNORE INTO milestones(user_id,kind,show_id,season,
+            created_at,seen_at) VALUES(?,'show',?,0,?,?)""",
+            (uid, show_id, now, now if seen else None))
+        if cur.rowcount:
+            # finishing the series says it better than "you finished season 6" — retire
+            # the season milestones it lands with instead of queueing two celebrations
+            con.execute("""UPDATE milestones SET seen_at=? WHERE user_id=? AND show_id=?
+                AND kind='season' AND seen_at IS NULL""", (now, uid, show_id))
+            made = [cur.lastrowid]
+    return made
+
+
+def clear_milestones(con, uid, show_id, season=None):
+    """Un-watching resets the achievement, so finishing it again celebrates again."""
+    if season is None:
+        con.execute("DELETE FROM milestones WHERE user_id=? AND show_id=?", (uid, show_id))
+    else:
+        con.execute("""DELETE FROM milestones WHERE user_id=? AND show_id=?
+            AND (kind='show' OR season=?)""", (uid, show_id, season))
+
+
+def _milestone_payload(con, m):
+    s = con.execute("SELECT * FROM shows WHERE id=?", (m["show_id"],)).fetchone()
+    if not s:
+        return None
+    try:
+        det = json.loads(s["details"] or "{}")
+    except ValueError:
+        det = {}
+    rows = _season_progress(con, m["user_id"], m["show_id"])
+    avg = s["avg_runtime"] or 0
+    pick = [r for r in rows if r["season"] == m["season"]] if m["kind"] == "season" else rows
+    eps = sum(r["seen"] for r in pick)
+    mins = sum(r["minutes"] or 0 for r in pick) or eps * avg
+    first = min([r["first_w"] for r in pick if r["first_w"]], default=None)
+    last = max([r["last_w"] for r in pick if r["last_w"]], default=None)
+    days = None
+    if first and last:
+        days = (datetime.fromisoformat(last[:19]) - datetime.fromisoformat(first[:19])).days
+    year = datetime.now().year
+    nth = con.execute("""SELECT COUNT(*) c FROM milestones WHERE user_id=? AND kind=?
+        AND created_at>=?""", (m["user_id"], m["kind"], f"{year}-01-01")).fetchone()["c"]
+    name = (det.get("season_names") or {}).get(str(m["season"])) or f"Season {m['season']}"
+    return {"id": m["id"], "kind": m["kind"], "season": m["season"],
+            "season_name": name if m["kind"] == "season" else None,
+            "episodes": eps, "minutes": mins, "days": days,
+            "seasons": len(pick) if m["kind"] == "show" else 1,
+            "first_watched": first, "last_watched": last, "nth_this_year": nth, "year": year,
+            "show": {"id": s["id"], "title": s["title"], "poster": s["poster"],
+                     "backdrop": s["backdrop"], "year": s["year"], "status": s["status"]}}
+
+
+def pending_celebrations(con, uid, ids=None, limit=3):
+    q = """SELECT * FROM milestones WHERE user_id=? AND seen_at IS NULL
+           ORDER BY created_at, id LIMIT ?"""
+    args = (uid, limit)
+    if ids:
+        marks = ",".join("?" * len(ids))
+        q = f"SELECT * FROM milestones WHERE user_id=? AND id IN ({marks}) ORDER BY id"
+        args = (uid, *ids)
+    return [p for p in (_milestone_payload(con, m) for m in con.execute(q, args)) if p]
+
+
+@app.get("/api/celebrations")
+def celebrations(user=Depends(current_user)):
+    """What's waiting to be celebrated. Also re-checks anything watched in the last
+    week, so a completion that arrived by some path that didn't record a milestone
+    (an import, a direct DB fix) still gets its moment."""
+    uid = user["id"]
+    with db() as con:
+        recent = con.execute("""SELECT DISTINCT show_id FROM watches
+            WHERE user_id=? AND season>0 AND watched_at>=?""",
+            (uid, (datetime.now() - timedelta(days=7)).isoformat())).fetchall()
+        for r in recent:
+            record_milestones(con, uid, r["show_id"])
+        return {"celebrations": pending_celebrations(con, uid)}
+
+
+@app.post("/api/celebrations/seen")
+async def celebrations_seen(request: Request, user=Depends(current_user)):
+    body = await request.json() if await request.body() else {}
+    ids = [int(i) for i in (body.get("ids") or [])]
+    now = datetime.now().isoformat()
+    with db() as con:
+        if ids:
+            con.execute(f"""UPDATE milestones SET seen_at=? WHERE user_id=? AND seen_at IS NULL
+                AND id IN ({",".join("?" * len(ids))})""", (now, user["id"], *ids))
+        else:                       # "clear the queue" — never leave a stuck celebration
+            con.execute("UPDATE milestones SET seen_at=? WHERE user_id=? AND seen_at IS NULL",
+                        (now, user["id"]))
+    return {"ok": True}
+
+
 @app.post("/api/show/{show_id}/episodes/custom")
 async def add_custom_episodes(show_id: int, request: Request, user=Depends(admin_user)):
     """Add placeholder episodes TMDB doesn't have. If TMDB later adds the same
@@ -2188,10 +2331,14 @@ async def mark_episode(show_id: int, request: Request, user=Depends(current_user
                     VALUES(?,?,?,?,?)""", (uid, show_id, season, number, wa))
                 con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
                             (uid, show_id, now))
-            return {"ok": True, "show": show_summary(con, uid, show_id)}
+            made = record_milestones(con, uid, show_id)
+            return {"ok": True, "show": show_summary(con, uid, show_id),
+                    "celebrate": pending_celebrations(con, uid, made) if made else []}
         if body.get("unwatch"):
             con.execute("DELETE FROM watches WHERE user_id=? AND show_id=? AND season=? AND number=?",
                         (uid, show_id, season, number))
+            clear_milestones(con, uid, show_id, season)
+            return {"ok": True, "show": show_summary(con, uid, show_id)}
         elif body.get("previous"):
             eps = con.execute("""SELECT season, number FROM episodes WHERE show_id=? AND season>0
                 AND (season<? OR (season=? AND number<=?)) AND air_date IS NOT NULL AND air_date<=?""",
@@ -2203,7 +2350,9 @@ async def mark_episode(show_id: int, request: Request, user=Depends(current_user
                 VALUES(?,?,?,?,?)""", (uid, show_id, season, number, now))
         con.execute("""INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)""",
                     (uid, show_id, now))
-        return {"ok": True, "show": show_summary(con, uid, show_id)}
+        made = record_milestones(con, uid, show_id)
+        return {"ok": True, "show": show_summary(con, uid, show_id),
+                "celebrate": pending_celebrations(con, uid, made) if made else []}
 
 
 @app.post("/api/show/{show_id}/season/{season}/watch")
@@ -2214,12 +2363,15 @@ async def mark_season(show_id: int, season: int, request: Request, user=Depends(
         if body.get("unwatch"):
             con.execute("DELETE FROM watches WHERE user_id=? AND show_id=? AND season=?",
                         (uid, show_id, season))
-        else:
-            eps = con.execute("""SELECT number FROM episodes WHERE show_id=? AND season=?
-                AND air_date IS NOT NULL AND air_date<=?""", (show_id, season, today())).fetchall()
-            con.executemany("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
-                VALUES(?,?,?,?,?)""", [(uid, show_id, season, e["number"], now) for e in eps])
-        return {"ok": True, "show": show_summary(con, uid, show_id)}
+            clear_milestones(con, uid, show_id, season)
+            return {"ok": True, "show": show_summary(con, uid, show_id)}
+        eps = con.execute("""SELECT number FROM episodes WHERE show_id=? AND season=?
+            AND air_date IS NOT NULL AND air_date<=?""", (show_id, season, today())).fetchall()
+        con.executemany("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
+            VALUES(?,?,?,?,?)""", [(uid, show_id, season, e["number"], now) for e in eps])
+        made = record_milestones(con, uid, show_id)
+        return {"ok": True, "show": show_summary(con, uid, show_id),
+                "celebrate": pending_celebrations(con, uid, made) if made else []}
 
 
 @app.post("/api/show/{show_id}/follow")
@@ -2229,6 +2381,7 @@ async def follow(show_id: int, request: Request, user=Depends(current_user)):
         if body.get("unfollow"):
             con.execute("DELETE FROM follows WHERE user_id=? AND show_id=?", (user["id"], show_id))
             con.execute("DELETE FROM watches WHERE user_id=? AND show_id=?", (user["id"], show_id))
+            clear_milestones(con, user["id"], show_id)
         elif "archived" in body:
             con.execute("UPDATE follows SET archived=? WHERE user_id=? AND show_id=?",
                         (1 if body["archived"] else 0, user["id"], show_id))
@@ -4408,6 +4561,10 @@ def plex_poll_once():
                     new_watches.append((uid, "episode", tid, s, n))
         if new_watches:
             notify_auto_tracked(con, new_watches)
+            # Plex can finish a season for you while the app is closed — bank the
+            # milestone now, the app celebrates it next time it's opened
+            for uid, tid in {(w[0], w[2]) for w in new_watches if w[1] == "episode" and w[2]}:
+                record_milestones(con, uid, tid)
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('plex_history_cursor',?)",
                     (str(newest),))
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('plex_last_poll',?)",
@@ -4524,6 +4681,7 @@ async def tautulli(request: Request):
                         (uid, tmdb_id, now))
             con.execute("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
                 VALUES(?,?,?,?,?)""", (uid, tmdb_id, season, number, now))
+            record_milestones(con, uid, tmdb_id)
             return {"ok": True, "marked": f"s{season}e{number} of {tmdb_id}"}
     return {"ok": False, "reason": f"unhandled media_type {mtype}"}
 
@@ -4785,6 +4943,19 @@ async def spa_fallback(request: Request, exc):
     return FileResponse(os.path.join(STATIC, "index.html"))
 
 
+def seed_milestones(con):
+    """Everything already finished when this feature shipped is recorded as *seen* —
+    years of history must not turn into a confetti storm on first launch. Runs once."""
+    if setting(con, "milestones_seeded"):
+        return
+    pairs = con.execute("""SELECT DISTINCT user_id, show_id FROM watches WHERE season>0""").fetchall()
+    for p in pairs:
+        record_milestones(con, p["user_id"], p["show_id"], seen=True)
+    con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('milestones_seeded',?)",
+                (datetime.now().isoformat(),))
+    log.info("seeded milestones for %d user/show pairs", len(pairs))
+
+
 @app.on_event("startup")
 def startup():
     with db() as con:
@@ -4823,6 +4994,7 @@ def startup():
                 pass
         for u in con.execute("SELECT id FROM users").fetchall():
             ensure_default_list(con, u["id"])
+        seed_milestones(con)
     os.makedirs(os.path.join(DATA, "avatars"), exist_ok=True)
     os.makedirs(os.path.join(DATA, "banners"), exist_ok=True)
     ensure_vapid()
