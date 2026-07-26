@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260725b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260726a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -248,6 +248,44 @@ function sheet(innerHTML, { cls = "" } = {}) {
   return { el, close };
 }
 
+/* Which titles already sit on one of your lists — one small fetch, reused by every
+   tile and detail page so "is this on a list?" is answerable at a glance. */
+let LISTSET = null;
+async function ensureListSet() {
+  if (LISTSET) return LISTSET;
+  try { LISTSET = new Map(Object.entries((await api("/lists/members")).members)); }
+  catch { LISTSET = new Map(); }
+  return LISTSET;
+}
+function listCount(type, id) { return (LISTSET && LISTSET.get(`${type}:${id}`)) || 0; }
+function listMark(type, id) {
+  const n = listCount(type, id);
+  return n ? `<span class="listmark" title="On ${n} of your list${n > 1 ? "s" : ""}">${
+    I.bookmarkfill}${n > 1 ? `<i>${n}</i>` : ""}</span>` : "";
+}
+function paintListMarks(root = document) {
+  $$("[data-listmark]", root).forEach(el => {
+    const [type, id] = el.dataset.listmark.split(":");
+    el.innerHTML = listMark(type, id);
+  });
+  $$("[data-listbtn]", root).forEach(paintListBtn);
+}
+// after any list edit: refetch the set, then repaint the marks already on screen
+async function refreshListSet() {
+  LISTSET = null;
+  await ensureListSet();
+  paintListMarks();
+}
+function paintListBtn(btn) {
+  const [type, id] = btn.dataset.listbtn.split(":");
+  const n = listCount(type, id);
+  btn.classList.toggle("on", !!n);
+  const lbl = $("span", btn);
+  if (lbl) lbl.textContent = n ? (n > 1 ? `In ${n} lists` : "In a list") : "List";
+  const ic = btn.querySelector("svg");
+  if (ic) ic.outerHTML = n ? I.bookmarkfill : I.listadd;
+}
+
 async function addToListMenu(itemType, itemId, title) {
   const { lists } = await api(`/item/${itemType}/${itemId}/lists`);
   const render = ls => ls.map(l => `
@@ -259,7 +297,7 @@ async function addToListMenu(itemType, itemId, title) {
     <div id="listopts">${render(lists)}</div>
     <div class="newlist"><input id="nl" placeholder="New list name…" maxlength="60">
       <button class="btn" id="nladd">${I.plus}</button></div>
-    <button class="btn ghost" data-v="done">Done</button>`, { cls: "listsheet" });
+    <button class="btn pri" data-v="done">${I.check} Done</button>`, { cls: "listsheet" });
   const refresh = async () => {
     const { lists } = await api(`/item/${itemType}/${itemId}/lists`);
     $("#listopts", s.el).innerHTML = render(lists);
@@ -273,6 +311,7 @@ async function addToListMenu(itemType, itemId, title) {
       if (!has) sparks(opt);
       delete CACHE["/lists"];
       await refresh();
+      await refreshListSet();
     }
   });
   $("#nladd", s.el).onclick = async () => {
@@ -283,6 +322,7 @@ async function addToListMenu(itemType, itemId, title) {
     $("#nl", s.el).value = "";
     delete CACHE["/lists"];
     await refresh();
+    await refreshListSet();
     toast(`Added to ${name}`);
   };
 }
@@ -291,14 +331,31 @@ let SEER = null;   // {enabled, url}
 const OV_ICON = `<svg class="ico ov" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.4" stroke="currentColor" stroke-width="1.9"/><path d="M12 8v5.4M9.4 11.2 12 13.8l2.6-2.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ST_LABEL = { none: "Not on server", pending: "Requested", processing: "Processing", partial: "Partial", available: "On Plex", downloading: "Downloading" };
 
-async function mountRequest(slot, itemType, tmdbId) {
+/* Download progress is live data — while something is actually downloading, keep
+   asking Overseerr so the bar moves instead of sitting where it was when the page
+   loaded. Stops as soon as it finishes, the page changes, or the app is backgrounded. */
+const DL_POLL_MS = 8000;
+let _dlTimer = null;
+function stopReqPolling() { clearTimeout(_dlTimer); _dlTimer = null; }
+
+async function mountRequest(slot, itemType, tmdbId, { poll = true } = {}) {
   if (!slot) return;
   if (SEER === null) { try { SEER = await api("/request/config"); } catch { SEER = { enabled: false }; } }
   if (!SEER.enabled) return;
   let st;
   try { st = await api(`/request/status/${itemType}/${tmdbId}`); } catch { return; }
+  if (!slot.isConnected) return;             // navigated away mid-flight
   paintReq(slot, itemType, tmdbId, st);
   if (itemType === "show") paintSeasonStates(st.seasons || []);
+  if (!poll) return;
+  stopReqPolling();
+  const busy = !!st.download || (st.seasons || []).some(x => x.status === "downloading")
+    || ["pending", "processing"].includes(st.status);
+  if (busy) _dlTimer = setTimeout(() => {
+    if (!slot.isConnected) return stopReqPolling();
+    if (document.hidden) { _dlTimer = setTimeout(() => mountRequest(slot, itemType, tmdbId), DL_POLL_MS); return; }
+    mountRequest(slot, itemType, tmdbId);
+  }, DL_POLL_MS);
 }
 // per-season availability/request badge inside each season accordion header
 function paintSeasonStates(seasons) {
@@ -595,7 +652,10 @@ function parseHash() {
   const p = seg();
   if (!ME) return routes.login();
   $$(".sheetwrap").forEach(el => el.remove());   // navigating away dismisses any open sheet
+  $$(".lightbox").forEach(el => el.remove());
+  stopReqPolling();
   window.scrollTo(0, 0);
+  navDepth();
   if (p[0] === "show" && p[2] === "e") routes.episode(p[1], p[3], p[4]);
   else if (p[0] === "show") routes.show(p[1]);
   else if (p[0] === "movie") routes.movie(p[1]);
@@ -615,6 +675,120 @@ function parseHash() {
     a.classList.toggle("on", a.dataset.r === active));
 }
 window.addEventListener("hashchange", parseHash);
+
+/* ---------- artwork gallery ----------
+   Tap the cover on a show or film and you get every poster and backdrop TMDB has,
+   full screen, swipeable. */
+async function openGallery(itemType, id, title) {
+  const d = await api(`/images/${itemType}/${id}`).catch(() => null);
+  if (!d || !d.count) { toast("No other artwork for this one"); return; }
+  lightbox([...d.posters, ...d.backdrops], 0, title);
+}
+function lightbox(imgs, start, title) {
+  let i = Math.max(0, Math.min(start, imgs.length - 1));
+  const el = document.createElement("div");
+  el.className = "lightbox";
+  el.innerHTML = `
+    <div class="lb-top">
+      <span class="lb-title">${esc(title || "")}</span>
+      <span class="lb-count"></span>
+      <button class="lb-x" aria-label="Close">${I.x}</button>
+    </div>
+    <button class="lb-nav prev" aria-label="Previous">${I.chevS}</button>
+    <div class="lb-stage"><img alt=""></div>
+    <button class="lb-nav next" aria-label="Next">${I.chevS}</button>
+    <div class="lb-strip">${imgs.map((p, n) =>
+      `<button class="lb-th" data-i="${n}"><img loading="lazy" src="${p.thumb}" alt=""></button>`).join("")}</div>`;
+  document.body.appendChild(el);
+  document.body.style.overflow = "hidden";
+  const stage = $("img", $(".lb-stage", el));
+  const strip = $(".lb-strip", el);
+  const show = n => {
+    i = (n + imgs.length) % imgs.length;
+    stage.classList.remove("in");
+    stage.src = imgs[i].full;
+    stage.classList.toggle("wide", imgs[i].kind === "backdrop");
+    requestAnimationFrame(() => stage.classList.add("in"));
+    $(".lb-count", el).textContent = `${i + 1} / ${imgs.length}`;
+    $$(".lb-th", el).forEach(b => b.classList.toggle("on", +b.dataset.i === i));
+    const th = $(`.lb-th[data-i="${i}"]`, el);
+    if (th) strip.scrollTo({ left: th.offsetLeft - strip.clientWidth / 2 + th.clientWidth / 2,
+                             behavior: "smooth" });
+    [1, -1].forEach(d => { const p = imgs[(i + d + imgs.length) % imgs.length];
+      if (p) { const pre = new Image(); pre.src = p.full; } });   // neighbours ready
+  };
+  const close = () => {
+    el.classList.remove("show");
+    document.body.style.overflow = "";
+    removeEventListener("keydown", onKey);
+    setTimeout(() => el.remove(), 200);
+  };
+  const onKey = e => {
+    if (e.key === "Escape") close();
+    else if (e.key === "ArrowRight") show(i + 1);
+    else if (e.key === "ArrowLeft") show(i - 1);
+  };
+  addEventListener("keydown", onKey);
+  el.onclick = e => {
+    if (e.target.closest(".lb-x")) return close();
+    const nav = e.target.closest(".lb-nav");
+    if (nav) return show(i + (nav.classList.contains("next") ? 1 : -1));
+    const th = e.target.closest(".lb-th");
+    if (th) return show(+th.dataset.i);
+    if (!e.target.closest(".lb-stage img") && !e.target.closest(".lb-strip")) close();
+  };
+  let x0 = null;
+  el.addEventListener("touchstart", e => { x0 = e.touches[0].clientX; }, { passive: true });
+  el.addEventListener("touchend", e => {
+    if (x0 == null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    if (Math.abs(dx) > 45) show(i + (dx < 0 ? 1 : -1));
+    x0 = null;
+  }, { passive: true });
+  show(i);
+  requestAnimationFrame(() => el.classList.add("show"));
+  hapticTick();
+}
+
+/* ---------- back navigation ----------
+   Hash routing gives every screen a history entry, so the browser already knows the
+   way back — it just isn't reachable on a phone in standalone PWA mode (no chrome, no
+   swipe on some launchers). Each screen stamps its depth into history.state, so any
+   page can tell whether there IS a previous screen in this session, and name it. */
+let NAV_DEPTH = 0, NAV_FIRST = true;
+const NAV_TRAIL = [];       // NAV_TRAIL[depth] = {hash, label}
+
+function navDepth() {
+  const st = history.state;
+  if (st && typeof st.mqd === "number") NAV_DEPTH = st.mqd;
+  else {
+    NAV_DEPTH = NAV_FIRST ? 0 : NAV_DEPTH + 1;
+    try { history.replaceState({ ...(st || {}), mqd: NAV_DEPTH }, ""); } catch { /* ignore */ }
+  }
+  NAV_FIRST = false;
+}
+// routes call this once they know what they are, so the screen below can be named
+function navHere(label) {
+  NAV_TRAIL[NAV_DEPTH] = { hash: location.hash || "#/", label };
+  NAV_TRAIL.length = NAV_DEPTH + 1;      // forward entries are stale once you branch
+}
+const navPrev = () => (NAV_DEPTH > 0 ? NAV_TRAIL[NAV_DEPTH - 1] : null);
+/* A crumb that means "back where I came from": it follows real history when there is
+   any, and falls back to the section's home when the page was opened cold (a shared
+   link, a notification, a reload). */
+function crumb(fallbackHref, fallbackLabel) {
+  const prev = navPrev();
+  const label = (prev && prev.label) || fallbackLabel;
+  return `<a class="crumb" href="${prev ? prev.hash : fallbackHref}"
+    data-back="${fallbackHref}">${I.chevS} ${esc(label)}</a>`;
+}
+document.addEventListener("click", e => {
+  const a = e.target.closest("a.crumb[data-back]");
+  if (!a) return;
+  e.preventDefault();
+  if (NAV_DEPTH > 0) history.back();
+  else location.hash = a.dataset.back;
+});
 
 /* ---------- login / register ---------- */
 let SIGNUP_OPEN = null;
@@ -776,6 +950,7 @@ function calCard(e) {
 }
 
 function renderHome(d, animate = true) {
+  navHere("Watch Next");
   const rv = animate ? "reveal" : "";
   const railOf = (title, arr, render, more) => arr && arr.length ? `
     ${railHead(title, more)}<div class="hrail ${rv}">${arr.map(render).join("")}</div>` : "";
@@ -891,6 +1066,7 @@ routes.home = () => {
 
 /* ---------- upcoming ---------- */
 function renderUpcoming(d, animate = true) {
+  navHere("Upcoming");
   const items = [
     ...d.episodes.map(e => ({ date: e.air_date, html: `
       <a class="up-row" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
@@ -1158,10 +1334,14 @@ routes.show = async id => {
     info.n_episodes && `<span class="chip">${info.n_seasons} season${info.n_seasons > 1 ? "s" : ""} · ${info.n_episodes} eps</span>`,
     info.origin && `<span class="chip">${esc(info.origin)}</span>`,
   ].filter(Boolean).join("");
+  navHere(s.title);
   view.innerHTML = `
     <div class="backdrop">${s.backdrop ? `<div class="bg" style="background-image:url('${s.backdrop}')"></div>` : ""}
       <div class="hero">
-        <img class="poster" src="${POSTER(s.poster)}" alt="">
+        <div class="page-head hero-crumb">${crumb("#/", "Watch Next")}</div>
+        <button class="poster-btn" id="artbtn" title="See the artwork">
+          <img class="poster" src="${POSTER(s.poster)}" alt="">
+          <span class="art-hint">${I.image} Artwork</span></button>
         <div class="hbody"><h1>${esc(s.title)}</h1>
           ${info.tagline ? `<div class="tagline">${esc(info.tagline)}</div>` : ""}
           <div class="chips">${chips}</div>
@@ -1181,11 +1361,11 @@ routes.show = async id => {
             <div class="act-main">
               ${s.followed ? `<button class="btn pri" id="arch">${s.archived ? "Resume" : "Watching"}</button>`
                 : `<button class="btn pri" id="follow">${I.plus} Follow</button>`}
-              <span id="reqslot"></span>
+              <span id="reqslot" data-req="show:${id}"></span>
             </div>
             <div class="act-row">
               <button class="chip-btn fav-chip" id="favchip" aria-pressed="false">${I.star}<span id="favchiplbl">Favorite</span></button>
-              <button class="chip-btn" id="addlist">${I.listadd}<span>List</span></button>
+              <button class="chip-btn" id="addlist" data-listbtn="show:${id}">${I.listadd}<span>List</span></button>
               <button class="chip-btn" id="shareshow">${I.share}<span>Share</span></button>
               ${ME.is_admin ? `<button class="chip-btn" id="epedit">${I.edit}<span>Episodes</span></button>` : ""}
               ${info.imdb_id ? `<a class="chip-btn imdb" href="https://www.imdb.com/title/${info.imdb_id}/" target="_blank" rel="noopener"><b>IMDb</b></a>` : ""}
@@ -1303,7 +1483,10 @@ routes.show = async id => {
   mountRequest($("#reqslot"), "show", +id);
   if ($("#shareshow")) $("#shareshow").onclick = () => share(s.title, `show/${id}`);
   wireFavChip("show", +id);
-  if ($("#addlist")) $("#addlist").onclick = () => addToListMenu("show", +id, s.title);
+  if ($("#addlist")) {
+    $("#addlist").onclick = () => addToListMenu("show", +id, s.title);
+    ensureListSet().then(() => { const b = $("#addlist"); if (b) paintListBtn(b); });
+  }
 
   const seasonsByNum = Object.fromEntries(s.seasons.map(se => [se.season, se]));
   const epIndex = new Map();
@@ -1422,6 +1605,7 @@ routes.show = async id => {
     const r = await episodeEditor(id, maxSeason);
     if (r) { delete CACHE["/dashboard"]; routes.show(id); }
   };
+  if ($("#artbtn")) $("#artbtn").onclick = () => openGallery("show", id, s.title);
   if ($("#follow")) $("#follow").onclick = async () => { await api(`/show/${id}/follow`, { body: {} }); delete CACHE["/dashboard"]; routes.show(id); };
   if ($("#arch")) $("#arch").onclick = async () => {
     await api(`/show/${id}/follow`, { body: { archived: !s.archived } }); delete CACHE["/dashboard"]; routes.show(id); };
@@ -1516,6 +1700,7 @@ routes.episode = async (id, season, number) => {
     <div class="sk line-sk" style="max-width:280px;height:24px"></div>`);
   const e = await api(`/show/${id}/episode/${season}/${number}`);
   stop();
+  navHere(`${sxe(e.season, e.number)} · ${e.show_title}`);
   const dur = e.runtime ? `${e.runtime} min · ` : "";
   const x = e.extra || {};
   view.innerHTML = `
@@ -1524,7 +1709,7 @@ routes.episode = async (id, season, number) => {
       return img ? `<img class="still" src="${img}" alt="">` : `<div class="nostill"></div>`;
     })()}</div>
     <div class="epbody reveal">
-      <a class="crumb" href="#/show/${id}">${I.chevS} ${esc(e.show_title)}</a>
+      ${crumb(`#/show/${id}`, e.show_title)}
       <h1>${esc(e.title || "Episode " + e.number)}</h1>
       <div class="epmeta"><b>${sxe(e.season, e.number)}</b> · ${dur}${e.air_date ? fmtDate(e.air_date) : "TBA"}
         ${(() => { const c = ratingChip({ vote: x.vote || e.rating,
@@ -1577,10 +1762,12 @@ routes.episode = async (id, season, number) => {
 
 /* ---------- movies ---------- */
 function renderMovies(d, tab, animate = true) {
+  navHere("Movies");
   const grid = arr => arr.length ? `<div class="pgrid ${animate ? "reveal" : ""}">${arr.map(m => `
     <div class="pcard" data-id="${m.id}">
       <div class="pshot"><a href="#/movie/${m.id}"><img class="poster" loading="lazy" src="${POSTER(m.poster)}" alt=""></a>
         ${m.rating ? `<span class="badge">${m.rating}/10</span>` : ""}
+        <span data-listmark="movie:${m.id}">${listMark("movie", m.id)}</span>
         <div class="act">
           ${tab === "watchlist" ? `<button title="Mark watched" data-a="watched">${I.check}</button>` : ""}
           <button title="Remove" data-a="none">${I.x}</button>
@@ -1594,6 +1781,7 @@ function renderMovies(d, tab, animate = true) {
       <button data-t="watchlist" class="${tab === "watchlist" ? "on" : ""}">Watchlist · ${d.watchlist.length}</button>
     </div>${grid(d[tab])}`;
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.movies(b.dataset.t));
+  ensureListSet().then(() => paintListMarks(view));
   $$(".pcard .act button", view).forEach(b => b.onclick = async () => {
     const card = b.closest(".pcard");
     const idx = d[tab].findIndex(m => m.id === +card.dataset.id);
@@ -1714,6 +1902,7 @@ function patchShelf(kind, id, fn) {
 /* ---------- full-screen detail page for a book / manga (shelf item or search hit) --- */
 function renderRDetail(d) {
   const { kind, item: it } = d;
+  navHere(it.title);
   const st = d.state || {};
   const total = kind === "book" ? it.pages : it.chapters;
   const unit = kind === "book" ? "pages" : "chapters";
@@ -1740,7 +1929,7 @@ function renderRDetail(d) {
       <div class="rdt-head">
         <img class="rdt-cover" src="${POSTER(it.cover)}" alt="">
         <div class="rdt-meta reveal">
-          <a class="crumb" href="#/reading">${I.chevS} ${kind === "book" ? "Books" : "Manga"}</a>
+          ${crumb("#/reading", kind === "book" ? "Books" : "Manga")}
           <h1>${esc(it.title)}</h1>
           <div class="rdt-by">${kind === "book" ? authorLinks(it.author)
             : `<span class="o-chip">${esc(it.origin || "manga")}</span> ${esc(it.status || "")}`}${it.year ? ` · ${it.year}` : ""}</div>
@@ -2010,6 +2199,7 @@ async function rdFixMatch(it) {
 /* ---- everything by an author / everything in a series ---- */
 function renderBrowse(d) {
   const isA = d.by === "author";
+  navHere(d.name);
   const h = d.header || {};
   const shelf = d.shelf || [], more = d.more || [];
   const meta = [shelf.length ? `${shelf.length} on your shelf` : "",
@@ -2026,7 +2216,7 @@ function renderBrowse(d) {
     <div class="y">${isA ? esc(x.series || "") : esc(x.author || "")}${
       x.year ? `${isA && !x.series ? "" : " · "}${x.year}` : ""}</div>
   </div>`;
-  view.innerHTML = `<a class="crumb" href="#/reading">${I.chevS} Books</a>
+  view.innerHTML = `${crumb("#/reading", "Books")}
     <div class="brs-hero reveal">
       ${isA ? `<div class="per-face">${h.image ? `<img src="${h.image}" alt="">` : personGlyph()}</div>`
         : `<div class="brs-glyph">${SERIES_ICO}</div>`}
@@ -2340,6 +2530,7 @@ function readingTabs(tab, f) {
     `<button data-t="${t}" class="${tab === t ? "on" : ""}">${l}</button>`).join("")}</div>` : "";
 }
 function renderReading(d, tab, animate = true) {
+  navHere(tab === "books" ? "Books" : "Manga");
   const f = (ME && ME.features) || {};
   const both = f.books && f.manga;
   if (!f[tab]) tab = f.books ? "books" : "manga";
@@ -2529,6 +2720,7 @@ function renderReading(d, tab, animate = true) {
   });
 }
 function renderReadingStats(d, animate = true) {
+  navHere("Reading");
   const f = (ME && ME.features) || {};
   const rv = animate ? "reveal" : "";
   const tile = (cls, hue, v, l, sub) =>
@@ -2626,6 +2818,7 @@ function listCard(l) {
   </a>`;
 }
 function renderLists(d) {
+  navHere("Lists");
   const shared = d.shared || [];
   view.innerHTML = `<div class="page-head"><h1>Lists</h1>
     <button class="btn pri" id="newlist">${I.plus} New list</button></div>
@@ -2790,9 +2983,10 @@ routes.list = async (id, quiet) => {
   if (!quiet) view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
   const l = await api(`/list/${id}`);
   const owner = l.is_owner, canEdit = l.can_edit ?? owner, vis = l.visibility || "private";
-  const crumb = owner || vis === "collab"
-    ? `<a class="crumb" href="#/lists">${I.chevS} Lists</a>`
-    : `<a class="crumb" href="#/u/${encodeURIComponent(l.owner.username)}">${I.chevS} ${esc(l.owner.display_name)}</a>`;
+  navHere(l.name);
+  const crumbHTML = owner || vis === "collab"
+    ? crumb("#/lists", "Lists")
+    : crumb(`#/u/${encodeURIComponent(l.owner.username)}`, l.owner.display_name);
   const VIS = [["private", "Private", I.lock], ["public", "Public", I.globe], ["collab", "Collab", I.users]];
   const visNote = { private: "Only you can see this list.",
     public: "Household members can see this on your profile.",
@@ -2832,7 +3026,7 @@ routes.list = async (id, quiet) => {
   };
   const gridHTML = () => [...l.items].sort(listSortFn()).map(itemCard).join("");
   view.innerHTML = `<div class="page-head">
-      ${crumb}
+      ${crumbHTML}
       <div class="ph-actions">
         ${canEdit ? `<button class="iconbtn" id="addtitles" title="Add titles">${I.plus}</button>` : ""}
         <button class="iconbtn" id="sharelist" title="Share">${I.share}</button>
@@ -2949,10 +3143,14 @@ routes.movie = async id => {
     i.runtime && `<span class="chip">${Math.floor(i.runtime / 60)}h ${i.runtime % 60}m</span>`,
     (i.genres || []).length && `<span class="chip">${esc(i.genres.slice(0, 2).join(" · "))}</span>`,
   ].filter(Boolean).join("");
+  navHere(m.title);
   view.innerHTML = `
     <div class="backdrop">${i.backdrop ? `<div class="bg" style="background-image:url('${i.backdrop}')"></div>` : ""}
       <div class="hero">
-        <img class="poster" src="${POSTER(m.poster)}" alt="">
+        <div class="page-head hero-crumb">${crumb("#/movies", "Movies")}</div>
+        <button class="poster-btn" id="artbtn" title="See the artwork">
+          <img class="poster" src="${POSTER(m.poster)}" alt="">
+          <span class="art-hint">${I.image} Artwork</span></button>
         <div class="hbody"><h1>${esc(m.title)}</h1>
           ${i.tagline ? `<div class="tagline">${esc(i.tagline)}</div>` : ""}
           <div class="chips">${chips}</div>
@@ -2960,11 +3158,11 @@ routes.movie = async id => {
           <div class="actions">
             <div class="act-main">
               <button class="btn ${m.state === "watched" ? "" : "pri"}" id="mwatch">${I.check} ${m.state === "watched" ? "Watched" : "Mark watched"}</button>
-              <span id="reqslot"></span>
+              <span id="reqslot" data-req="movie:${id}"></span>
             </div>
             <div class="act-row">
               <button class="chip-btn fav-chip" id="favchip" aria-pressed="false">${I.star}<span id="favchiplbl">Favorite</span></button>
-              <button class="chip-btn" id="maddlist">${I.listadd}<span>List</span></button>
+              <button class="chip-btn" id="maddlist" data-listbtn="movie:${id}">${I.listadd}<span>List</span></button>
               <button class="chip-btn" id="mshare">${I.share}<span>Share</span></button>
               ${i.imdb_id ? `<a class="chip-btn imdb" href="https://www.imdb.com/title/${i.imdb_id}/" target="_blank" rel="noopener"><b>IMDb</b></a>` : ""}
             </div>
@@ -2979,6 +3177,7 @@ routes.movie = async id => {
     <div id="movie-reviews"></div>
     </div>`;
   if ($("#ov")) $("#ov").onclick = () => $("#ov").classList.toggle("clamp");
+  if ($("#artbtn")) $("#artbtn").onclick = () => openGallery("movie", id, m.title);
   $("#mwatch").onclick = async () => {
     const to = m.state === "watched" ? "none" : "watched";
     m.state = to === "watched" ? "watched" : null;
@@ -2990,6 +3189,7 @@ routes.movie = async id => {
     api(`/movie/${id}/state`, { body: { state: to } }).catch(() => {});
   };
   $("#maddlist").onclick = () => addToListMenu("movie", +id, m.title);
+  ensureListSet().then(() => { const b = $("#maddlist"); if (b) paintListBtn(b); });
   $("#mshare").onclick = () => share(m.title, `movie/${id}`);
   wireFavChip("movie", +id);
   mountRequest($("#reqslot"), "movie", +id);
@@ -3002,6 +3202,7 @@ routes.person = async id => {
   view.innerHTML = `<div class="perhero"><div class="sk" style="width:120px;height:120px;border-radius:50%"></div>
     <div style="flex:1"><div class="sk line-sk" style="max-width:220px;height:26px"></div></div></div>${skRows(2)}`;
   const p = await api(`/person/${id}`);
+  navHere(p.name);
   const age = (b, d) => {
     if (!b) return "";
     const end = d ? new Date(d) : new Date();
@@ -3017,6 +3218,7 @@ routes.person = async id => {
     p.place && esc(p.place),
   ].filter(Boolean).join(" · ");
   view.innerHTML = `
+    <div class="page-head">${crumb("#/search", "Search")}</div>
     <div class="perhero reveal">
       <div class="per-face">${p.img ? `<img src="${p.img}" alt="">` : personGlyph()}</div>
       <div class="per-body"><h1>${esc(p.name)}</h1>
@@ -3263,7 +3465,7 @@ routes.profile = async (username) => {
     const statsPath = me ? "/stats" : `/profile/${encodeURIComponent(username)}/stats`;
     const advPath = me ? "/stats/advanced" : `/profile/${encodeURIComponent(username)}/stats/advanced`;
     view.innerHTML = `
-      ${me ? "" : `<div class="page-head"><a class="crumb" href="#/profile">${backIcon} Your profile</a></div>`}
+      ${me ? "" : `<div class="page-head">${crumb("#/profile", "Your profile")}</div>`}
       <div class="prof-hero reveal${p.banner ? " has-banner" : ""}">
         <div class="prof-banner" id="banner">${bannerLayers(p.banner)}</div>
         ${me ? `<a class="prof-gear" href="#/settings" title="Settings & Plex" aria-label="Settings">${gearIcon()}</a>
@@ -3483,7 +3685,8 @@ async function refreshBell() {
   el.innerHTML = `${I.bell}${n ? `<span class="ndot">${n > 9 ? "9+" : n}</span>` : ""}`;
 }
 routes.inbox = async () => {
-  view.innerHTML = `<div class="page-head"><a class="crumb" href="#/">${I.chevS} Home</a></div>
+  navHere("Notifications");
+  view.innerHTML = `<div class="page-head">${crumb("#/", "Watch Next")}</div>
     <div class="section"><h2>Notifications</h2><div class="rule"></div><span class="cnt" id="ncnt"></span></div>
     <div id="nlist">${skRows(3)}</div>`;
   let data;
@@ -3570,6 +3773,7 @@ function posterTile(r) {
       <a href="#/${r.type}/${r.id}"><img class="poster" loading="lazy" src="${POSTER(r.poster)}" alt=""></a>
       <span class="badge">${r.type === "show" ? "TV" : "FILM"}</span>
       ${r.vote ? `<span class="votebadge">${I.star} ${r.vote}</span>` : ""}
+      <span data-listmark="${r.type}:${r.id}">${listMark(r.type, r.id)}</span>
       <div class="act">
         ${r.type === "show"
           ? (r.followed ? `<div class="have">${I.check}</div>` : `<button title="Follow" data-a="follow">${I.plus}</button>`)
@@ -3582,6 +3786,7 @@ function posterTile(r) {
   </div>`;
 }
 function wireTiles(root, after) {
+  ensureListSet().then(() => paintListMarks(root));
   $$(".act button", root).forEach(b => b.onclick = async e => {
     e.preventDefault();
     const c = b.closest(".pcard");
@@ -3612,6 +3817,7 @@ function renderDiscover(d) {
 }
 
 routes.search = () => {
+  navHere("Search");
   view.innerHTML = `<h1>Discover</h1>
     <div class="searchbar"><span class="s-ico"><svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m15.4 15.4 5.2 5.2" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg></span>
       <input id="q" placeholder="Search shows & movies…" autocomplete="off"></div>
@@ -3712,6 +3918,7 @@ function historyChunkHTML(items, type, state) {
 }
 
 routes.history = (tab = "tv") => {
+  navHere("History");
   view.innerHTML = `<h1>History</h1>
     <div class="tabs">
       <button data-t="tv" class="${tab === "tv" ? "on" : ""}">Shows</button>
@@ -4152,7 +4359,7 @@ function yrSwitch(years, cur, me, who) {
 function renderRecapLanding(d, me, username, who, yr) {
   const first = me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s";
   if (d.locked) {
-    view.innerHTML = `<div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
+    view.innerHTML = `<div class="page-head">${crumb(`#/${who}`, "Profile")}</div>
       <div class="recap-gate">
         <div class="rg-lock">${I.lock}</div>
         <div class="rg-year">${yr}</div>
@@ -4162,7 +4369,7 @@ function renderRecapLanding(d, me, username, who, yr) {
       </div>`;
     return;
   }
-  view.innerHTML = `<div class="page-head"><a class="crumb" href="#/${who}">${backIcon} Profile</a></div>
+  view.innerHTML = `<div class="page-head">${crumb(`#/${who}`, "Profile")}</div>
     <div class="recap-land">
       <div class="rl-glow"></div>
       <div class="rl-kick">Year in Review</div>
@@ -4313,6 +4520,7 @@ const PLEX_LOGO = `<svg class="plexlogo" viewBox="0 0 24 24" aria-hidden="true">
   <path d="M8.2 3.5h4.6L17.2 12l-4.4 8.5H8.2L12.6 12z" fill="#e5a00d"/></svg>`;
 
 routes.settings = async () => {
+  navHere("Settings");
   const plex = await api("/plex/status").catch(() => ({}));
   const oseer = await api("/overseerr/me").catch(() => ({ enabled: false }));
   const nprefs = (await api("/notifications/prefs").catch(() => ({ prefs: [] }))).prefs;
@@ -4394,7 +4602,7 @@ routes.settings = async () => {
       ${oseer.linked ? `<span class="ov-ok">${I.check}</span>` : ""}
     </div>` : ""}
   </div>`;
-  view.innerHTML = `<div class="page-head"><a class="crumb" href="#/profile">${I.chevS} Profile</a></div>
+  view.innerHTML = `<div class="page-head">${crumb("#/profile", "Profile")}</div>
     <h1>Settings</h1><div class="reveal">
     ${plexPanel}
     ${imdb ? `<div class="panel"><h3><span class="h3-ic imdb-ic">${SRC_LOGO.IMDb}</span> IMDb ratings</h3>
@@ -4728,6 +4936,7 @@ async function boot() {
   setInterval(refreshBell, 60000);
   setTimeout(checkRecapPopup, 1400);   // December: auto-present this year's recap once
   setTimeout(checkCelebrations, 900);  // anything finished while the app was closed
+  ensureListSet();
   setTimeout(() => ["/dashboard", "/upcoming", "/movies", "/lists", "/stats"].forEach(p =>
     api(p).then(d => { CACHE[p] = d; }).catch(() => {})), 600);
 }
@@ -4742,6 +4951,11 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden || !ME) return;
   checkBuild();
   checkCelebrations();   // Plex may have finished a season for you while you were away
+  const slot = $("#reqslot");                // and a download may have moved on
+  if (slot && slot.dataset.req) {
+    const [t, id] = slot.dataset.req.split(":");
+    mountRequest(slot, t, +id);
+  }
 });
 addEventListener("pageshow", e => { if (e.persisted) checkBuild(); });
 boot();

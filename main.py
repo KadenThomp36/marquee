@@ -37,7 +37,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260725b"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260726a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -1246,6 +1246,49 @@ def get_lists(user=Depends(current_user)):
         out = list_cards(con, uid)
         shared = shared_list_cards(con, uid)
     return {"lists": out, "shared": shared}
+
+
+@app.get("/api/lists/members")
+def list_members(user=Depends(current_user)):
+    """Every item that sits in one of my lists (mine + ones shared with me), as
+    "type:id" keys — the app marks those tiles so you can see at a glance what's
+    already on a list without opening each one."""
+    uid = user["id"]
+    with db() as con:
+        rows = con.execute(f"""SELECT li.item_type t, li.item_id i, COUNT(*) n
+            FROM list_items li JOIN lists l ON l.id=li.list_id
+            WHERE l.user_id=? OR (l.visibility='collab' AND {AUDIENCE_SQL})
+            GROUP BY li.item_type, li.item_id""", (uid, uid)).fetchall()
+    return {"members": {f"{r['t']}:{r['i']}": r["n"] for r in rows}}
+
+
+@app.get("/api/images/{item_type}/{tmdb_id}")
+def item_images(item_type: str, tmdb_id: int, user=Depends(current_user)):
+    """Poster + backdrop artwork for the full-screen gallery. English (or
+    language-neutral) art first — a wall of foreign posters isn't what you want when
+    you tap the cover."""
+    kind = "movie" if item_type == "movie" else "tv"
+
+    def fetch():
+        return tmdb(f"/{kind}/{tmdb_id}/images",
+                    include_image_language="en,null") or {}
+    d = _cached_get(f"img:{kind}:{tmdb_id}", fetch) or {}
+
+    def pack(arr, what, thumb_size):
+        out = []
+        for x in arr or []:
+            fp = x.get("file_path")
+            if fp:
+                out.append({"kind": what, "thumb": img(fp, thumb_size),
+                            "full": img(fp, "original"),
+                            "w": x.get("width"), "h": x.get("height"),
+                            "lang": x.get("iso_639_1")})
+        out.sort(key=lambda p: (p["lang"] not in (None, "en"), -(p["w"] or 0)))
+        return out
+    posters = pack(d.get("posters"), "poster", "w342")[:40]
+    backdrops = pack(d.get("backdrops"), "backdrop", "w780")[:40]
+    return {"posters": posters, "backdrops": backdrops,
+            "count": len(posters) + len(backdrops)}
 
 
 @app.get("/api/user/{username}/lists")

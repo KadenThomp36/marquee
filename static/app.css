@@ -1993,3 +1993,68 @@ body.recap-open{overflow:hidden}
 .imdb-stat b{font-size:17px;color:var(--amber-2);font-variant-numeric:tabular-nums;line-height:1.1}
 .imdb-stat span{font-size:11.5px;color:var(--mut)}
 .imdb-row .btn{margin-left:auto}
+
+/* ── back crumb inside a hero ── */
+.hero-crumb{position:absolute;top:0;left:0;z-index:4;margin:0;padding:0}
+.hero{position:relative;padding-top:26px}
+@media(max-width:700px){.hero{padding-top:22px}}
+
+/* ── tappable cover art ──
+   The poster is now a button, so it becomes the grid item the hero lays out (the
+   <img> inside it is no longer a direct child and can't take grid-area itself). */
+.poster-btn{position:relative;display:block;padding:0;border:0;background:none;flex:none;
+  border-radius:14px;overflow:hidden;-webkit-tap-highlight-color:transparent}
+.hero .poster-btn{grid-area:poster;align-self:start;width:136px;box-shadow:var(--shadow)}
+.hero .poster-btn .poster{width:100%;box-shadow:none;border-radius:14px}
+@media(max-width:700px){.hero .poster-btn{width:106px}}
+.poster-btn .poster{transition:transform .25s cubic-bezier(.2,.9,.3,1)}
+.poster-btn .art-hint{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;
+  justify-content:center;gap:5px;padding:7px 6px 6px;font-size:10.5px;font-weight:750;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--ink);
+  background:linear-gradient(transparent,rgba(8,7,5,.88));opacity:0;transition:opacity .2s}
+.poster-btn .art-hint svg{width:13px;height:13px}
+@media(hover:hover){
+  .poster-btn:hover .poster{transform:scale(1.03)}
+  .poster-btn:hover .art-hint{opacity:1}
+}
+.poster-btn:active .poster{transform:scale(.98)}
+
+/* ── full-screen artwork gallery ── */
+.lightbox{position:fixed;inset:0;z-index:130;display:grid;
+  grid-template-rows:auto 1fr auto;background:rgba(6,5,4,.985);backdrop-filter:blur(8px);
+  opacity:0;transition:opacity .2s ease;
+  padding:max(6px,env(safe-area-inset-top)) 0 max(6px,env(safe-area-inset-bottom))}
+.lightbox.show{opacity:1}
+.lb-top{display:flex;align-items:center;gap:12px;padding:8px 14px;grid-row:1}
+.lb-title{font-weight:750;font-size:14px;color:var(--ink);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.lb-count{margin-left:auto;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
+.lb-x{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--ink-2);
+  background:rgba(255,255,255,.06)}
+.lb-x svg{width:17px;height:17px}
+.lb-stage{grid-row:2;display:grid;place-items:center;min-height:0;padding:0 8px}
+.lb-stage img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;
+  border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6);opacity:0;transform:scale(.985);
+  transition:opacity .22s ease,transform .22s ease}
+.lb-stage img.in{opacity:1;transform:none}
+.lb-nav{position:absolute;top:50%;translate:0 -50%;width:44px;height:44px;border-radius:50%;
+  display:grid;place-items:center;color:var(--ink);background:rgba(255,255,255,.07);z-index:2}
+.lb-nav svg{width:20px;height:20px}
+.lb-nav.prev{left:10px;transform:rotate(180deg)}
+.lb-nav.next{right:10px}
+@media(max-width:700px){.lb-nav{display:none}}      /* swipe instead */
+.lb-strip{grid-row:3;display:flex;gap:7px;overflow-x:auto;padding:10px 14px 4px;
+  scrollbar-width:none}
+.lb-strip::-webkit-scrollbar{display:none}
+.lb-th{flex:none;width:46px;height:69px;border-radius:6px;overflow:hidden;opacity:.45;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);transition:opacity .15s,box-shadow .15s}
+.lb-th img{width:100%;height:100%;object-fit:cover}
+.lb-th.on{opacity:1;box-shadow:0 0 0 2px var(--amber)}
+
+/* ── "already on one of your lists" marker ── */
+.listmark{position:absolute;right:6px;bottom:6px;z-index:2;display:inline-flex;align-items:center;
+  gap:3px;padding:3px 6px;border-radius:7px;background:rgba(20,17,13,.85);color:var(--amber-2);
+  backdrop-filter:blur(4px);box-shadow:inset 0 0 0 1px rgba(240,181,68,.3);pointer-events:none}
+.listmark svg{width:11px;height:11px}
+.listmark i{font-style:normal;font-size:10px;font-weight:800;font-variant-numeric:tabular-nums}
+.chip-btn.on{color:var(--amber);border-color:var(--amber-dim);background:var(--amber-soft)}
