@@ -37,7 +37,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260726a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260726b"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -966,6 +966,49 @@ def get_profile_public(username: str, user=Depends(current_user)):
     with db() as con:
         u = resolve_member(con, username)
         return profile_payload(con, u, user["id"])
+
+
+@app.get("/api/watched/{username}/{kind}")
+def watched_grid(username: str, kind: str, limit: int = 24, offset: int = 0,
+                 user=Depends(current_user)):
+    """What someone has actually watched, newest first — shows and films kept apart.
+    Feeds both the profile rails and the full grid behind "Show all"."""
+    if kind not in ("shows", "movies"):
+        raise HTTPException(400, "kind must be shows or movies")
+    limit = max(1, min(limit, 120))
+    with db() as con:
+        u = con.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone() \
+            if username in ("me", "") else resolve_member(con, username)
+        uid = u["id"]
+        if kind == "movies":
+            total = con.execute("""SELECT COUNT(*) c FROM movie_states
+                WHERE user_id=? AND state='watched'""", (uid,)).fetchone()["c"]
+            rows = con.execute("""SELECT m.id, m.title, m.poster, m.year, ms.rating, ms.watched_at
+                FROM movie_states ms JOIN movies m ON m.id=ms.movie_id
+                WHERE ms.user_id=? AND ms.state='watched'
+                ORDER BY COALESCE(ms.watched_at,'') DESC, m.title LIMIT ? OFFSET ?""",
+                (uid, limit, offset)).fetchall()
+            items = [{"type": "movie", "id": r["id"], "title": r["title"], "poster": r["poster"],
+                      "year": r["year"], "rating": r["rating"], "watched_at": r["watched_at"]}
+                     for r in rows]
+        else:
+            total = con.execute("""SELECT COUNT(DISTINCT show_id) c FROM watches
+                WHERE user_id=? AND season>0""", (uid,)).fetchone()["c"]
+            rows = con.execute("""SELECT s.id, s.title, s.poster, s.year, s.status,
+                    COUNT(*) AS watched, MAX(w.watched_at) AS last_watched,
+                    (SELECT COUNT(*) FROM episodes e WHERE e.show_id=s.id AND e.season>0
+                       AND e.air_date IS NOT NULL AND e.air_date<=?) AS aired,
+                    (SELECT rating FROM follows f WHERE f.user_id=? AND f.show_id=s.id) AS rating
+                FROM watches w JOIN shows s ON s.id=w.show_id
+                WHERE w.user_id=? AND w.season>0
+                GROUP BY s.id ORDER BY last_watched DESC LIMIT ? OFFSET ?""",
+                (today(), uid, uid, limit, offset)).fetchall()
+            items = [{"type": "show", "id": r["id"], "title": r["title"], "poster": r["poster"],
+                      "year": r["year"], "rating": r["rating"], "watched": r["watched"],
+                      "aired": r["aired"], "ended": (r["status"] or "").lower() in ENDED_STATUSES,
+                      "watched_at": r["last_watched"]} for r in rows]
+    return {"user": user_public(u), "kind": kind, "items": items, "total": total,
+            "next": offset + limit if offset + limit < total else None}
 
 
 @app.get("/api/favorites")

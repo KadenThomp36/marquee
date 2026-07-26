@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260726a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260726b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -664,13 +664,15 @@ function parseHash() {
   else if (p[0] === "book") routes.book(p[1]);
   else if (p[0] === "person") routes.person(p[1]);
   else if (p[0] === "list") routes.list(p[1]);
+  else if (p[0] === "u" && p[2] === "watched") routes.watched(p[1], p[3]);
+  else if (p[0] === "watched") routes.watched(null, p[1]);
   else if (p[0] === "u" && p[2] === "recap") routes.recap(p[1], p[3]);
   else if (p[0] === "u") routes.profile(p[1]);
   else if (p[0] === "recap") routes.recap(null, p[1]);
   else (routes[p[0]] || routes.home)(p[1]);
   const active = { list: "lists", movie: "movies", show: "home", u: "profile",
-    recap: "profile", stats: "profile", book: "reading", books: "reading",
-    manga: "reading" }[p[0]] || p[0] || "home";
+    recap: "profile", stats: "profile", watched: "profile", book: "reading",
+    books: "reading", manga: "reading" }[p[0]] || p[0] || "home";
   $$("#nav a, #tabbar a, .gear, .bell").forEach(a =>
     a.classList.toggle("on", a.dataset.r === active));
 }
@@ -766,6 +768,7 @@ function navDepth() {
     try { history.replaceState({ ...(st || {}), mqd: NAV_DEPTH }, ""); } catch { /* ignore */ }
   }
   NAV_FIRST = false;
+  NAV_TRAIL[NAV_DEPTH] = null;   // cleared until this screen names itself
 }
 // routes call this once they know what they are, so the screen below can be named
 function navHere(label) {
@@ -1293,11 +1296,33 @@ async function watchNow(itemType, id, hostId) {
       ${I.check}</div>` : "";
   const bodyGroups = groups.map(groupHTML).join("")
     || `<div class="hint wn-none">No streaming, rent, or buy options listed for the US right now.</div>`;
+  // Summarise it while closed — "Stream on Hulu, Paramount+ and 4 more" tells you
+  // what you need most of the time without a wall of logos on every show page.
+  const names = groups.flatMap(([k]) => d[k].map(p => p.name)).filter(Boolean);
+  const uniq = [...new Set(names)];
+  const summary = onPlex ? "Ready to play on your Plex"
+    : uniq.length ? `${uniq.slice(0, 2).join(", ")}${uniq.length > 2 ? ` and ${uniq.length - 2} more` : ""}`
+    : "Nothing listed in the US right now";
   host.innerHTML = `<div class="section"><h2>Where to watch</h2><div class="rule"></div>
       <span class="cnt">${link
         ? `<a class="wn-jw" href="${esc(link)}" target="_blank" rel="noopener">US · JustWatch ${I.chevR}</a>`
         : "US"}</span></div>
-    <div class="watchnow">${plexLead}${bodyGroups}</div>`;
+    <button class="wn-toggle" id="wntoggle" aria-expanded="false" aria-controls="wnbody">
+      <span class="wn-tico">${onPlex ? PLEX_LOGO : I.ticket}</span>
+      <span class="wn-tt"><b>${onPlex ? "On your Plex" : "See where to watch"}</b>
+        <i>${esc(summary)}</i></span>
+      <span class="wn-chev">${I.chevR}</span>
+    </button>
+    <div class="watchnow collapsed" id="wnbody">${plexLead}${bodyGroups}</div>`;
+  const btn = $("#wntoggle", host), body = $("#wnbody", host);
+  btn.onclick = () => {
+    const open = body.classList.toggle("collapsed") === false;
+    btn.setAttribute("aria-expanded", open);
+    btn.classList.toggle("open", open);
+    $(".wn-tt b", btn).textContent = open
+      ? (onPlex ? "On your Plex" : "Where to watch") : (onPlex ? "On your Plex" : "See where to watch");
+    hapticTick();
+  };
 }
 
 
@@ -2820,7 +2845,8 @@ function listCard(l) {
 function renderLists(d) {
   navHere("Lists");
   const shared = d.shared || [];
-  view.innerHTML = `<div class="page-head"><h1>Lists</h1>
+  view.innerHTML = `<div class="page-head">${crumb("#/profile", "Profile")}</div>
+    <div class="page-head"><h1>Lists</h1>
     <button class="btn pri" id="newlist">${I.plus} New list</button></div>
     <div class="list-grid reveal">${d.lists.map(listCard).join("")}</div>
     ${shared.length ? `<div class="section" style="margin-top:26px"><h2>Shared with the house</h2><div class="rule"></div></div>
@@ -3241,6 +3267,91 @@ routes.person = async id => {
   $("#pshare").onclick = () => share(p.name, `person/${id}`);
 };
 
+/* ---------- what you've watched: rails on the profile, grids behind them ---------- */
+function watchedCard(it, kind) {
+  const sub = kind === "movies"
+    ? (it.watched_at ? fmtDate(it.watched_at.slice(0, 10)) : String(it.year || ""))
+    : `${it.watched}${it.aired ? " / " + it.aired : ""} ${it.watched === 1 ? "episode" : "episodes"}`;
+  return `<a class="wsc" href="#/${it.type}/${it.id}">
+    <span class="wsc-art"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt="">
+      ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
+      ${kind === "shows" && it.aired && it.watched >= it.aired && it.ended
+        ? `<span class="wsc-done" title="Finished">${I.check}</span>` : ""}
+      <span data-listmark="${it.type}:${it.id}">${listMark(it.type, it.id)}</span></span>
+    <span class="wsc-t">${esc(it.title)}</span>
+    <span class="wsc-y">${esc(sub)}</span></a>`;
+}
+const watchedHref = (username, kind, me) =>
+  me ? `#/watched/${kind}` : `#/u/${encodeURIComponent(username)}/watched/${kind}`;
+
+async function loadWatchedRails(username, me, host) {
+  const slot = $("#watched-rails", host);
+  if (!slot) return;
+  const who = me ? "me" : username;
+  const [shows, movies] = await Promise.all([
+    api(`/watched/${encodeURIComponent(who)}/shows?limit=14`).catch(() => null),
+    api(`/watched/${encodeURIComponent(who)}/movies?limit=14`).catch(() => null),
+  ]);
+  const rail = (d, kind, title) => {
+    if (!d || !d.items.length) return "";
+    return `<div class="section"><h2>${title}</h2><div class="rule"></div>
+        <a class="cnt seeall" href="${watchedHref(username, kind, me)}">${d.total} · Show all ${I.chevR}</a></div>
+      <div class="wstrip">${d.items.map(x => watchedCard(x, kind)).join("")}</div>`;
+  };
+  slot.innerHTML = rail(shows, "shows", me ? "Shows you've watched" : "Shows watched")
+    + rail(movies, "movies", me ? "Films you've watched" : "Films watched");
+  ensureListSet().then(() => paintListMarks(slot));
+}
+
+routes.watched = async (username, kind = "shows") => {
+  if (!["shows", "movies"].includes(kind)) kind = "shows";
+  const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
+  const who = me ? "me" : username;
+  view.innerHTML = `<div class="page-head">${crumb(me ? "#/profile" : `#/u/${username}`, "Profile")}</div>
+    ${skRows(3)}`;
+  let d;
+  try { d = await api(`/watched/${encodeURIComponent(who)}/${kind}?limit=48`); }
+  catch { view.innerHTML = `<div class="empty">Couldn’t load that.</div>`; return; }
+  if (seg()[0] !== "watched" && seg()[2] !== "watched") return;
+  const name = me ? "You" : (d.user.display_name || d.user.username);
+  navHere(`${name} · watched`);
+  const other = kind === "shows" ? "movies" : "shows";
+  view.innerHTML = `<div class="page-head">${crumb(me ? "#/profile" : `#/u/${username}`, "Profile")}</div>
+    <h1>${me ? "Watched" : esc(name) + "’s watched"}</h1>
+    <div class="tabs">
+      <button class="${kind === "shows" ? "on" : ""}" data-k="shows">Shows</button>
+      <button class="${kind === "movies" ? "on" : ""}" data-k="movies">Films</button>
+    </div>
+    <div class="sub-h">${d.total} ${kind === "shows"
+      ? (d.total === 1 ? "series" : "series") : (d.total === 1 ? "film" : "films")}</div>
+    <div class="pgrid reveal" id="wgrid">${d.items.map(x => watchedCard(x, kind)).join("")}</div>
+    <div class="loadmore" id="wmore">${d.next != null
+      ? `<button class="btn" id="wmorebtn">Load more</button>` : ""}</div>`;
+  ensureListSet().then(() => paintListMarks(view));
+  // the two tabs are one screen, not two: swap in place so Back still means "profile"
+  $$(".tabs button", view).forEach(b => b.onclick = () => {
+    const href = watchedHref(username, b.dataset.k, me);
+    history.replaceState(history.state, "", href);
+    routes.watched(username, b.dataset.k);
+  });
+  let next = d.next;
+  const wire = () => {
+    const b = $("#wmorebtn"); if (!b) return;
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = "Loading…";
+      const more = await api(`/watched/${encodeURIComponent(who)}/${kind}?limit=48&offset=${next}`)
+        .catch(() => null);
+      if (!more) { b.disabled = false; b.textContent = "Load more"; return; }
+      $("#wgrid").insertAdjacentHTML("beforeend", more.items.map(x => watchedCard(x, kind)).join(""));
+      next = more.next;
+      $("#wmore").innerHTML = next != null ? `<button class="btn" id="wmorebtn">Load more</button>` : "";
+      paintListMarks(view);
+      wire();
+    };
+  };
+  wire();
+};
+
 /* ---------- profile hub ---------- */
 /* ---------- profile hub (identity · favorites · stats · recap · other members) ---------- */
 const STAR_O = `<svg viewBox="0 0 24 24" fill="none"><path d="M12 3.6l2.5 5.2 5.7.7-4.2 4 1.1 5.7L12 16.4l-5.1 2.8 1.1-5.7-4.2-4 5.7-.7z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
@@ -3462,6 +3573,7 @@ routes.profile = async (username) => {
   const c = cached(ppath);
   const render = p => {
     syncFavSet(p.favorites || []);
+    navHere(me ? "Profile" : p.display_name);
     const statsPath = me ? "/stats" : `/profile/${encodeURIComponent(username)}/stats`;
     const advPath = me ? "/stats/advanced" : `/profile/${encodeURIComponent(username)}/stats/advanced`;
     view.innerHTML = `
@@ -3483,6 +3595,8 @@ routes.profile = async (username) => {
       <div class="fav-shelf reveal"><div class="fav-strip" id="favstrip">${favStripHTML(p.favorites || [], me)}</div></div>
 
       ${recapTeaser(me, p)}
+
+      <div id="watched-rails"></div>
 
       <div id="profile-lists"></div>
 
@@ -3522,6 +3636,7 @@ routes.profile = async (username) => {
       $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
     }
     wireFavorites(view, me);
+    loadWatchedRails(p.username, me, view);
     loadMembers(view);
     loadProfileStats(statsPath, advPath, view);
     if (window.renderProfileLists) {
@@ -3919,7 +4034,8 @@ function historyChunkHTML(items, type, state) {
 
 routes.history = (tab = "tv") => {
   navHere("History");
-  view.innerHTML = `<h1>History</h1>
+  view.innerHTML = `<div class="page-head">${crumb("#/profile", "Profile")}</div>
+    <h1>History</h1>
     <div class="tabs">
       <button data-t="tv" class="${tab === "tv" ? "on" : ""}">Shows</button>
       <button data-t="movie" class="${tab === "movie" ? "on" : ""}">Movies</button>
