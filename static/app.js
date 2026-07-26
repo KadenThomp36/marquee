@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260726c";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260726d";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -3268,7 +3268,7 @@ routes.person = async id => {
 };
 
 /* ---------- what you've watched: rails on the profile, grids behind them ---------- */
-function watchedCard(it, kind) {
+function watchedTile(it, kind) {
   const sub = kind === "movies"
     ? (it.watched_at ? fmtDate(it.watched_at.slice(0, 10)) : String(it.year || ""))
     : `${it.watched}${it.aired ? " / " + it.aired : ""} ${it.watched === 1 ? "episode" : "episodes"}`;
@@ -3296,7 +3296,7 @@ function watchedYearsHTML(items, kind, animate = true) {
     <div class="yr-div"><b>${g.year === "?" ? "No date" : g.year}</b>
       <span>${g.items.length} ${noun}${g.items.length === 1 || noun === "series" ? "" : "s"}</span>
       <i></i></div>
-    <div class="pgrid ${animate ? "reveal" : ""}">${g.items.map(x => watchedCard(x, kind)).join("")}</div>`
+    <div class="pgrid ${animate ? "reveal" : ""}">${g.items.map(x => watchedTile(x, kind)).join("")}</div>`
   ).join("");
 }
 const watchedHref = (username, kind, me) =>
@@ -3314,7 +3314,7 @@ async function loadWatchedRails(username, me, host) {
     if (!d || !d.items.length) return "";
     return `<div class="section"><h2>${title}</h2><div class="rule"></div>
         <a class="cnt seeall" href="${watchedHref(username, kind, me)}">${d.total} · Show all ${I.chevR}</a></div>
-      <div class="wstrip">${d.items.map(x => watchedCard(x, kind)).join("")}</div>`;
+      <div class="wstrip">${d.items.map(x => watchedTile(x, kind)).join("")}</div>`;
   };
   slot.innerHTML = rail(shows, "shows", me ? "Shows you've watched" : "Shows watched")
     + rail(movies, "movies", me ? "Films you've watched" : "Films watched");
