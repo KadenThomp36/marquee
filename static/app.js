@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260726b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260726c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -3281,6 +3281,24 @@ function watchedCard(it, kind) {
     <span class="wsc-t">${esc(it.title)}</span>
     <span class="wsc-y">${esc(sub)}</span></a>`;
 }
+/* Grid split by the year you watched it — the same shape as the History timeline,
+   so scrolling back through the years reads the way it does there. */
+function watchedYearsHTML(items, kind, animate = true) {
+  const groups = [];
+  for (const it of items) {
+    const y = (it.watched_at || "").slice(0, 4) || "?";
+    const last = groups[groups.length - 1];
+    if (last && last.year === y) last.items.push(it);
+    else groups.push({ year: y, items: [it] });
+  }
+  const noun = kind === "shows" ? "series" : "film";
+  return groups.map(g => `
+    <div class="yr-div"><b>${g.year === "?" ? "No date" : g.year}</b>
+      <span>${g.items.length} ${noun}${g.items.length === 1 || noun === "series" ? "" : "s"}</span>
+      <i></i></div>
+    <div class="pgrid ${animate ? "reveal" : ""}">${g.items.map(x => watchedCard(x, kind)).join("")}</div>`
+  ).join("");
+}
 const watchedHref = (username, kind, me) =>
   me ? `#/watched/${kind}` : `#/u/${encodeURIComponent(username)}/watched/${kind}`;
 
@@ -3324,7 +3342,7 @@ routes.watched = async (username, kind = "shows") => {
     </div>
     <div class="sub-h">${d.total} ${kind === "shows"
       ? (d.total === 1 ? "series" : "series") : (d.total === 1 ? "film" : "films")}</div>
-    <div class="pgrid reveal" id="wgrid">${d.items.map(x => watchedCard(x, kind)).join("")}</div>
+    <div id="wbody">${watchedYearsHTML(d.items, kind)}</div>
     <div class="loadmore" id="wmore">${d.next != null
       ? `<button class="btn" id="wmorebtn">Load more</button>` : ""}</div>`;
   ensureListSet().then(() => paintListMarks(view));
@@ -3334,7 +3352,7 @@ routes.watched = async (username, kind = "shows") => {
     history.replaceState(history.state, "", href);
     routes.watched(username, b.dataset.k);
   });
-  let next = d.next;
+  let next = d.next, items = d.items.slice();
   const wire = () => {
     const b = $("#wmorebtn"); if (!b) return;
     b.onclick = async () => {
@@ -3342,8 +3360,11 @@ routes.watched = async (username, kind = "shows") => {
       const more = await api(`/watched/${encodeURIComponent(who)}/${kind}?limit=48&offset=${next}`)
         .catch(() => null);
       if (!more) { b.disabled = false; b.textContent = "Load more"; return; }
-      $("#wgrid").insertAdjacentHTML("beforeend", more.items.map(x => watchedCard(x, kind)).join(""));
+      items = items.concat(more.items);
       next = more.next;
+      // re-render the whole body: a new page can land inside a year that's already
+      // on screen, so appending cards blindly would strand them under the wrong divider
+      $("#wbody").innerHTML = watchedYearsHTML(items, kind, false);
       $("#wmore").innerHTML = next != null ? `<button class="btn" id="wmorebtn">Load more</button>` : "";
       paintListMarks(view);
       wire();
