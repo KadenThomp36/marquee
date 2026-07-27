@@ -144,12 +144,15 @@ struct HistoryScreen: View {
                     }
                     Spacer(minLength: 6)
                     if let rating = item.rating {
-                        Text("\(rating)")
+                        // One run of text, two styles — interpolating keeps "8/10"
+                        // tight where two views in the stack would space them apart.
+                        let score = Text("\(rating)")
                             .font(MarqueeFont.body(14, .bold, relativeTo: .caption))
                             .foregroundStyle(Color.mqRating(rating))
-                        + Text("/10")
+                        let outOf = Text("/10")
                             .font(.mqCaption)
                             .foregroundStyle(Color.mqInkMuted)
+                        Text("\(score)\(outOf)")
                     }
                 }
                 .padding(.vertical, 9)
