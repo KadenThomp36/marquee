@@ -1,0 +1,11 @@
+# Test output: screenshots of a seeded development database, plus result bundles.
+.uitest*/
+*.xcresult
+
+# Generated from project.yml — run `xcodegen generate`.
+Marquee.xcodeproj/
+
+.DS_Store
+xcuserdata/
+DerivedData/
+__pycache__/

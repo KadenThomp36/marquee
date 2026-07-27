@@ -1,0 +1,111 @@
+name: Marquee
+options:
+  bundleIdPrefix: dev.kadenthompson
+  # 26.0, not 26.2, would build and then crash at launch: SwiftUI's
+  # glassEffect(_:in:) is annotated @available(iOS 26.0) but the symbol is absent
+  # from the 26.0 runtime, so dyld kills the app before the first frame. Verified
+  # against the 26.0, 26.2 and 26.5 simulators.
+  deploymentTarget:
+    iOS: "26.2"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    IPHONEOS_DEPLOYMENT_TARGET: "26.2"
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+    GCC_TREAT_WARNINGS_AS_ERRORS: NO
+    ENABLE_MODULE_VERIFIER: NO
+
+targetTemplates:
+  Common:
+    settings:
+      base:
+        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.0"
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_PREVIEWS: YES
+        SWIFT_EMIT_LOC_STRINGS: YES
+
+targets:
+  Marquee:
+    type: application
+    platform: iOS
+    templates: [Common]
+    sources:
+      - path: Marquee
+      - path: Shared
+    entitlements:
+      path: Marquee/Marquee.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.dev.kadenthompson.marquee
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.kadenthompson.marquee
+        PRODUCT_NAME: Marquee
+        INFOPLIST_FILE: Marquee/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+    dependencies:
+      - target: MarqueeWidgets
+        embed: true
+
+  MarqueeWidgets:
+    type: app-extension
+    platform: iOS
+    templates: [Common]
+    sources:
+      - path: MarqueeWidgets
+      - path: Shared
+    entitlements:
+      path: MarqueeWidgets/MarqueeWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.dev.kadenthompson.marquee
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.kadenthompson.marquee.widgets
+        PRODUCT_NAME: MarqueeWidgets
+        INFOPLIST_FILE: MarqueeWidgets/Info.plist
+        SKIP_INSTALL: YES
+
+  MarqueeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    templates: [Common]
+    sources:
+      - path: MarqueeUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.kadenthompson.marquee.uitests
+        TEST_TARGET_NAME: Marquee
+        SWIFT_STRICT_CONCURRENCY: minimal
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: Marquee
+
+schemes:
+  Marquee:
+    build:
+      targets:
+        Marquee: all
+        MarqueeUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MarqueeUITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
