@@ -37,7 +37,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260726d"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20260727a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, pass TEXT NOT NULL,
   is_admin INTEGER DEFAULT 0, plex_username TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, created_at TEXT);
+CREATE TABLE IF NOT EXISTS pair_codes(
+  code TEXT PRIMARY KEY, user_id INTEGER, created_at TEXT, expires_at TEXT, used_at TEXT);
 CREATE TABLE IF NOT EXISTS shows(
   id INTEGER PRIMARY KEY, title TEXT, poster TEXT, backdrop TEXT, year INTEGER,
   status TEXT, genres TEXT, avg_runtime INTEGER, last_refreshed TEXT);
@@ -792,8 +794,30 @@ async def no_cache_assets(request: Request, call_next):
     return resp
 
 
+def request_token(request: Request):
+    """The session token for this request: an Authorization: Bearer header (native
+    clients, which have no cookie jar worth trusting) or the httpOnly `sid` cookie
+    the web client has always used."""
+    auth = request.headers.get("authorization") or ""
+    if auth[:7].lower() == "bearer ":
+        tok = auth[7:].strip()
+        if tok:
+            return tok
+    return request.cookies.get("sid")
+
+
+def touch_session(con, tok):
+    """Stamp last_seen so Settings can show "this iPhone, 2 minutes ago". Cheap
+    enough per request; harmless on a schema that predates the column."""
+    try:
+        con.execute("UPDATE sessions SET last_seen=? WHERE token=?",
+                    (datetime.now().isoformat(), tok))
+    except sqlite3.OperationalError:
+        pass
+
+
 def current_user(request: Request):
-    tok = request.cookies.get("sid")
+    tok = request_token(request)
     if not tok:
         raise HTTPException(401, "not logged in")
     with db() as con:
@@ -801,6 +825,7 @@ def current_user(request: Request):
                            WHERE s.token=?""", (tok,)).fetchone()
         if not r:
             raise HTTPException(401, "session expired")
+        touch_session(con, tok)
         return dict(r)
 
 
@@ -808,6 +833,20 @@ def admin_user(user=Depends(current_user)):
     if not user["is_admin"]:
         raise HTTPException(403, "admin only")
     return user
+
+
+def new_session(con, user_id, device_name=None):
+    """Mint a session token, optionally naming the device it belongs to so it can be
+    listed and revoked one at a time."""
+    tok = secrets.token_urlsafe(32)
+    now = datetime.now().isoformat()
+    try:
+        con.execute("""INSERT INTO sessions(token,user_id,created_at,device_name,last_seen)
+            VALUES(?,?,?,?,?)""", (tok, user_id, now, (device_name or "").strip()[:60] or None, now))
+    except sqlite3.OperationalError:      # pre-migration schema
+        con.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)",
+                    (tok, user_id, now))
+    return tok
 
 
 @app.post("/api/login")
@@ -818,21 +857,137 @@ async def login(request: Request, response: Response):
                         (body.get("username", "").strip(),)).fetchone()
         if not u or not check_pw(body.get("password", ""), u["pass"]):
             raise HTTPException(401, "wrong username or password")
-        tok = secrets.token_urlsafe(32)
-        con.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)",
-                    (tok, u["id"], datetime.now().isoformat()))
+        tok = new_session(con, u["id"], body.get("device_name"))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
-    return {"username": u["username"], "is_admin": bool(u["is_admin"])}
+    out = {"username": u["username"], "is_admin": bool(u["is_admin"])}
+    # native clients ask for the token in the body; browsers keep using the cookie
+    if body.get("want_token"):
+        out["token"] = tok
+    return out
 
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response):
-    tok = request.cookies.get("sid")
+    tok = request_token(request)
     if tok:
         with db() as con:
             con.execute("DELETE FROM sessions WHERE token=?", (tok,))
     response.delete_cookie("sid")
     return {"ok": True}
+
+
+# ---- device pairing (a signed-in web session hands a code to a new native client) ----
+# The phone never sees the household password: you open Marquee where you're already
+# signed in, generate a 6-digit code, and type it into the app within a few minutes.
+
+PAIR_TTL_SECONDS = 300
+PAIR_MAX_FAILS = 12          # failed claims allowed per window before claiming pauses
+_pair_fails = {"count": 0, "since": 0.0}
+
+
+def _pair_throttled():
+    """A 6-digit code is only safe if you can't sit there guessing it. Failed claims
+    are counted across the whole server; too many and claiming stops until the window
+    rolls over (legitimate pairing is one attempt, typed off a screen)."""
+    now = time.time()
+    if now - _pair_fails["since"] > PAIR_TTL_SECONDS:
+        _pair_fails.update({"count": 0, "since": now})
+    return _pair_fails["count"] >= PAIR_MAX_FAILS
+
+
+def _pair_failed():
+    if time.time() - _pair_fails["since"] > PAIR_TTL_SECONDS:
+        _pair_fails.update({"count": 0, "since": time.time()})
+    _pair_fails["count"] += 1
+
+
+@app.post("/api/pair/start")
+def pair_start(user=Depends(current_user)):
+    """Generate a short-lived pairing code for the signed-in user."""
+    now = datetime.now()
+    expires = now + timedelta(seconds=PAIR_TTL_SECONDS)
+    with db() as con:
+        con.execute("DELETE FROM pair_codes WHERE expires_at<? OR user_id=?",
+                    (now.isoformat(), user["id"]))
+        for _ in range(20):
+            code = f"{secrets.randbelow(1000000):06d}"
+            try:
+                con.execute("""INSERT INTO pair_codes(code,user_id,created_at,expires_at)
+                    VALUES(?,?,?,?)""", (code, user["id"], now.isoformat(), expires.isoformat()))
+                break
+            except sqlite3.IntegrityError:
+                continue
+        else:
+            raise HTTPException(503, "couldn't allocate a code — try again")
+    return {"code": code, "expires_at": expires.isoformat(),
+            "expires_in": PAIR_TTL_SECONDS}
+
+
+@app.post("/api/pair/claim")
+async def pair_claim(request: Request):
+    """Exchange a pairing code for a session token. Unauthenticated by design — the
+    code IS the credential, which is why it's single-use, short-lived and throttled."""
+    if _pair_throttled():
+        raise HTTPException(429, "too many attempts — wait a few minutes")
+    body = await request.json()
+    code = re.sub(r"\D", "", str(body.get("code") or ""))
+    device = (body.get("device_name") or "").strip()[:60]
+    if len(code) != 6:
+        _pair_failed()
+        raise HTTPException(400, "a pairing code is six digits")
+    now = datetime.now()
+    with db() as con:
+        r = con.execute("""SELECT * FROM pair_codes WHERE code=? AND used_at IS NULL
+            AND expires_at>?""", (code, now.isoformat())).fetchone()
+        if not r:
+            # 410, not 404: the SPA fallback rewrites every /api 404 body to "not found",
+            # which would swallow the one message the pairing screen needs to show
+            _pair_failed()
+            raise HTTPException(410, "that code isn't valid any more — generate a new one")
+        con.execute("UPDATE pair_codes SET used_at=? WHERE code=?", (now.isoformat(), code))
+        u = con.execute("SELECT * FROM users WHERE id=?", (r["user_id"],)).fetchone()
+        if not u:
+            raise HTTPException(410, "that account no longer exists")
+        tok = new_session(con, u["id"], device or "Paired device")
+    return {"token": tok, "user": {**user_public(u), "is_admin": bool(u["is_admin"])}}
+
+
+def _session_fp(token):
+    """Stable public handle for a session row — never the token itself."""
+    return hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
+@app.get("/api/sessions")
+def list_sessions(request: Request, user=Depends(current_user)):
+    """Every device signed in as you, so any one of them can be cut off from here."""
+    cur = request_token(request)
+    with db() as con:
+        rows = con.execute("SELECT * FROM sessions WHERE user_id=? ORDER BY created_at DESC",
+                           (user["id"],)).fetchall()
+    out = []
+    for r in rows:
+        keys = r.keys()
+        out.append({"id": _session_fp(r["token"]),
+                    "device_name": (r["device_name"] if "device_name" in keys else None) or "Web browser",
+                    "created_at": r["created_at"],
+                    "last_seen": (r["last_seen"] if "last_seen" in keys else None),
+                    "current": r["token"] == cur})
+    return {"sessions": out}
+
+
+@app.delete("/api/sessions/{sid}")
+def revoke_session(sid: str, request: Request, user=Depends(current_user)):
+    """Unpair a device (or sign out everything else). Revoking your own session is
+    allowed — that's what "unpair this phone" does from the phone."""
+    with db() as con:
+        rows = con.execute("SELECT token FROM sessions WHERE user_id=?", (user["id"],)).fetchall()
+        gone = 0
+        for r in rows:
+            if sid == "others" and r["token"] != request_token(request):
+                con.execute("DELETE FROM sessions WHERE token=?", (r["token"],)); gone += 1
+            elif sid != "others" and _session_fp(r["token"]) == sid:
+                con.execute("DELETE FROM sessions WHERE token=?", (r["token"],)); gone += 1
+    return {"ok": True, "revoked": gone}
 
 
 @app.get("/api/signup_open")
@@ -861,11 +1016,12 @@ async def register(request: Request, response: Response):
                                  datetime.now().isoformat()))
         uid = cur.lastrowid
         ensure_default_list(con, uid)
-        tok = secrets.token_urlsafe(32)
-        con.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)",
-                    (tok, uid, datetime.now().isoformat()))
+        tok = new_session(con, uid, body.get("device_name"))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
-    return {"username": username, "is_admin": first}
+    out = {"username": username, "is_admin": first}
+    if body.get("want_token"):
+        out["token"] = tok
+    return out
 
 
 def user_public(u):
@@ -5257,7 +5413,9 @@ def startup():
             con.execute("ALTER TABLE users ADD COLUMN plex_token TEXT")
         except sqlite3.OperationalError:
             pass
-        for stmt in ("ALTER TABLE episodes ADD COLUMN source TEXT DEFAULT 'tmdb'",
+        for stmt in ("ALTER TABLE sessions ADD COLUMN device_name TEXT",
+                     "ALTER TABLE sessions ADD COLUMN last_seen TEXT",
+                     "ALTER TABLE episodes ADD COLUMN source TEXT DEFAULT 'tmdb'",
                      "ALTER TABLE shows ADD COLUMN details TEXT",
                      "ALTER TABLE episodes ADD COLUMN details TEXT",
                      "ALTER TABLE episodes ADD COLUMN rating REAL",

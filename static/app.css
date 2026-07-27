@@ -2117,3 +2117,31 @@ body.recap-open{overflow:hidden}
 .yr-div span{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
   color:var(--mut);white-space:nowrap}
 .yr-div i{flex:1;height:1px;background:linear-gradient(90deg,var(--line-2),transparent)}
+
+/* ── devices & pairing ──
+   The app pairs with a code generated here, so the phone never learns the password.
+   Codes are read off a screen and typed, so they're set in the display face at a
+   size you can read across a room. */
+.devlist{display:flex;flex-direction:column;gap:2px;margin-top:14px}
+.devrow{display:flex;align-items:center;gap:11px;padding:11px 2px;border-top:1px solid var(--line)}
+.devrow:first-child{border-top:0}
+.dev-ic{width:32px;height:32px;border-radius:8px;flex:none;display:grid;place-items:center;
+  background:var(--panel-2);color:var(--mut)}
+.devrow.cur .dev-ic{background:var(--amber-soft);color:var(--amber)}
+.dev-ic svg{width:16px;height:16px}
+.dev-mid{flex:1;min-width:0}
+.dev-mid b{display:block;font-size:13.5px;font-weight:700}
+.dev-mid .hint{font-size:11.5px}
+.dev-x{flex:none;color:var(--mut)}
+.dev-x:hover{color:#e6919e}
+.devpanel .btn.ghost{margin-top:12px;border-color:transparent;color:var(--mut)}
+.paircode{padding:16px 14px;border-radius:14px;background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--amber-dim);text-align:center}
+.pc-digits{display:flex;justify-content:center;gap:8px}
+.pc-digits b{font-family:var(--disp);font-size:34px;line-height:1.1;color:var(--amber);
+  min-width:30px;padding:4px 0;border-bottom:2px solid var(--amber-dim);
+  font-variant-numeric:tabular-nums}
+.pc-help{margin-top:12px;font-size:12.5px;color:var(--ink-2);line-height:1.6}
+.pc-help b{color:var(--ink)}
+.pc-left{display:block;color:var(--mut);font-variant-numeric:tabular-nums}
+@media(max-width:700px){.pc-digits b{font-size:28px;min-width:26px}}

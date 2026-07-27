@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260726d";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260727a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -4739,9 +4739,19 @@ routes.settings = async () => {
       ${oseer.linked ? `<span class="ov-ok">${I.check}</span>` : ""}
     </div>` : ""}
   </div>`;
+  // Devices: the app pairs with a short code generated here, so a phone never has to
+  // be told the household password — and any device can be cut off from this list.
+  const devicePanel = `<div class="panel devpanel"><h3><span class="h3-ic">${I.lock}</span> Devices</h3>
+    <p class="hint">The Marquee app pairs with a six-digit code from this page — it never asks for your
+      password. A code lasts five minutes and works once.</p>
+    <div id="pairbox"><button class="btn pri" id="pairstart">${I.plus} Pair a new device</button></div>
+    <div id="devlist" class="devlist">${skRows(2)}</div>
+    <button class="btn ghost" id="revokeothers" hidden>Sign out every other device</button>
+  </div>`;
   view.innerHTML = `<div class="page-head">${crumb("#/profile", "Profile")}</div>
     <h1>Settings</h1><div class="reveal">
     ${plexPanel}
+    ${devicePanel}
     ${imdb ? `<div class="panel"><h3><span class="h3-ic imdb-ic">${SRC_LOGO.IMDb}</span> IMDb ratings</h3>
       <p class="hint">Episode, season, show and film ratings come from IMDb's daily dataset —
         no account, no API key. TMDB fills the gaps for anything IMDb hasn't rated.</p>
@@ -4777,6 +4787,73 @@ routes.settings = async () => {
     </div>${usersHtml}</div>
     <div class="build-tag">Marquee · build ${BUILD}</div>`;
 
+  const relTime = iso => {
+    if (!iso) return "";
+    const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (m < 2) return "just now";
+    if (m < 60) return `${m} min ago`;
+    if (m < 1440) return `${Math.round(m / 60)} hr ago`;
+    return fmtDate(iso.slice(0, 10));
+  };
+  const loadDevices = async () => {
+    const box = $("#devlist"); if (!box) return;
+    const d = await api("/sessions").catch(() => null);
+    if (!box.isConnected) return;
+    if (!d) { box.innerHTML = ""; return; }
+    box.innerHTML = d.sessions.map(s => `
+      <div class="devrow ${s.current ? "cur" : ""}">
+        <span class="dev-ic">${s.current ? I.check : I.lock}</span>
+        <div class="dev-mid"><b>${esc(s.device_name)}${s.current ? " · this device" : ""}</b>
+          <span class="hint">paired ${fmtDate(s.created_at.slice(0, 10))}${
+            s.last_seen ? ` · last used ${relTime(s.last_seen)}` : ""}</span></div>
+        <button class="iconbtn dev-x" data-sid="${s.id}" title="Sign this device out"
+          aria-label="Sign out ${esc(s.device_name)}">${I.x}</button>
+      </div>`).join("");
+    const others = d.sessions.filter(s => !s.current).length;
+    const all = $("#revokeothers");
+    if (all) { all.hidden = others < 2; all.textContent = `Sign out ${others} other devices`; }
+    $$(".dev-x", box).forEach(b => b.onclick = async () => {
+      const row = b.closest(".devrow");
+      const mine = row.classList.contains("cur");
+      if (!confirm(mine ? "Sign this browser out of Marquee?" : "Sign that device out?")) return;
+      await api(`/sessions/${b.dataset.sid}`, { method: "DELETE" }).catch(() => {});
+      if (mine) { ME = null; routes.login(); return; }
+      toast("Device signed out"); loadDevices();
+    });
+  };
+  loadDevices();
+  if ($("#revokeothers")) $("#revokeothers").onclick = async () => {
+    if (!confirm("Sign out every device except this one?")) return;
+    const r = await api("/sessions/others", { method: "DELETE" }).catch(() => null);
+    if (r) toast(`Signed out ${r.revoked} device${r.revoked === 1 ? "" : "s"}`);
+    loadDevices();
+  };
+  if ($("#pairstart")) $("#pairstart").onclick = async () => {
+    const box = $("#pairbox");
+    box.innerHTML = `<div class="hint">Getting a code…</div>`;
+    const p = await api("/pair/start", { body: {} }).catch(() => null);
+    if (!p) { box.innerHTML = `<button class="btn pri" id="pairstart">${I.plus} Pair a new device</button>`; return routes.settings(); }
+    const until = Date.now() + (p.expires_in || 300) * 1000;
+    box.innerHTML = `<div class="paircode">
+        <div class="pc-digits">${p.code.split("").map(c => `<b>${c}</b>`).join("")}</div>
+        <div class="pc-help">Open Marquee on the new device, choose <b>Use a pairing code</b>,
+          and type this in. <span class="pc-left"></span></div>
+      </div>`;
+    const tick = setInterval(() => {
+      const left = Math.max(0, Math.round((until - Date.now()) / 1000));
+      const el = $(".pc-left", box);
+      if (!el || !box.isConnected) { clearInterval(tick); return; }
+      if (!left) {
+        clearInterval(tick);
+        box.innerHTML = `<div class="hint">That code expired.</div>
+          <button class="btn pri" id="pairstart">${I.plus} Pair a new device</button>`;
+        routes.settings();
+        return;
+      }
+      el.textContent = `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}.`;
+      if (left % 5 === 0) loadDevices();   // the row appears the moment the app claims it
+    }, 1000);
+  };
   if ($("#plexlink")) $("#plexlink").onclick = async () => {
     const b = $("#plexlink");
     b.disabled = true;
