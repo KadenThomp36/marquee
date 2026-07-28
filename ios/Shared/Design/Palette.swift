@@ -41,6 +41,24 @@ public extension Color {
     /// A wash of brass for selected chips and tinted rows.
     static let mqBrassSoft = Color("BrassSoft", bundle: .marquee)
 
+    // MARK: on artwork
+    //
+    // The one place the asset catalog can't help. Every colour above is cut against
+    // the *page*, which is why light mode darkens the brass — `mqBrass` is #9A6B10
+    // by day so it clears AA on paper. But a card's text sits on a poster, and a
+    // poster is dark whatever the phone's appearance is set to. Read the page inks
+    // against artwork and they disappear: dark ochre on a dark still.
+    //
+    // So these do not adapt, deliberately. They are the dark-mode values, pinned,
+    // for anything drawn over art behind a scrim.
+
+    /// Brass for metadata sitting on artwork — episode codes, dates, percentages.
+    static let mqBrassOnArt = Color(red: 0.941, green: 0.710, blue: 0.267)
+    /// Titles on artwork.
+    static let mqInkOnArt = Color(red: 0.976, green: 0.957, blue: 0.925)
+    /// The second line on artwork.
+    static let mqInkSoftOnArt = Color(red: 0.976, green: 0.957, blue: 0.925).opacity(0.78)
+
     /// Series finales and destructive actions.
     static let mqVelvet = Color("Velvet", bundle: .marquee)
     /// The gradient foot under poster art, so titles stay legible over any still.

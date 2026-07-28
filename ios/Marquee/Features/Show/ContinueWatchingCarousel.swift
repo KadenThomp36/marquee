@@ -90,7 +90,7 @@ private struct EpisodeSlide: View {
                         .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
                         .textCase(.uppercase)
                         .tracking(1.4)
-                        .foregroundStyle(Color.mqBrassBright)
+                        .foregroundStyle(Color.mqBrassOnArt)
                 }
                 .padding(14)
             }

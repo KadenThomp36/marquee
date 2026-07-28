@@ -382,7 +382,7 @@ struct ReadingTile: View {
                         if let rating = item.rating {
                             Text("\(rating)/10")
                                 .font(MarqueeFont.body(10, .bold, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqBrass)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .padding(.horizontal, 6).padding(.vertical, 3)
                                 .background(.ultraThinMaterial, in: .capsule)
                                 .padding(6)
@@ -504,7 +504,7 @@ private struct AddableTile: View {
                         if let score {
                             Label(String(format: "%.1f", score), systemImage: "star.fill")
                                 .font(MarqueeFont.body(10, .bold, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqBrass)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .padding(.horizontal, 6).padding(.vertical, 3)
                                 .background(.ultraThinMaterial, in: .capsule)
                                 .padding(6)
@@ -514,7 +514,7 @@ private struct AddableTile: View {
                         if added {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(Color.mqBrass)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .frame(width: 28, height: 28)
                                 .background(.ultraThinMaterial, in: .circle)
                                 .padding(6)

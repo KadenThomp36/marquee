@@ -15,8 +15,9 @@ public enum MQ {
     public static let gutter: CGFloat = 18
     /// Gap between cards in a rail.
     public static let railGap: CGFloat = 13
-    /// Width of an Up Next card in a rail.
-    public static let upNextWidth: CGFloat = 172
+    /// Width of an Up Next card in a rail. Deliberately the same as `showCardWidth`:
+    /// the two rails sit one above the other and any difference reads as a mistake.
+    public static let upNextWidth: CGFloat = 158
     /// Width of a poster tile in a rail.
     public static let tileWidth: CGFloat = 124
     /// Width of a punch card in the "haven't watched in a while" rail.

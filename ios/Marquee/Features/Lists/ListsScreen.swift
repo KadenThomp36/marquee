@@ -405,12 +405,12 @@ private struct ListItemCard: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.displayTitle)
                     .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color.mqInkOnArt)
                     .lineLimit(2)
                 if !line.isEmpty {
                     Text(line)
                         .font(MarqueeFont.body(11.5, .semibold, relativeTo: .caption))
-                        .foregroundStyle(Color.mqBrassBright)
+                        .foregroundStyle(Color.mqBrassOnArt)
                         .lineLimit(1)
                 }
                 if item.isShow, (item.total ?? 0) > 0 {

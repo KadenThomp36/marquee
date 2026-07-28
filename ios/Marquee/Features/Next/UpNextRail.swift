@@ -31,14 +31,28 @@ struct UpNextRail: View {
                     }
                 }
             }
-            .padding(.horizontal, MQ.gutter)
             .padding(.vertical, MQ.railShadowRoom)
             .scrollTargetLayout()
         }
+        .contentMargins(.horizontal, MQ.gutter, for: .scrollContent)
         .scrollIndicators(.hidden)
+        // History scrolls up into the leading margin, which left a card sliced off
+        // square against the screen edge. Fading it there reads as "there's more
+        // behind you" instead of as a clipping bug.
+        .mask {
+            LinearGradient(stops: [.init(color: .clear, location: 0),
+                                   .init(color: .black, location: 0.05),
+                                   .init(color: .black, location: 1)],
+                           startPoint: .leading, endPoint: .trailing)
+        }
         .padding(.vertical, -MQ.railShadowRoom)
         .scrollPosition(id: $anchor, anchor: .leading)
         .onAppear(perform: park)
+        // `onAppear` fires before the lazy stack has built anything, so on a cold
+        // load there is no row yet for the anchor to resolve against and the rail
+        // settles wherever it likes — usually mid-history, with a card sliced off at
+        // the screen edge. Park again once the entries actually exist.
+        .onChange(of: entries.count) { _, _ in park() }
         .onChange(of: upNext.first?.id) { _, _ in
             // The first card changing means one was crossed off — re-park so the
             // queue stays under your thumb instead of drifting.
@@ -119,6 +133,7 @@ struct PunchCard: View {
     let onPunch: (ShowCard) async -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var punching = false
     @State private var punched = false
     @Namespace private var glass
@@ -144,7 +159,9 @@ struct PunchCard: View {
         .overlay(alignment: .topTrailing) {
             if show.nextEp != nil { punchButton.padding(7) }
         }
-        .shadow(color: .black.opacity(0.3), radius: 12, y: 6)
+        .shadow(color: .black.opacity(colorScheme == .light ? 0.12 : 0.3),
+                radius: colorScheme == .light ? 7 : 12,
+                y: colorScheme == .light ? 3 : 6)
         .sensoryFeedback(.success, trigger: punched)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabel)
@@ -164,22 +181,22 @@ struct PunchCard: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(show.displayTitle)
                 .font(MarqueeFont.body(14.5, .bold, relativeTo: .subheadline))
-                .foregroundStyle(.white)
+                .foregroundStyle(Color.mqInkOnArt)
                 .lineLimit(2)
 
             Text(episodeLine)
                 .font(MarqueeFont.body(11.5, .semibold, relativeTo: .caption))
-                .foregroundStyle(Color.mqBrassBright)
+                .foregroundStyle(Color.mqBrassOnArt)
                 .lineLimit(2)
 
             if let subline {
                 Text(subline)
                     .font(.mqCaption)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Color.mqInkSoftOnArt)
                     .lineLimit(1)
             }
 
-            ProgressBar(fraction: show.progress, percentLabel: true)
+            ProgressBar(fraction: show.progress, percentLabel: true, onArtwork: true)
                 .padding(.top, 5)
         }
         .padding(.horizontal, 12)
@@ -210,7 +227,8 @@ struct PunchCard: View {
             .buttonStyle(.plain)
             // Tinted rather than clear: over pale poster art a neutral glass circle
             // all but disappeared, and this is the one control that has to be findable.
-            .glassEffect(.regular.tint(Color.mqBrass.opacity(0.55)).interactive(), in: .circle)
+            .glassEffect(.regular.tint(Color.mqBrassOnArt.opacity(0.78)).interactive(),
+                         in: .circle)
             .glassEffectID("punch-\(show.id)", in: glass)
             .opacity(punching ? 0.45 : 1)
             .scaleEffect(punching && !reduceMotion ? 0.86 : 1)
@@ -256,6 +274,9 @@ struct ProgressBar: View {
     var percentLabel = false
     var tint: ProgressTint = .brass
     var height: CGFloat = 6
+    /// Set when the bar is drawn over poster art rather than over the page, so the
+    /// percentage doesn't use a brass cut for contrast against paper.
+    var onArtwork = false
 
     enum ProgressTint {
         case brass, complete, stopped
@@ -285,7 +306,7 @@ struct ProgressBar: View {
             if percentLabel {
                 Text("\(Int((min(max(fraction, 0), 1) * 100).rounded()))%")
                     .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
-                    .foregroundStyle(Color.mqBrassBright)
+                    .foregroundStyle(onArtwork ? Color.mqBrassOnArt : Color.mqBrassBright)
                     .monospacedDigit()
                     .frame(minWidth: 30, alignment: .trailing)
             }
@@ -358,7 +379,7 @@ struct WatchedMiniCard: View {
                                                startPoint: .center, endPoint: .bottom)
                                 Text(MQTime.short(entry.watchedAt))
                                     .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
-                                    .foregroundStyle(Color.mqBrassBright)
+                                    .foregroundStyle(Color.mqBrassOnArt)
                                     .padding(.bottom, 4)
                             }
                         }
@@ -445,7 +466,7 @@ struct CalendarCard: View {
                                            startPoint: .center, endPoint: .bottom)
                             Text(MQTime.short(episode.airDate))
                                 .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqBrassBright)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .padding(.bottom, 4)
                         }
                     }
@@ -535,7 +556,7 @@ struct PosterTile: View {
                         if let vote = result.vote, vote > 0 {
                             Label(String(format: "%.1f", vote), systemImage: "star.fill")
                                 .font(MarqueeFont.body(10, .bold, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqBrass)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
                                 .background(.ultraThinMaterial, in: .capsule)

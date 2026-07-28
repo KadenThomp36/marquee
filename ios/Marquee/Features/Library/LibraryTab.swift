@@ -182,7 +182,7 @@ private struct FilmTile: View {
                         if let rating = film.rating {
                             Text("\(rating)/10")
                                 .font(MarqueeFont.body(10, .bold, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqBrass)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .padding(.horizontal, 6).padding(.vertical, 3)
                                 .background(.ultraThinMaterial, in: .capsule)
                                 .padding(6)
@@ -359,7 +359,7 @@ struct WatchedTile: View {
                         if let rating = item.rating {
                             Text("\(rating)/10")
                                 .font(MarqueeFont.body(10, .bold, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqBrass)
+                                .foregroundStyle(Color.mqBrassOnArt)
                                 .padding(.horizontal, 6).padding(.vertical, 3)
                                 .background(.ultraThinMaterial, in: .capsule)
                                 .padding(6)
