@@ -13,28 +13,40 @@ struct RemoteImage: View {
     var placeholderSymbol: String?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var loaded = false
+    @State private var fetched: UIImage?
+
+    private var parsed: URL? {
+        guard let url, !url.isEmpty else { return nil }
+        return URL(string: url)
+    }
+
+    /// Read straight from the cache during `body`. Waiting for `.task` would cost a
+    /// frame of placeholder even for art already on screen, which is what made a
+    /// second copy of a card flash grey the instant it appeared.
+    private var image: UIImage? {
+        if let fetched { return fetched }
+        return parsed.flatMap { ArtLoader.shared.cached($0) }
+    }
 
     var body: some View {
         Group {
-            if let address = url, let parsed = URL(string: address) {
-                AsyncImage(url: parsed, transaction: Transaction(animation: reduceMotion ? nil : .easeOut(duration: 0.22))) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable()
-                            .aspectRatio(contentMode: contentMode)
-                            .transition(.opacity)
-                    case .failure:
-                        placeholder
-                    default:
-                        placeholder
-                    }
-                }
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
             } else {
                 placeholder
             }
         }
         .clipped()
+        .task(id: url) {
+            guard let parsed, ArtLoader.shared.cached(parsed) == nil else { return }
+            let loaded = await ArtLoader.shared.load(parsed)
+            guard !Task.isCancelled else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.22)) {
+                fetched = loaded
+            }
+        }
     }
 
     private var placeholder: some View {

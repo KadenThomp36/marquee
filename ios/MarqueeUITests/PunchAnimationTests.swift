@@ -39,13 +39,38 @@ final class PunchAnimationTests: XCTestCase {
                       "The first Up Next card should offer a punch button")
 
         attach(name: "30-punch-00-before")
-        punch.tap()
 
-        // Roughly every 60ms across the flight.
-        for frame in 1...10 {
-            attach(name: String(format: "30-punch-%02d", frame))
-            usleep(600_000)
+        // `app.screenshot()` waits for the app to go idle, and an animation is not
+        // idle — so every frame taken after `tap()` returns is of the aftermath.
+        // `XCUIScreen` does no such synchronisation, so grab from another thread
+        // while the main one taps.
+        var frames: [XCUIScreenshot] = []
+        let lock = NSLock()
+        let capturing = expectation(description: "flight captured")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            for _ in 0..<16 {
+                let shot = XCUIScreen.main.screenshot()
+                lock.lock(); frames.append(shot); lock.unlock()
+                Thread.sleep(forTimeInterval: 0.16)
+            }
+            capturing.fulfill()
         }
+
+        punch.tap()
+        wait(for: [capturing], timeout: 30)
+
+        lock.lock()
+        let captured = frames
+        lock.unlock()
+        for (index, shot) in captured.enumerated() {
+            let attachment = XCTAttachment(screenshot: shot)
+            attachment.name = String(format: "30-punch-%02d", index + 1)
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTAssertGreaterThan(captured.count, 5, "Should have caught the flight")
+
         sleep(2)
         attach(name: "30-punch-99-after")
     }

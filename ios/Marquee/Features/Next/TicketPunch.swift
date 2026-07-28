@@ -3,12 +3,13 @@ import SwiftUI
 /// A rounded rectangle with a bite taken out of it.
 ///
 /// Drawn as one path filled even-odd, so the circle is a genuine hole — you see
-/// whatever is behind the ticket through it, not a dark dot painted on top. The
+/// through the card to whatever is behind it, not a dark dot painted on top. The
 /// radius is the animatable value, which is what lets the punch pop rather than
 /// simply appear.
 struct TicketShape: Shape {
     var holeRadius: CGFloat
-    /// Where the hole lands, measured in from the top-right corner.
+    /// Where the hole lands, measured in from the top-right corner. This is the
+    /// centre of the punch button, so the hole opens exactly under the check.
     var holeInset: CGSize
     var cornerRadius: CGFloat
 
@@ -30,110 +31,75 @@ struct TicketShape: Shape {
     }
 }
 
-/// The stub that tears off when you punch an episode.
+/// The card, frozen as it was the moment you punched it.
 ///
-/// It is a cinema ticket, not a copy of the poster — which is both more on-theme and
-/// avoids the card's art having to load a second time behind the animation. Punched,
-/// it lifts off its spike and sails left into the history that lives at that end of
-/// the rail. The rail's leading edge already fades, so the stub dissolves exactly
-/// where watched cards come from.
-struct TicketStub: View {
+/// The live card advances to the next episode straight away — that is what marking
+/// one does — so the thing that flies away has to be a copy holding the old values.
+/// It wears the same face, so what lifts off is unmistakably the card you just
+/// tapped, with a hole punched clean through where the check was.
+///
+/// Drawing the poster twice costs nothing: `ArtLoader` already has it decoded, so
+/// this renders on its first frame instead of flashing a placeholder.
+struct PunchedTicket: View {
+    let poster: String?
     let title: String
     let episodeLine: String
+    let subline: String?
+    let progress: Double
+    /// Centre of the punch button, in from the card's top-right corner.
+    let holeInset: CGSize
+    let holeRadius: CGFloat
     /// Drives the whole flight: false is "just punched", true is "gone".
     let departed: Bool
-    let holeRadius: CGFloat
-
-    private let corner: CGFloat = 7
-    private let holeInset = CGSize(width: 20, height: 21)
 
     var body: some View {
-        ticket
+        PosterArt(url: poster, radius: MQ.radius)
+            .overlay { scrim }
+            .overlay(alignment: .bottom) { info }
             .mask {
                 TicketShape(holeRadius: holeRadius,
                             holeInset: holeInset,
-                            cornerRadius: corner)
+                            cornerRadius: MQ.radius)
                     .fill(style: FillStyle(eoFill: true))
             }
             .compositingGroup()
-            .shadow(color: .black.opacity(departed ? 0 : 0.5), radius: 14, y: 8)
-            // Off the spike, a tip, and away.
-            .rotationEffect(.degrees(departed ? -14 : 0), anchor: .topTrailing)
-            .scaleEffect(departed ? 0.55 : 1, anchor: .topTrailing)
-            .offset(x: departed ? -320 : 0, y: departed ? -30 : 0)
+            .shadow(color: .black.opacity(departed ? 0 : 0.55), radius: 20, y: 12)
+            // Off the spike, a tip, and away down the rail into history.
+            .rotationEffect(.degrees(departed ? -15 : 0), anchor: .topTrailing)
+            .scaleEffect(departed ? 0.48 : 1, anchor: .topTrailing)
+            .offset(x: departed ? -340 : 0, y: departed ? -26 : 0)
             .opacity(departed ? 0 : 1)
     }
 
-    private var ticket: some View {
-        HStack(spacing: 0) {
-            stubEnd
-            perforation
-            details
-        }
-        .frame(height: 84)
-        .background(paper)
-        .clipShape(.rect(cornerRadius: corner))
-        .overlay {
-            RoundedRectangle(cornerRadius: corner)
-                .strokeBorder(Color(red: 0.36, green: 0.25, blue: 0.06).opacity(0.55),
-                              lineWidth: 1)
-        }
-        .padding(.horizontal, 3)
+    private var scrim: some View {
+        LinearGradient(
+            stops: [.init(color: .clear, location: 0.36),
+                    .init(color: Color.mqScrim.opacity(0.55), location: 0.62),
+                    .init(color: Color.mqScrim.opacity(0.95), location: 0.9)],
+            startPoint: .top, endPoint: .bottom)
     }
 
-    /// The counterfoil: the narrow end a real ticket keeps.
-    private var stubEnd: some View {
-        Text("ADMIT\nONE")
-            .font(MarqueeFont.body(8, .bold, relativeTo: .caption2))
-            .tracking(1)
-            .multilineTextAlignment(.center)
-            .foregroundStyle(Color(red: 0.36, green: 0.25, blue: 0.06).opacity(0.7))
-            .fixedSize()
-            .frame(width: 34)
-    }
-
-    private var perforation: some View {
-        Rectangle()
-            .fill(Color(red: 0.36, green: 0.25, blue: 0.06).opacity(0.35))
-            .frame(width: 1)
-            .mask {
-                // A dashed line reads as a tear-off edge; a solid rule reads as a box.
-                VStack(spacing: 3) {
-                    ForEach(0..<14, id: \.self) { _ in
-                        Rectangle().frame(height: 3)
-                    }
-                }
-            }
-    }
-
-    private var details: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Marquee")
-                .font(MarqueeFont.wordmark(9.5, relativeTo: .caption2))
-                .foregroundStyle(Color(red: 0.36, green: 0.25, blue: 0.06).opacity(0.65))
-                .lineLimit(1)
-                .fixedSize()
+    private var info: some View {
+        VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(MarqueeFont.body(13, .bold, relativeTo: .caption))
-                .foregroundStyle(Color(red: 0.14, green: 0.10, blue: 0.03))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+                .font(MarqueeFont.body(14.5, .bold, relativeTo: .subheadline))
+                .foregroundStyle(Color.mqInkOnArt)
+                .lineLimit(2)
             Text(episodeLine)
-                .font(MarqueeFont.body(10, .semibold, relativeTo: .caption2))
-                .foregroundStyle(Color(red: 0.42, green: 0.29, blue: 0.04))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+                .font(MarqueeFont.body(11.5, .semibold, relativeTo: .caption))
+                .foregroundStyle(Color.mqBrassOnArt)
+                .lineLimit(2)
+            if let subline {
+                Text(subline)
+                    .font(.mqCaption)
+                    .foregroundStyle(Color.mqInkSoftOnArt)
+                    .lineLimit(1)
+            }
+            ProgressBar(fraction: progress, percentLabel: true, onArtwork: true)
+                .padding(.top, 5)
         }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 9)
-        // Room for the punch hole, which sits in the top-right corner.
-        .padding(.trailing, 26)
-    }
-
-    /// Warm stock, so the ticket reads as paper against the poster behind it.
-    private var paper: some View {
-        LinearGradient(colors: [Color(red: 0.976, green: 0.945, blue: 0.867),
-                                Color(red: 0.925, green: 0.874, blue: 0.761)],
-                       startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 }

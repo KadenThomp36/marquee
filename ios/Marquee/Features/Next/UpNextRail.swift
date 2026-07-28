@@ -95,6 +95,15 @@ struct UpNextRail: View {
     }
 }
 
+/// The card's face at the instant it was punched.
+struct PunchedCardValues {
+    let poster: String?
+    let title: String
+    let episodeLine: String
+    let subline: String?
+    let progress: Double
+}
+
 enum RailEntry: Identifiable, Hashable {
     case past(WatchEntry)
     case divider(String, Int)
@@ -136,10 +145,14 @@ struct PunchCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var punching = false
     @State private var punched = false
-    /// The torn-off stub, and how far through its flight it is.
-    @State private var stubShowing = false
+    /// The punched copy of this card, and how far through its flight it is. The
+    /// values are frozen at the tap, because the live card advances underneath it.
+    @State private var stub: PunchedCardValues?
     @State private var stubDeparted = false
     @State private var holeRadius: CGFloat = 0
+
+    /// Centre of the punch button: 7pt of padding plus half of its 44pt frame.
+    private static let holeInset = CGSize(width: 29, height: 29)
     @Namespace private var glass
 
     var body: some View {
@@ -163,13 +176,17 @@ struct PunchCard: View {
         .overlay(alignment: .topTrailing) {
             if show.nextEp != nil { punchButton.padding(7) }
         }
-        // Above the clip, so the stub can sail off the card and away down the rail.
+        // Above the clip, so the punched card can sail off and away down the rail.
         .overlay {
-            if stubShowing {
-                TicketStub(title: show.displayTitle,
-                           episodeLine: episodeLine,
-                           departed: stubDeparted,
-                           holeRadius: holeRadius)
+            if let stub {
+                PunchedTicket(poster: stub.poster,
+                              title: stub.title,
+                              episodeLine: stub.episodeLine,
+                              subline: stub.subline,
+                              progress: stub.progress,
+                              holeInset: Self.holeInset,
+                              holeRadius: holeRadius,
+                              departed: stubDeparted)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -229,9 +246,14 @@ struct PunchCard: View {
             return
         }
 
+        // Freeze the card as it is now; the live one behind advances immediately.
         stubDeparted = false
         holeRadius = 0
-        stubShowing = true
+        stub = PunchedCardValues(poster: show.poster,
+                                 title: show.displayTitle,
+                                 episodeLine: episodeLine,
+                                 subline: subline,
+                                 progress: show.progress)
 
         // The punch lands first, hard, and the ticket flinches.
         withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
@@ -246,7 +268,7 @@ struct PunchCard: View {
         withAnimation(.easeIn(duration: 0.5)) { stubDeparted = true }
 
         try? await Task.sleep(for: .milliseconds(520))
-        stubShowing = false
+        stub = nil
         holeRadius = 0
         stubDeparted = false
         punching = false
@@ -274,9 +296,10 @@ struct PunchCard: View {
             .glassEffect(.regular.tint(Color.mqBrassOnArt.opacity(0.78)).interactive(),
                          in: .circle)
             .glassEffectID("punch-\(show.id)", in: glass)
-            .opacity(punching ? 0.45 : 1)
+            .opacity(stub != nil ? 0 : (punching ? 0.45 : 1))
             .scaleEffect(punching && !reduceMotion ? 0.86 : 1)
             .animation(.spring(duration: 0.3), value: punching)
+            .animation(.easeOut(duration: 0.12), value: stub == nil)
         }
         .accessibilityLabel(show.nextEp.map { "Mark \($0.code) of \(show.displayTitle) watched" }
                             ?? "Mark watched")

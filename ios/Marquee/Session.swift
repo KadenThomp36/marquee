@@ -111,6 +111,9 @@ public final class Session {
 
     public func signOutLocally(reason: String?) {
         Vault.clear()
+        // Art is cached to disk now, and some of it — banners, uploads — came from
+        // the server itself. Unpairing forgets everything, including the pictures.
+        ArtLoader.shared.clear()
         server = nil
         me = nil
         listMembership = [:]
