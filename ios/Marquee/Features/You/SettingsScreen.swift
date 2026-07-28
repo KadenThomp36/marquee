@@ -103,8 +103,10 @@ struct SettingsScreen: View {
                     Divider().overlay(Color.mqHairline)
                     // Years of browser logins pile up behind these. Naming the number
                     // is more use than listing them, and there's one button for it.
-                    Text("^[\(hiddenDevices) older session](inflect: true) not shown. "
-                         + "Signing out every other device clears them.")
+                    // One literal, not two joined with `+`: concatenation produces a
+                    // plain String, which takes the non-localized Text initialiser and
+                    // prints the inflection markup verbatim instead of applying it.
+                    Text("^[\(hiddenDevices) older session](inflect: true) not shown. Signing out every other device clears them.")
                         .font(.mqCaption)
                         .foregroundStyle(Color.mqInkMuted)
                         .fixedSize(horizontal: false, vertical: true)

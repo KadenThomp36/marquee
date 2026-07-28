@@ -46,7 +46,8 @@ struct ReviewsSection: View {
 
                     let others = reviews.filter { !$0.mine }
                     if !others.isEmpty {
-                        SpoilerCover(what: "^[\(others.count) review](inflect: true)",
+                        SpoilerCover(what: others.count == 1
+                                           ? "1 review" : "\(others.count) reviews",
                                      subject: subject) {
                             VStack(spacing: 10) {
                                 ForEach(others) { review in
@@ -72,7 +73,8 @@ struct ReviewsSection: View {
 
             if !external.isEmpty {
                 DetailSection(title: "From the community", count: "\(external.count)") {
-                    SpoilerCover(what: "^[\(external.count) comment](inflect: true)",
+                    SpoilerCover(what: external.count == 1
+                                       ? "1 comment" : "\(external.count) comments",
                                  subject: subject) {
                         VStack(spacing: 10) {
                             ForEach(external.prefix(12)) { review in
