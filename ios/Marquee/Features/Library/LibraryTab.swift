@@ -32,6 +32,8 @@ struct LibraryTab: View {
         NavigationStack(path: $path) {
             MarqueeScreen {
                 VStack(spacing: 0) {
+                    PageHeading(title: "Library")
+                        .padding(.bottom, 10)
                     if available.count > 1 {
                         Picker("Library section", selection: $section) {
                             ForEach(available) { Text($0.rawValue).tag($0) }
@@ -48,7 +50,6 @@ struct LibraryTab: View {
                     }
                 }
             }
-            .navigationTitle("Library")
             // Filters what's already on the shelf. Finding something you *don't*
             // have is the Search tab's job, and the empty state says so.
             .searchable(text: $query,

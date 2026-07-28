@@ -69,9 +69,9 @@ struct ProfileScreen: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
             .ignoresSafeArea(.container, edges: hasBanner ? .top : [])
             .refreshable { await loadAll() }
+            .mqPageTitle(isMe ? "You" : (profile?.person.name ?? "Profile"),
+                         handover: hasBanner ? 300 : 150)
         }
-        .navigationTitle(isMe ? "You" : (profile?.person.name ?? "Profile"))
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if isMe {
                 ToolbarItem(placement: .topBarTrailing) {

@@ -24,6 +24,7 @@ struct SettingsScreen: View {
         MarqueeScreen {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
+                    PageHeading(title: "Settings")
                     devicesPanel
                     offlinePanel
                     plexPanel
@@ -37,8 +38,7 @@ struct SettingsScreen: View {
                 .padding(.bottom, 30)
             }
         }
-        .navigationTitle("Settings")
-        .navigationBarTitleDisplayMode(.inline)
+        .mqPageTitle("Settings")
         .task { await loadAll() }
         .confirmationDialog("Unpair this device?", isPresented: $confirmingUnpair,
                             titleVisibility: .visible) {

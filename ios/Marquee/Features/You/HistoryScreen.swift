@@ -25,6 +25,8 @@ struct HistoryScreen: View {
         MarqueeScreen {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
+                    PageHeading(title: "History")
+                        .padding(.bottom, 12)
                     Picker("Kind", selection: $tab) {
                         ForEach(Kind.allCases) { Text($0.rawValue).tag($0) }
                     }
@@ -54,8 +56,7 @@ struct HistoryScreen: View {
                 .padding(.vertical, 10)
             }
         }
-        .navigationTitle("History")
-        .navigationBarTitleDisplayMode(.inline)
+        .mqPageTitle("History")
         .onChange(of: tab) { _, _ in reset() }
     }
 
@@ -363,7 +364,7 @@ struct WatchedGridScreen: View {
                 .padding(.vertical, 10)
             }
         }
-        .navigationTitle("Watched")
+        .mqPageTitle("Watched")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: selected) { await load() }
     }

@@ -52,6 +52,7 @@ struct WatchNextScreen: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
             .refreshable { await refresh(force: true) }
             .coordinateSpace(.named(MQ.punchSpace))
+            .mqPageTitle("Watch Next", handover: 72)
             // The flight layer, above the scroll view and every rail in it.
             .overlay(alignment: .topLeading) {
                 if let flight {
@@ -80,8 +81,6 @@ struct WatchNextScreen: View {
         }
         // Two sensations: the thud of the die going through, then the mark landing.
         .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
-        .navigationTitle("Watch Next")
-        .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .task { await refresh() }
         .task { await loadDiscover() }

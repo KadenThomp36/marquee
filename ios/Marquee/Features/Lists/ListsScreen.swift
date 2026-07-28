@@ -18,6 +18,7 @@ struct ListsScreen: View {
         MarqueeScreen {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 22) {
+                    PageHeading(title: "Lists")
                     if let value = data.value {
                         LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(value.lists) { ListCardView(list: $0) }
@@ -46,7 +47,7 @@ struct ListsScreen: View {
             }
             .refreshable { await load(force: true) }
         }
-        .navigationTitle("Lists")
+        .mqPageTitle("Lists")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { creating = true } label: { Image(systemName: "plus") }
@@ -205,7 +206,7 @@ struct ListScreen: View {
                 SkeletonBlock(height: 200).padding(MQ.gutter)
             }
         }
-        .navigationTitle(list?.name ?? "List")
+        .mqPageTitle(list?.name ?? "List", handover: 90)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {

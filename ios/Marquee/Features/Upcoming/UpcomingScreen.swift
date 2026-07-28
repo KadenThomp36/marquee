@@ -29,6 +29,8 @@ struct UpcomingScreen: View {
         MarqueeScreen {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 26) {
+                    PageHeading(title: "Upcoming",
+                                subtitle: "The next 90 days")
                     if days.isEmpty, data.value != nil {
                         EmptyLine("Nothing scheduled in the next 90 days.")
                     }
@@ -79,8 +81,8 @@ struct UpcomingScreen: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .refreshable { await load(force: true) }
+            .mqPageTitle("Upcoming")
         }
-        .navigationTitle("Upcoming")
         .task { await load() }
     }
 
