@@ -148,8 +148,11 @@ struct PunchCard: View {
     /// The punched copy of this card, and how far through its flight it is. The
     /// values are frozen at the tap, because the live card advances underneath it.
     @State private var stub: PunchedCardValues?
-    @State private var stubDeparted = false
+    @State private var beat: PunchBeat = .biting
     @State private var holeRadius: CGFloat = 0
+    /// Separate from `punched` so the heavy thud of the die and the little chime of
+    /// the mark landing are two different sensations.
+    @State private var bit = false
 
     /// Centre of the punch button: 7pt of padding plus half of its 44pt frame.
     private static let holeInset = CGSize(width: 29, height: 29)
@@ -186,7 +189,7 @@ struct PunchCard: View {
                               progress: stub.progress,
                               holeInset: Self.holeInset,
                               holeRadius: holeRadius,
-                              departed: stubDeparted)
+                              beat: beat)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -194,6 +197,8 @@ struct PunchCard: View {
         .shadow(color: .black.opacity(colorScheme == .light ? 0.12 : 0.3),
                 radius: colorScheme == .light ? 7 : 12,
                 y: colorScheme == .light ? 3 : 6)
+        // Two sensations: the thud of the die going through, then the mark landing.
+        .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
         .sensoryFeedback(.success, trigger: punched)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabel)
@@ -247,30 +252,44 @@ struct PunchCard: View {
         }
 
         // Freeze the card as it is now; the live one behind advances immediately.
-        stubDeparted = false
         holeRadius = 0
+        beat = .biting
         stub = PunchedCardValues(poster: show.poster,
                                  title: show.displayTitle,
                                  episodeLine: episodeLine,
                                  subline: subline,
                                  progress: show.progress)
 
-        // The punch lands first, hard, and the ticket flinches.
-        withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
-            holeRadius = 9.5
-        }
-
-        // Sent now, and not awaited here: the stub's flight is decoration and must
+        // Sent now, and not awaited anywhere below: the flight is decoration and must
         // never be the reason a mark reaches the server late.
         Task { await onPunch(show) }
 
-        try? await Task.sleep(for: .milliseconds(170))
-        withAnimation(.easeIn(duration: 0.5)) { stubDeparted = true }
+        // 1. The die comes down and bites through. Stiff and fast — a punch is not
+        //    a gentle thing — with the card compressing under it.
+        bit.toggle()
+        withAnimation(.spring(response: 0.16, dampingFraction: 0.62)) {
+            holeRadius = 10
+        }
+        try? await Task.sleep(for: .milliseconds(190))
 
-        try? await Task.sleep(for: .milliseconds(520))
+        // 2. Through. The chad drops, the card springs back, and it *sits there*
+        //    punched. This pause is the whole animation: without it there is no
+        //    moment where you see what happened, only something leaving.
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { beat = .punched }
+        try? await Task.sleep(for: .milliseconds(430))
+
+        // 3. Lifted off the spike — rises, tips, shadow lengthens underneath.
+        withAnimation(.easeOut(duration: 0.22)) { beat = .lifted }
+        try? await Task.sleep(for: .milliseconds(200))
+
+        // 4. And away, into the history end of the rail.
+        withAnimation(.easeIn(duration: 0.46)) { beat = .gone }
+        punched.toggle()
+
+        try? await Task.sleep(for: .milliseconds(470))
         stub = nil
         holeRadius = 0
-        stubDeparted = false
+        beat = .biting
         punching = false
     }
 
