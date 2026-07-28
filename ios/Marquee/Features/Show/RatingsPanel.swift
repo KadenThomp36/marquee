@@ -36,48 +36,57 @@ struct RatingsPanel: View {
         return first...max(first, last)
     }
 
-    /// At most six labels, always landing on real episode numbers.
+    /// Ticks that land on real episode numbers and keep clear of the ends.
+    ///
+    /// The plot runs to both screen edges, so a label on the first or last episode is
+    /// half off the screen — which reads as a clipping bug rather than a bleed. The
+    /// caption already says how many episodes there are; the ticks only have to give
+    /// the eye somewhere to land in between.
     private var axisValues: [Int] {
-        let span = episodeRange.upperBound - episodeRange.lowerBound
-        guard span > 0 else { return [episodeRange.lowerBound] }
-        let step = max(1, Int((Double(span) / 5).rounded(.up)))
-        var values = Array(stride(from: episodeRange.lowerBound,
-                                  through: episodeRange.upperBound, by: step))
-        if values.last != episodeRange.upperBound { values.append(episodeRange.upperBound) }
-        return values
+        let low = episodeRange.lowerBound
+        let high = episodeRange.upperBound
+        let span = high - low
+        guard span > 2 else { return [] }
+        let step = max(1, Int((Double(span) / 4).rounded()))
+        return Array(stride(from: low + step, to: high, by: step))
     }
 
     private var average: SeasonAverage? {
         ratings.seasonAvg.first { $0.season == season }
     }
 
-    /// A band with a little air above and below, so a season that sits between 7.8
-    /// and 8.4 doesn't render as a flat line across the middle.
+    /// The band the *shown season* occupies, with a little air either side.
+    ///
+    /// Taken from this season rather than the whole show: a run that dips once in
+    /// series three used to stretch every other season's axis down to meet it, so a
+    /// season sitting between 7.2 and 8.7 was drawn inside a 6-to-10 frame and spent
+    /// most of its height as empty space.
     private var range: ClosedRange<Double> {
-        let values = ratings.episodes.map(\.rating)
+        let values = episodes.map(\.rating)
         guard let low = values.min(), let high = values.max() else { return 0...10 }
-        var lower = max(0, low.rounded(.down))
-        var upper = min(10, high.rounded(.up))
-        if upper - lower < 2 {
-            lower = max(0, lower - 1)
-            upper = min(10, upper + 1)
-        }
-        return lower...upper
+        let air = max(0.3, (high - low) * 0.22)
+        return max(0, low - air)...min(10, high + air)
+    }
+
+    private var best: RatedEpisode? {
+        episodes.max { $0.rating < $1.rating }
     }
 
     var body: some View {
         DetailSection(title: "Ratings", count: overallCaption) {
             VStack(alignment: .leading, spacing: 12) {
-                if ratings.seasonAvg.count > 1 { seasonStrip }
-                caption
+                if ratings.seasonAvg.count > 1 {
+                    seasonStrip.padding(.horizontal, MQ.gutter)
+                }
+                caption.padding(.horizontal, MQ.gutter)
+                // Full width, no panel: the run of a season is the picture, and it
+                // reads better as a band across the page than as a chart in a box
+                // inset twice from the edges.
                 chart
-                    .frame(height: 150)
-                    .padding(.top, 2)
-                if ratings.isMixed { legend }
+                    .frame(height: 190)
+                    .padding(.top, 4)
+                if ratings.isMixed { legend.padding(.horizontal, MQ.gutter) }
             }
-            .padding(14)
-            .mqPanel()
-            .padding(.horizontal, MQ.gutter)
         }
     }
 
@@ -99,34 +108,30 @@ struct RatingsPanel: View {
                             selectedEpisode = nil
                         }
                     } label: {
-                        VStack(spacing: 3) {
+                        // The sliver that used to sit under each average is gone: it
+                        // encoded the same number twice, in a form too small to read.
+                        VStack(spacing: 2) {
                             Text("S\(entry.season)")
                                 .font(MarqueeFont.body(10, .bold, relativeTo: .caption2))
+                                .tracking(0.6)
                                 .foregroundStyle(entry.season == season
-                                                 ? Color.mqInkSoft : Color.mqInkMuted)
+                                                 ? Color.mqBrassOnFill.opacity(0.75)
+                                                 : Color.mqInkMuted)
                             Text(String(format: "%.2f", entry.avg))
-                                .font(MarqueeFont.body(14.5, .bold, relativeTo: .subheadline))
+                                .font(MarqueeFont.body(15, .bold, relativeTo: .subheadline))
                                 .foregroundStyle(entry.season == season
-                                                 ? Color.mqBrass
+                                                 ? Color.mqBrassOnFill
                                                  : (entry.isIMDb ? Color.mqInkSoft : Color.mqInkMuted))
                                 .monospacedDigit()
-                            // A sliver under each pill encodes that season's average
-                            // against the show's own range — the shape of the run.
-                            Capsule().fill(Color.mqPanelRaised)
-                                .frame(width: 28, height: 3)
-                                .overlay(alignment: .leading) {
-                                    Capsule()
-                                        .fill(Color.mqBrass)
-                                        .frame(width: 28 * fraction(of: entry.avg))
-                                        .opacity(entry.season == season ? 1 : 0.55)
-                                }
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(entry.season == season ? Color.mqPanelRaised : .clear,
-                                    in: .rect(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10)
-                            .strokeBorder(entry.season == season ? Color.mqBrassDim : .clear,
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 8)
+                        .background(entry.season == season
+                                    ? AnyShapeStyle(Color.mqBrassFill)
+                                    : AnyShapeStyle(Color.mqPanel),
+                                    in: .rect(cornerRadius: 11))
+                        .overlay(RoundedRectangle(cornerRadius: 11)
+                            .strokeBorder(entry.season == season ? .clear : Color.mqHairline,
                                           lineWidth: 1))
                     }
                     .buttonStyle(.plain)
@@ -145,17 +150,18 @@ struct RatingsPanel: View {
         return min(1, max(0, (value - range.lowerBound) / span))
     }
 
+    /// The average is written on the chart itself now, so this says the things the
+    /// picture can't: which season, how many episodes, and whose numbers they are.
     private var caption: some View {
         HStack(spacing: 6) {
-            Text("Season \(season) · \(episodes.count) episode\(episodes.count == 1 ? "" : "s")")
+            Text("Season \(season)")
+                .foregroundStyle(Color.mqInk)
+                .fontWeight(.bold)
+            Text("·").foregroundStyle(Color.mqInkMuted)
+            Text("\(episodes.count) episode\(episodes.count == 1 ? "" : "s")")
                 .foregroundStyle(Color.mqInkSoft)
-            if let average {
-                Text("avg \(String(format: "%.2f", average.avg))")
-                    .foregroundStyle(Color.mqBrass)
-                    .fontWeight(.bold)
-                if !average.isIMDb {
-                    Text("TMDB").foregroundStyle(Color.mqInkMuted)
-                }
+            if let average, !average.isIMDb {
+                Text("· TMDB").foregroundStyle(Color.mqInkMuted)
             }
         }
         .font(MarqueeFont.body(12.5, .semibold, relativeTo: .caption))
@@ -166,7 +172,15 @@ struct RatingsPanel: View {
             if let average {
                 RuleMark(y: .value("Season average", average.avg))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                    .foregroundStyle(Color.mqBrass.opacity(0.4))
+                    .foregroundStyle(Color.mqBrass.opacity(0.45))
+                    // The number sits on the line it describes. An axis of bare
+                    // bounds told you the frame; this tells you the season.
+                    .annotation(position: .top, alignment: .leading, spacing: 3) {
+                        Text("avg \(String(format: "%.2f", average.avg))")
+                            .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
+                            .foregroundStyle(Color.mqBrass)
+                            .padding(.leading, MQ.gutter)
+                    }
             }
 
             ForEach(episodes) { episode in
@@ -190,6 +204,15 @@ struct RatingsPanel: View {
                     .symbolSize(episodes.count <= 24 ? 26 : 14)
                     .foregroundStyle(episode.isIMDb ? Color.mqBrass : Color.mqPanel)
                     .opacity(episode.isIMDb ? 0.9 : 1)
+                    // The season's high point, named. One number worth reading beats
+                    // a column of axis ticks nobody looks at.
+                    .annotation(position: .top, spacing: 4) {
+                        if episode.id == best?.id, selectedEpisode == nil {
+                            Text(String(format: "%.1f", episode.rating))
+                                .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
+                                .foregroundStyle(Color.mqInk)
+                        }
+                    }
 
                 if !episode.isIMDb {
                     PointMark(x: .value("Episode", episode.number),
@@ -211,6 +234,7 @@ struct RatingsPanel: View {
         // A monotone curve overshoots its own data, and Charts doesn't clip by
         // default — which is how the fill ended up spilling below the grid.
         .chartPlotStyle { plot in plot.clipped() }
+        // Bleeds to both edges; only the axis numbers keep to the gutter.
         .chartXAxis {
             AxisMarks(preset: .aligned, values: axisValues.map(Double.init)) { value in
                 AxisValueLabel {
@@ -222,17 +246,13 @@ struct RatingsPanel: View {
                 }
             }
         }
+
+        // No y axis. Its only labels were the two ends of a computed frame, which
+        // said nothing about the show — the average rule and the season's high point
+        // carry the numbers now, and a couple of faint rules carry the shape.
         .chartYAxis {
-            AxisMarks(position: .leading,
-                      values: [range.lowerBound, range.upperBound]) { value in
-                AxisGridLine().foregroundStyle(Color.mqHairline)
-                AxisValueLabel {
-                    if let number = value.as(Double.self) {
-                        Text(String(format: "%.0f", number))
-                            .font(MarqueeFont.body(10.5, .semibold, relativeTo: .caption2))
-                            .foregroundStyle(Color.mqInkMuted)
-                    }
-                }
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
+                AxisGridLine().foregroundStyle(Color.mqHairline.opacity(0.6))
             }
         }
         .chartXSelection(value: $selectedEpisode)
