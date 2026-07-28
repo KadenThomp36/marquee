@@ -957,13 +957,46 @@ def _session_fp(token):
     return hashlib.sha256(token.encode()).hexdigest()[:12]
 
 
+SESSION_LIST_LIMIT = 40
+
+
+def prune_dead_sessions(con):
+    """Drop sessions nothing has used inside the cookie's own lifetime.
+
+    Nothing ever expired these rows: `SESSION_DAYS` sets the cookie's max-age, but
+    the row behind it lived forever, so a year of logins piles up in the devices
+    list. Keyed on last_seen and only falling back to created_at, so a token still
+    in daily use is never cut — including an app's bearer token, which has no cookie
+    to expire on its own."""
+    cutoff = (datetime.now() - timedelta(days=SESSION_DAYS)).isoformat()
+    try:
+        con.execute("DELETE FROM sessions WHERE COALESCE(last_seen, created_at) < ?",
+                    (cutoff,))
+    except sqlite3.OperationalError:          # pre-migration schema
+        con.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+
+
 @app.get("/api/sessions")
 def list_sessions(request: Request, user=Depends(current_user)):
-    """Every device signed in as you, so any one of them can be cut off from here."""
+    """Every device signed in as you, so any one of them can be cut off from here.
+
+    Bounded: sessions have been minted on every login since day one and only ever
+    removed by an explicit logout, so a long-lived account can carry thousands of
+    them. Showing all of them is useless — you want the ones that are actually in
+    use, plus a count and the "sign out everything else" button."""
     cur = request_token(request)
     with db() as con:
-        rows = con.execute("SELECT * FROM sessions WHERE user_id=? ORDER BY created_at DESC",
-                           (user["id"],)).fetchall()
+        prune_dead_sessions(con)
+        total = con.execute("SELECT COUNT(*) c FROM sessions WHERE user_id=?",
+                            (user["id"],)).fetchone()["c"]
+        try:
+            rows = con.execute("""SELECT * FROM sessions WHERE user_id=?
+                ORDER BY COALESCE(last_seen, created_at) DESC LIMIT ?""",
+                (user["id"], SESSION_LIST_LIMIT)).fetchall()
+        except sqlite3.OperationalError:      # pre-migration schema, no last_seen
+            rows = con.execute("""SELECT * FROM sessions WHERE user_id=?
+                ORDER BY created_at DESC LIMIT ?""",
+                (user["id"], SESSION_LIST_LIMIT)).fetchall()
     out = []
     for r in rows:
         keys = r.keys()
@@ -972,7 +1005,7 @@ def list_sessions(request: Request, user=Depends(current_user)):
                     "created_at": r["created_at"],
                     "last_seen": (r["last_seen"] if "last_seen" in keys else None),
                     "current": r["token"] == cur})
-    return {"sessions": out}
+    return {"sessions": out, "total": total, "shown": len(out)}
 
 
 @app.delete("/api/sessions/{sid}")
