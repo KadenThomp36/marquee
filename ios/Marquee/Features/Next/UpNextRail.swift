@@ -136,6 +136,10 @@ struct PunchCard: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var punching = false
     @State private var punched = false
+    /// The torn-off stub, and how far through its flight it is.
+    @State private var stubShowing = false
+    @State private var stubDeparted = false
+    @State private var holeRadius: CGFloat = 0
     @Namespace private var glass
 
     var body: some View {
@@ -158,6 +162,17 @@ struct PunchCard: View {
         }
         .overlay(alignment: .topTrailing) {
             if show.nextEp != nil { punchButton.padding(7) }
+        }
+        // Above the clip, so the stub can sail off the card and away down the rail.
+        .overlay {
+            if stubShowing {
+                TicketStub(title: show.displayTitle,
+                           episodeLine: episodeLine,
+                           departed: stubDeparted,
+                           holeRadius: holeRadius)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
         }
         .shadow(color: .black.opacity(colorScheme == .light ? 0.12 : 0.3),
                 radius: colorScheme == .light ? 7 : 12,
@@ -205,16 +220,45 @@ struct PunchCard: View {
         .allowsHitTesting(false)
     }
 
+    /// Punch, lift, sail. The mark itself goes to the server in parallel — the
+    /// animation is not allowed to slow down the thing you actually asked for.
+    private func punch() async {
+        guard !reduceMotion else {
+            await onPunch(show)
+            punching = false
+            return
+        }
+
+        stubDeparted = false
+        holeRadius = 0
+        stubShowing = true
+
+        // The punch lands first, hard, and the ticket flinches.
+        withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
+            holeRadius = 9.5
+        }
+
+        // Sent now, and not awaited here: the stub's flight is decoration and must
+        // never be the reason a mark reaches the server late.
+        Task { await onPunch(show) }
+
+        try? await Task.sleep(for: .milliseconds(170))
+        withAnimation(.easeIn(duration: 0.5)) { stubDeparted = true }
+
+        try? await Task.sleep(for: .milliseconds(520))
+        stubShowing = false
+        holeRadius = 0
+        stubDeparted = false
+        punching = false
+    }
+
     private var punchButton: some View {
         GlassEffectContainer {
             Button {
                 guard !punching else { return }
                 punching = true
                 punched.toggle()
-                Task {
-                    await onPunch(show)
-                    punching = false
-                }
+                Task { await punch() }
             } label: {
                 Image(systemName: "checkmark")
                     .font(.system(size: 17, weight: .bold))
