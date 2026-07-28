@@ -61,6 +61,11 @@ final class AppearanceTests: XCTestCase {
         pair(host: host, user: user, secret: secret)
 
         attach(name: "12-light-watch-next")
+        // Scrolled: the heading should have faded out and the top should have grown a
+        // soft blur where content passes under it.
+        app.swipeUp(velocity: .slow)
+        sleep(1)
+        attach(name: "12b-light-scrolled")
         for tab in ["Library", "You"] {
             let button = app.tabBars.buttons[tab]
             guard button.waitForExistence(timeout: 3) else { continue }

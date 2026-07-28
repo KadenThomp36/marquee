@@ -34,7 +34,7 @@ struct WatchNextScreen: View {
         MarqueeScreen {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 26) {
-                    greeting
+                    greeting.mqHeadingEffect()
 
                     if let dashboard = data.value {
                         content(dashboard)
@@ -50,6 +50,7 @@ struct WatchNextScreen: View {
                 .padding(.vertical, 8)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .mqTopEdgeBlur()
             .refreshable { await refresh(force: true) }
             .coordinateSpace(.named(MQ.punchSpace))
 

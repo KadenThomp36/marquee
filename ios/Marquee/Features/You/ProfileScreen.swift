@@ -67,6 +67,7 @@ struct ProfileScreen: View {
                 .padding(.bottom, 30)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .mqTopEdgeBlur()
             .ignoresSafeArea(.container, edges: hasBanner ? .top : [])
             .refreshable { await loadAll() }
 

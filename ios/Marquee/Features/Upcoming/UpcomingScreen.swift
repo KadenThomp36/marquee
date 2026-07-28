@@ -31,6 +31,7 @@ struct UpcomingScreen: View {
                 LazyVStack(alignment: .leading, spacing: 26) {
                     PageHeading(title: "Upcoming",
                                 subtitle: "The next 90 days")
+                        .mqHeadingEffect()
                     if days.isEmpty, data.value != nil {
                         EmptyLine("Nothing scheduled in the next 90 days.")
                     }
@@ -80,6 +81,7 @@ struct UpcomingScreen: View {
                 .padding(.vertical, 8)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .mqTopEdgeBlur()
             .refreshable { await load(force: true) }
             .mqBareNavigationBar()
         }
