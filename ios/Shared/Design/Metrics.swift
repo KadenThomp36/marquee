@@ -24,6 +24,9 @@ public enum MQ {
     public static let showCardWidth: CGFloat = 158
     /// Width of a small "what you watched" card.
     public static let watchedWidth: CGFloat = 116
+    /// Width of the vertical rule naming a day in the Up Next rail. Shared with the
+    /// rail's detent maths, which has to know the layout without measuring it.
+    public static let dayDividerWidth: CGFloat = 22
     /// Vertical slack inside a rail's clip so card shadows survive being clipped.
     public static let railShadowRoom: CGFloat = 14
     /// Coordinate space a punched ticket is measured and flown in — the screen, since
