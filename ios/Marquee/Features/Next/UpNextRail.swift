@@ -177,7 +177,7 @@ struct PunchCard: View {
             if show.isEnded { EndedTag().padding(9) }
         }
         .overlay(alignment: .topTrailing) {
-            if show.nextEp != nil { punchButton.padding(7) }
+            if show.nextEp != nil, stub == nil { punchButton.padding(7) }
         }
         // Above the clip, so the punched card can sail off and away down the rail.
         .overlay {
@@ -198,6 +198,7 @@ struct PunchCard: View {
                 radius: colorScheme == .light ? 7 : 12,
                 y: colorScheme == .light ? 3 : 6)
         // Two sensations: the thud of the die going through, then the mark landing.
+        .zIndex(stub == nil ? 0 : 3)
         .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
         .sensoryFeedback(.success, trigger: punched)
         .accessibilityElement(children: .contain)
@@ -315,10 +316,9 @@ struct PunchCard: View {
             .glassEffect(.regular.tint(Color.mqBrassOnArt.opacity(0.78)).interactive(),
                          in: .circle)
             .glassEffectID("punch-\(show.id)", in: glass)
-            .opacity(stub != nil ? 0 : (punching ? 0.45 : 1))
+            .opacity(punching ? 0.45 : 1)
             .scaleEffect(punching && !reduceMotion ? 0.86 : 1)
             .animation(.spring(duration: 0.3), value: punching)
-            .animation(.easeOut(duration: 0.12), value: stub == nil)
         }
         .accessibilityLabel(show.nextEp.map { "Mark \($0.code) of \(show.displayTitle) watched" }
                             ?? "Mark watched")

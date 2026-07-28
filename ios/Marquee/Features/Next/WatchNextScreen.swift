@@ -20,6 +20,9 @@ struct WatchNextScreen: View {
     @State private var data = RemoteData<Dashboard>(cacheKey: "dashboard")
     @State private var discover = RemoteData<DiscoverResponse>(cacheKey: "discover")
     @State private var unreadCount = 0
+    /// The stub from the last punch, and the timer that clears it.
+    @State private var receipt: PunchReceipt?
+    @State private var receiptTimer: Task<Void, Never>?
 
     var body: some View {
         MarqueeScreen {
@@ -42,6 +45,14 @@ struct WatchNextScreen: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .refreshable { await refresh(force: true) }
+            // Over the tab bar, where the thumb that just punched already is.
+            .overlay(alignment: .bottom) {
+                if let receipt {
+                    PunchReceiptBanner(receipt: receipt, onDismiss: dismissReceipt)
+                        .padding(.bottom, 4)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
         }
         .navigationTitle("Watch Next")
         .navigationBarTitleDisplayMode(.inline)
@@ -211,6 +222,14 @@ struct WatchNextScreen: View {
     private func punch(_ show: ShowCard) async {
         guard let episode = show.nextEp, let client = session.client else { return }
 
+        showReceipt(PunchReceipt(showID: show.id,
+                                 season: episode.season,
+                                 number: episode.number,
+                                 showTitle: show.displayTitle,
+                                 episodeTitle: episode.title,
+                                 code: episode.code,
+                                 art: show.poster))
+
         // Optimistic: the card advances now, the server catches up.
         let stamp = MQTime.stamp()
         data.mutate { dashboard in
@@ -247,6 +266,26 @@ struct WatchNextScreen: View {
                 advanceLocally(show.id, from: episode, in: &dashboard)
             }
         }
+    }
+
+    /// Raise the stub, and take it away again a few seconds later. Replacing one
+    /// cancels the previous countdown, so punching twice quickly doesn't have the
+    /// first timer pull the second receipt off screen early.
+    private func showReceipt(_ new: PunchReceipt) {
+        receiptTimer?.cancel()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            receipt = new
+        }
+        receiptTimer = Task {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: 0.25)) { receipt = nil }
+        }
+    }
+
+    private func dismissReceipt() {
+        receiptTimer?.cancel()
+        withAnimation(.easeIn(duration: 0.2)) { receipt = nil }
     }
 
     /// Replace a card with the server's patched copy, or drop it once there's nothing

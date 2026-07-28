@@ -71,6 +71,10 @@ struct PunchedTicket: View {
 
     private var gone: Bool { beat == .gone }
 
+    /// The punch hole, as a fraction of the card. Rotating about this point is what
+    /// makes it read as hanging off a spike rather than spinning about its middle.
+    private static let holeAnchor = UnitPoint(x: 0.82, y: 0.12)
+
     var body: some View {
         PosterArt(url: poster, radius: MQ.radius)
             .overlay { scrim }
@@ -87,27 +91,38 @@ struct PunchedTicket: View {
             .overlay(alignment: .topTrailing) { shockRing }
             .overlay(alignment: .topTrailing) { chad }
             .compositingGroup()
-            // The die presses the card down; releasing it lets the card rise.
-            .scaleEffect(pressure, anchor: .topTrailing)
             .shadow(color: .black.opacity(gone ? 0 : shadowStrength),
-                    radius: beat == .lifted ? 26 : 16,
-                    y: beat == .lifted ? 18 : 9)
-            // Off the spike, a tip, and away down the rail into history.
-            .rotationEffect(.degrees(rotation), anchor: .topTrailing)
-            .scaleEffect(gone ? 0.45 : 1, anchor: .topTrailing)
-            .offset(x: gone ? -360 : 0, y: gone ? -44 : (beat == .lifted ? -10 : 0))
+                    radius: beat == .lifted ? 30 : 18,
+                    y: beat == .lifted ? 20 : 10)
+            // Pivots about the hole, the way a ticket lifts off a spike.
+            .rotationEffect(.degrees(rotation), anchor: Self.holeAnchor)
+            // Held up out of the rail to be looked at, then thrown away small.
+            .scaleEffect(scale, anchor: .center)
+            .offset(x: gone ? -360 : 0, y: gone ? -44 : rise)
             .opacity(gone ? 0 : 1)
     }
 
     // MARK: - The punch itself
 
-    /// A hair of compression as the die bites, springing back once it's through.
-    private var pressure: CGFloat {
+    /// Held up close while it's being punched, so the hole is big enough to read and
+    /// clear of whatever is behind it — then thrown away small. The dip on the bite
+    /// is the card taking the die's weight.
+    private var scale: CGFloat {
         switch beat {
-        case .biting: 0.972
-        case .punched: 1
-        case .lifted: 1.045
-        case .gone: 1
+        case .biting: 1.30
+        case .punched: 1.38
+        case .lifted: 1.42
+        case .gone: 0.42
+        }
+    }
+
+    /// Rises out of the rail as it's presented, higher still once lifted.
+    private var rise: CGFloat {
+        switch beat {
+        case .biting: -10
+        case .punched: -16
+        case .lifted: -26
+        case .gone: -44
         }
     }
 
