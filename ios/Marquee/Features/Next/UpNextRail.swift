@@ -17,103 +17,27 @@ struct UpNextRail: View {
     @State private var anchor: RailEntry.ID?
     @State private var hasParked = false
 
-    /// Where the content's leading edge currently sits in the viewport, and how far
-    /// the rail is scrolled. Two numbers, both always available — the stack itself is
-    /// never lazy even when its children are.
-    @State private var contentLeading: CGFloat = 0
-    @State private var scrolled: CGFloat = 0
-    /// How many barriers are behind you. Every change is one crossing.
-    @State private var crossings = 0
-    /// Detents are for *your* scrolling. A target behaviour is consulted for
-    /// programmatic scrolls too, so while the rail is parking itself on the queue the
-    /// nearest barrier would catch it and it would settle a day short.
-    @State private var detentsArmed = false
-
-    private static let space = "mq.rail"
-
-    /// Every entry's x within the stack, from the layout itself. Widths are fixed and
-    /// known, so this covers barriers far off screen that were never measured.
-    private var layout: [RailEntry.ID: CGFloat] {
-        var x: CGFloat = 0
-        var positions: [RailEntry.ID: CGFloat] = [:]
-        for entry in entries {
-            positions[entry.id] = x
-            switch entry {
-            case .past: x += MQ.watchedWidth
-            case .divider: x += MQ.dayDividerWidth
-            case .next: x += MQ.upNextWidth
-            }
-            x += MQ.railGap
-        }
-        return positions
-    }
-
-    /// Where a barrier sits in the viewport right now.
-    private func viewportX(of id: RailEntry.ID) -> CGFloat? {
-        layout[id].map { contentLeading + $0 }
-    }
-
-    /// The barriers in the scroll view's own content coordinates, which is what a
-    /// scroll target behaviour is handed. Derived from the live offset, so whatever
-    /// convention content margins impose on the origin comes out in the wash.
-    private var detents: [CGFloat] {
-        barrierIDs.compactMap { viewportX(of: $0) }
-            .map { scrolled + $0 - MQ.gutter }
-            .sorted()
-    }
-
-    /// The queue's first card, and every divider. Crossing the first one is leaving
-    /// Up Next; the rest are the days receding behind it.
-    private var barrierIDs: Set<RailEntry.ID> {
-        var ids = Set(entries.compactMap { entry -> RailEntry.ID? in
-            if case .divider = entry { entry.id } else { nil }
-        })
-        if let first = entries.first(where: { if case .next = $0 { true } else { false } }) {
-            ids.insert(first.id)
-        }
-        return ids
-    }
-
     var body: some View {
         ScrollView(.horizontal) {
             LazyHStack(alignment: .center, spacing: MQ.railGap) {
                 ForEach(entries) { entry in
-                    Group {
-                        switch entry {
-                        case .past(let watch):
-                            WatchedMiniCard(entry: watch, showsWho: false, isPast: true)
-                        case .divider(let label, _):
-                            DayDivider(label: label)
-                        case .next(let show):
-                            PunchCard(show: show, onPunch: onPunch, onLift: onLift)
-                                .frame(width: MQ.upNextWidth,
-                                       height: MQ.upNextWidth / MQ.posterAspect)
-                        }
+                    switch entry {
+                    case .past(let watch):
+                        WatchedMiniCard(entry: watch, showsWho: false, isPast: true)
+                    case .divider(let label, _):
+                        DayDivider(label: label)
+                    case .next(let show):
+                        PunchCard(show: show, onPunch: onPunch, onLift: onLift)
+                            .frame(width: MQ.upNextWidth,
+                                   height: MQ.upNextWidth / MQ.posterAspect)
                     }
-
                 }
             }
             .padding(.vertical, MQ.railShadowRoom)
             .scrollTargetLayout()
-            .onGeometryChange(for: CGFloat.self) { proxy in
-                proxy.frame(in: .named(Self.space)).minX
-            } action: { contentLeading = $0 }
         }
-        .coordinateSpace(.named(Self.space))
         .contentMargins(.horizontal, MQ.gutter, for: .scrollContent)
         .scrollIndicators(.hidden)
-        // Each barrier catches: let go near one and the rail settles onto it, so you
-        // have to mean it to get past. Crossing one is a small knock.
-        .scrollTargetBehavior(BarrierDetents(stops: detentsArmed ? detents : []))
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.contentOffset.x
-        } action: { _, offset in
-            scrolled = offset
-            updateCrossings()
-        }
-        // One crisp knock per barrier. Rigid rather than medium: a single tap rather
-        // than something with a tail that can read as several.
-        .sensoryFeedback(.impact(flexibility: .rigid, intensity: 0.8), trigger: crossings)
         // History scrolls up into the leading margin, which left a card sliced off
         // square against the screen edge. Fading it there reads as "there's more
         // behind you" instead of as a clipping bug.
@@ -139,34 +63,12 @@ struct UpNextRail: View {
         }
     }
 
-    /// Count the barriers behind the leading edge, with a dead band so one sitting
-    /// exactly on the line doesn't chatter back and forth and fire the haptic several
-    /// times — which is what made a single crossing feel like a handful of little
-    /// ticks.
-    private func updateCrossings() {
-        let positions = barrierIDs.compactMap { viewportX(of: $0) }
-        let firmlyPast = positions.filter { $0 < MQ.gutter - 8 }.count
-        let stillPast = positions.filter { $0 < MQ.gutter + 8 }.count
-        if firmlyPast > crossings {
-            crossings = firmlyPast
-        } else if stillPast < crossings {
-            crossings = stillPast
-        }
-    }
-
     /// Park on the first queue card, so history starts off-screen to the left.
     private func park() {
         guard !hasParked else { return }
         guard let first = entries.first(where: { if case .next = $0 { true } else { false } })
         else { return }
         hasParked = true
-        detentsArmed = false
-        Task {
-            // Long enough for the parking scroll to finish before the barriers start
-            // catching things.
-            try? await Task.sleep(for: .milliseconds(700))
-            detentsArmed = true
-        }
         anchor = first.id
     }
 
@@ -202,37 +104,6 @@ struct PunchedCardValues {
     let episodeLine: String
     let subline: String?
     let progress: Double
-}
-
-/// Makes the rail reluctant to leave a date barrier.
-///
-/// A scroll target behaviour can only place where a scroll *ends*, not add drag
-/// resistance — but that turns out to be enough: let go anywhere near a barrier and
-/// the rail settles back onto it, so a lazy flick doesn't get through and a decided
-/// one does. Which is what a detent feels like.
-struct BarrierDetents: ScrollTargetBehavior {
-    let stops: [CGFloat]
-
-    /// Ease off gently and the rail looks a long way for a barrier to settle on —
-    /// this is the detent you feel when creeping back through the days. Throw it and
-    /// the reach shrinks, so a decided swipe through several days isn't yanked back
-    /// to one you already passed.
-    private let gentleReach: CGFloat = 260
-    private let thrownReach: CGFloat = 130
-    private let thrownAbove: CGFloat = 900
-
-    func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
-        guard !stops.isEmpty else { return }
-        let proposed = target.rect.minX
-        guard let nearest = stops.min(by: {
-            abs($0 - proposed) < abs($1 - proposed)
-        }) else { return }
-
-        let thrown = abs(context.velocity.dx) > thrownAbove
-        if abs(nearest - proposed) < (thrown ? thrownReach : gentleReach) {
-            target.rect.origin.x = nearest
-        }
-    }
 }
 
 enum RailEntry: Identifiable, Hashable {
@@ -532,7 +403,7 @@ struct DayDivider: View {
                 .frame(width: 12, height: 92)
             Rectangle().fill(Color.mqHairline).frame(width: 1)
         }
-        .frame(width: MQ.dayDividerWidth)
+        .frame(width: 22)
         .padding(.vertical, 6)
         .accessibilityElement()
         .accessibilityLabel(label)
