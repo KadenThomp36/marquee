@@ -154,12 +154,16 @@ struct ShowScreen: View {
                             .foregroundStyle(Color.mqInkSoft)
                             .lineSpacing(2)
                             .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
 
-                if detail.followed {
-                    StarRating(rating: $rating) { value in
-                        Task { await model.rate(value, session: session) }
+                        // Beside the poster rather than under it: the column next to a
+                        // 2:3 poster is taller than the facts that fill it, and the
+                        // stars were sitting in a band of empty space below instead.
+                        if detail.followed {
+                            StarRating(rating: $rating) { value in
+                                Task { await model.rate(value, session: session) }
+                            }
+                            .padding(.top, 2)
+                        }
                     }
                 }
 

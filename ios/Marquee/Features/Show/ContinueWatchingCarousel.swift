@@ -32,8 +32,12 @@ struct ContinueWatchingCarousel: View {
                             .id(episode.id)
                     }
                 }
+                // The slide casts a soft shadow; without room for it inside the clip
+                // it was sheared off in a hard line right where the Cast section began.
+                .padding(.vertical, MQ.railShadowRoom)
                 .scrollTargetLayout()
             }
+            .padding(.vertical, -MQ.railShadowRoom)
             .scrollTargetBehavior(.viewAligned)
             .scrollIndicators(.hidden)
             .scrollPosition(id: $scrolled, anchor: .center)

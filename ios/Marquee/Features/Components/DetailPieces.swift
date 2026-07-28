@@ -161,18 +161,53 @@ struct ExpandableText: View {
     var lineLimit = 3
 
     @State private var expanded = false
+    /// Whether the clamped text actually ran out of room. Without this the control
+    /// would offer to expand three lines that were only ever two.
+    @State private var isTruncated = false
 
     var body: some View {
-        Text(text)
-            .font(.mqBody)
-            .foregroundStyle(Color.mqInkSoft)
-            .lineSpacing(3)
-            .lineLimit(expanded ? nil : lineLimit)
-            .contentShape(.rect)
-            .onTapGesture { withAnimation(.snappy(duration: 0.25)) { expanded.toggle() } }
-            .accessibilityAddTraits(.isButton)
-            .accessibilityHint(expanded ? "Collapse" : "Expand")
+        VStack(alignment: .leading, spacing: 4) {
+            Text(text)
+                .font(.mqBody)
+                .foregroundStyle(Color.mqInkSoft)
+                .lineSpacing(3)
+                .lineLimit(expanded ? nil : lineLimit)
+                .background {
+                    // Lay the same text out unclamped, off-screen, and compare heights:
+                    // an ellipsis on its own is not an affordance, and there is no way
+                    // to ask SwiftUI directly whether a Text got cut off.
+                    Text(text)
+                        .font(.mqBody)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .hidden()
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { full in
+                            measured = full
+                        }
+                }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { shown in
+                    isTruncated = measured - shown > 1
+                }
+
+            if isTruncated || expanded {
+                Button {
+                    withAnimation(.snappy(duration: 0.25)) { expanded.toggle() }
+                } label: {
+                    Text(expanded ? "Less" : "More")
+                        .font(MarqueeFont.body(12.5, .bold, relativeTo: .caption))
+                        .foregroundStyle(Color.mqBrass)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .contentShape(.rect)
+        .onTapGesture { withAnimation(.snappy(duration: 0.25)) { expanded.toggle() } }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(expanded ? "Collapse" : "Expand")
     }
+
+    @State private var measured: CGFloat = 0
 }
 
 /// The section rule used inside a detail page.

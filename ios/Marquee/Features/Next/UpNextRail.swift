@@ -26,7 +26,8 @@ struct UpNextRail: View {
                         DayDivider(label: label)
                     case .next(let show):
                         PunchCard(show: show, onPunch: onPunch)
-                            .frame(width: MQ.upNextWidth)
+                            .frame(width: MQ.upNextWidth,
+                                   height: MQ.upNextWidth / MQ.posterAspect)
                     }
                 }
             }
@@ -103,7 +104,8 @@ struct ShowCardRail: View {
         HorizontalRail {
             ForEach(shows) { show in
                 PunchCard(show: show, onPunch: onPunch)
-                    .frame(width: 158)
+                    .frame(width: MQ.showCardWidth,
+                           height: MQ.showCardWidth / MQ.posterAspect)
             }
         }
     }
@@ -199,14 +201,16 @@ struct PunchCard: View {
             } label: {
                 Image(systemName: "checkmark")
                     .font(.system(size: 17, weight: .bold))
-                    // Fixed bright brass, not the appearance-aware one: this glass
-                    // circle always sits on poster art, which is dark either way.
-                    .foregroundStyle(Color(red: 1, green: 0.851, blue: 0.541))
+                    // Dark ink on brass glass: the tint carries the colour now, so the
+                    // mark itself needs to read against it rather than against art.
+                    .foregroundStyle(Color.mqBrassOnFill)
                     .frame(width: 44, height: 44)
                     .contentShape(.circle)
             }
             .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: .circle)
+            // Tinted rather than clear: over pale poster art a neutral glass circle
+            // all but disappeared, and this is the one control that has to be findable.
+            .glassEffect(.regular.tint(Color.mqBrass.opacity(0.55)).interactive(), in: .circle)
             .glassEffectID("punch-\(show.id)", in: glass)
             .opacity(punching ? 0.45 : 1)
             .scaleEffect(punching && !reduceMotion ? 0.86 : 1)

@@ -18,13 +18,16 @@ struct EpisodeScreen: View {
             if let episode {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        still(episode)
+                        Color.clear.frame(height: 214)
                         details(episode)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, 30)
                 }
                 .scrollEdgeEffectStyle(.soft, for: .top)
+                .background(alignment: .top) {
+                    still(episode).ignoresSafeArea(edges: .top)
+                }
             } else if let error {
                 LoadFailure(message: error) { await load() }
             } else {
@@ -58,7 +61,8 @@ struct EpisodeScreen: View {
         // show with no episode art still gets a hero rather than a grey box.
         let art = [episode.still, episode.seasonPoster, episode.showBackdrop, episode.showPoster]
             .compactMap { $0 }.first { !$0.isEmpty }
-        FilledArt(url: art, height: 214)
+        // Tall enough to cover the bar it now reaches up under as well as the hero.
+        FilledArt(url: art, height: 214 + 120)
             .mask(LinearGradient(stops: [.init(color: .black, location: 0.55),
                                          .init(color: .clear, location: 1)],
                                  startPoint: .top, endPoint: .bottom))

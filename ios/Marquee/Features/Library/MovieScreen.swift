@@ -102,12 +102,15 @@ struct MovieScreen: View {
                             .font(.mqCaption)
                             .foregroundStyle(Color.mqInkSoft)
                             .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
 
-                if movie.isWatched {
-                    StarRating(rating: $rating) { value in
-                        Task { await rate(value) }
+                        // Beside the poster, where there's room, rather than in the
+                        // empty band underneath it.
+                        if movie.isWatched {
+                            StarRating(rating: $rating) { value in
+                                Task { await rate(value) }
+                            }
+                            .padding(.top, 2)
+                        }
                     }
                 }
 

@@ -3,12 +3,16 @@ import SwiftUI
 /// Books and manga. Opt-in per user — the whole section only exists once someone
 /// switches a tracking feature on in Settings, exactly as the web client does it.
 struct ReadingShelfScreen: View {
+    /// Filters the shelves. Distinct from `query`, which searches Hardcover and
+    /// AniList for things you *don't* have yet.
+    var query: String = ""
+
     @Environment(Session.self) private var session
 
     @State private var shelves = RemoteData<ReadingShelves>(cacheKey: "reading")
     @State private var active: [ActiveSession] = []
     @State private var kind: ReadingKind = .book
-    @State private var query = ""
+    @State private var addQuery = ""
     @State private var bookResults: [BookSearchResult] = []
     @State private var mangaResults: [MangaSearchResult] = []
     @State private var searchTask: Task<Void, Never>?
@@ -37,7 +41,7 @@ struct ReadingShelfScreen: View {
                 liveSessions
                 addField
 
-                if !query.isEmpty { searchResults }
+                if !addQuery.isEmpty { searchResults }
 
                 if let sections {
                     shelf("Reading now", sections.reading, section: .reading)
@@ -61,7 +65,7 @@ struct ReadingShelfScreen: View {
         .refreshable { await load(force: true) }
         .task { await load() }
         .task { await loadActive() }
-        .onChange(of: query) { _, new in scheduleSearch(new) }
+        .onChange(of: addQuery) { _, new in scheduleSearch(new) }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingStats = true } label: {
@@ -123,12 +127,12 @@ struct ReadingShelfScreen: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(Color.mqInkMuted)
             TextField(kind == .book ? "Add a book — search Hardcover"
-                                    : "Add manga · manhwa · manhua", text: $query)
+                                    : "Add manga · manhwa · manhua", text: $addQuery)
                 .font(.mqBody)
                 .autocorrectionDisabled()
                 .submitLabel(.search)
-            if !query.isEmpty {
-                Button { query = "" } label: {
+            if !addQuery.isEmpty {
+                Button { addQuery = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(Color.mqInkMuted)
                 }
                 .buttonStyle(.plain)
@@ -176,9 +180,19 @@ struct ReadingShelfScreen: View {
         }
     }
 
+    /// Narrow a shelf to the library filter, matching title or author.
+    private func matching(_ items: [ReadingItem]) -> [ReadingItem] {
+        guard !query.isEmpty else { return items }
+        return items.filter {
+            $0.displayTitle.localizedCaseInsensitiveContains(query)
+                || ($0.author?.localizedCaseInsensitiveContains(query) ?? false)
+        }
+    }
+
     @ViewBuilder
-    private func shelf(_ title: String, _ items: [ReadingItem],
+    private func shelf(_ title: String, _ unfiltered: [ReadingItem],
                        section: ReadingState) -> some View {
+        let items = matching(unfiltered)
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("\(title) · \(items.count)").mqEyebrowStyle()
@@ -246,7 +260,7 @@ struct ReadingShelfScreen: View {
         _ = try? await client.post("books/add",
                                    body: AddBookRequest(from: result, state: state),
                                    as: AddedResponse.self)
-        query = ""
+        addQuery = ""
         await load(force: true)
     }
 
@@ -255,7 +269,7 @@ struct ReadingShelfScreen: View {
         _ = try? await client.post("manga/add",
                                    body: AddMangaRequest(id: result.id, state: state),
                                    as: AddedResponse.self)
-        query = ""
+        addQuery = ""
         await load(force: true)
     }
 

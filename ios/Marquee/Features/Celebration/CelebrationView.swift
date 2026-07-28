@@ -79,10 +79,18 @@ struct CelebrationView: View {
                 center: .init(x: 0.5, y: 0.4), startRadius: 40, endRadius: 700)
 
             if let backdrop = celebration.show.backdrop, !reduceTransparency {
-                RemoteImage(url: backdrop, contentMode: .fill)
-                    .blur(radius: 40)
-                    .opacity(0.4)
-                    .scaleEffect(1.2)
+                // Through a clear frame, not directly: a `.fill` image asks for a width
+                // of height × aspect, which for a 16:9 backdrop over a full-height
+                // screen is far wider than the phone. The ZStack grew to match and the
+                // whole celebration ended up centred on a canvas half off screen.
+                Color.clear
+                    .overlay {
+                        RemoteImage(url: backdrop, contentMode: .fill)
+                            .blur(radius: 40)
+                            .opacity(0.4)
+                            .scaleEffect(1.2)
+                    }
+                    .clipped()
                     .allowsHitTesting(false)
             }
         }

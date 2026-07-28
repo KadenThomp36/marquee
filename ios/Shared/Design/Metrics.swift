@@ -19,6 +19,8 @@ public enum MQ {
     public static let upNextWidth: CGFloat = 172
     /// Width of a poster tile in a rail.
     public static let tileWidth: CGFloat = 124
+    /// Width of a punch card in the "haven't watched in a while" rail.
+    public static let showCardWidth: CGFloat = 158
     /// Width of a small "what you watched" card.
     public static let watchedWidth: CGFloat = 116
     /// Vertical slack inside a rail's clip so card shadows survive being clipped.

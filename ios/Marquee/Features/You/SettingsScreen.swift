@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Everything about how this install behaves: which devices are paired, what gets
 /// tracked, what you're told about, and how Plex and Overseerr are wired up.
@@ -16,6 +17,8 @@ struct SettingsScreen: View {
     @State private var plexWaiting = false
     @State private var confirmingUnpair = false
     @State private var revoking: DeviceSession?
+    /// Set when iOS has already been told no — a toggle here can't undo that.
+    @State private var notificationsBlocked = false
 
     var body: some View {
         MarqueeScreen {
@@ -241,6 +244,25 @@ struct SettingsScreen: View {
         Panel(title: "Notifications", symbol: "bell",
               note: "Off by default — switch on only what you want. Alerts land in your inbox, and on this device once you allow them.") {
             VStack(spacing: 0) {
+                if notificationsBlocked {
+                    // A switch that silently does nothing is worse than no switch.
+                    HStack(spacing: 9) {
+                        Image(systemName: "bell.slash")
+                            .foregroundStyle(Color.mqInkMuted)
+                        Text("iOS is holding notifications for Marquee. Turn them back on in the Settings app and these will start arriving.")
+                            .font(.mqCaption)
+                            .foregroundStyle(Color.mqInkMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 6)
+                        Button("Open") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(.mqChip)
+                    }
+                    .padding(.bottom, 12)
+                }
                 ForEach(prefs) { pref in
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle(isOn: Binding(
@@ -386,6 +408,13 @@ struct SettingsScreen: View {
 
     private func setPref(_ pref: NotificationPref, enabled: Bool) async {
         guard let client = session.client else { return }
+        // Turning a preference on is the moment to ask. Nothing asked before, so the
+        // app had permission for exactly none of this and every notification it raised
+        // was dropped on the floor.
+        if enabled {
+            let granted = await Notifications.shared.requestPermission()
+            notificationsBlocked = !granted
+        }
         if let index = prefs.firstIndex(where: { $0.id == pref.id }) { prefs[index].enabled = enabled }
         _ = try? await client.post("notifications/prefs",
                                    body: SetNotificationPref(type: pref.type, enabled: enabled,

@@ -89,6 +89,12 @@ struct UpcomingScreen: View {
         await data.load(force: force) {
             try await client.get("upcoming", as: UpcomingResponse.self)
         }
+        // Hand the air dates to the system while we have them. These fire on the day
+        // whether or not the app is ever opened again, which is the only part of
+        // notifications that doesn't depend on iOS granting a background slot.
+        if let episodes = data.value?.episodes {
+            await Notifications.shared.scheduleAirDates(episodes)
+        }
     }
 }
 

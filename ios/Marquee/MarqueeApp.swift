@@ -20,6 +20,14 @@ struct MarqueeApp: App {
             RootView()
                 .environment(session)
                 .tint(.mqBrass)
+                // Without a delegate installed, a notification raised while the app is
+                // open never appears and tapping one does nothing.
+                .task {
+                    Notifications.shared.start()
+                    // Also queue one on launch, not only on the way out — an app that
+                    // is opened and never backgrounded would otherwise never ask.
+                    BackgroundRefresh.schedule(id: refreshTaskID)
+                }
                 .onOpenURL { url in
                     // marquee://show/1396, marquee://next, marquee://library …
                     if let route = Navigator.route(fromLink: url.pathComponents

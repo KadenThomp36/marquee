@@ -13,6 +13,7 @@ struct RatingsPanel: View {
 
     @State private var activeSeason: Int?
     @State private var selectedEpisode: Int?
+    @State private var readoutWidth: CGFloat = 0
 
     private var seasons: [Int] {
         Array(Set(ratings.episodes.map(\.season))).sorted()
@@ -21,7 +22,29 @@ struct RatingsPanel: View {
     private var season: Int { activeSeason ?? seasons.first ?? 1 }
 
     private var episodes: [RatedEpisode] {
-        ratings.episodes.filter { $0.season == season }.sorted { $0.number < $1.number }
+        ratings.episodes
+            // Specials arrive numbered 0 and there is no episode zero to plot.
+            .filter { $0.season == season && $0.number > 0 }
+            .sorted { $0.number < $1.number }
+    }
+
+    /// The x band the line actually occupies, so the axis can't invent an episode 0
+    /// at one end or a phantom episode past the finale at the other.
+    private var episodeRange: ClosedRange<Int> {
+        let numbers = episodes.map(\.number)
+        guard let first = numbers.min(), let last = numbers.max() else { return 1...1 }
+        return first...max(first, last)
+    }
+
+    /// At most six labels, always landing on real episode numbers.
+    private var axisValues: [Int] {
+        let span = episodeRange.upperBound - episodeRange.lowerBound
+        guard span > 0 else { return [episodeRange.lowerBound] }
+        let step = max(1, Int((Double(span) / 5).rounded(.up)))
+        var values = Array(stride(from: episodeRange.lowerBound,
+                                  through: episodeRange.upperBound, by: step))
+        if values.last != episodeRange.upperBound { values.append(episodeRange.upperBound) }
+        return values
     }
 
     private var average: SeasonAverage? {
@@ -184,11 +207,15 @@ struct RatingsPanel: View {
             }
         }
         .chartYScale(domain: range)
+        .chartXScale(domain: Double(episodeRange.lowerBound)...Double(episodeRange.upperBound))
+        // A monotone curve overshoots its own data, and Charts doesn't clip by
+        // default — which is how the fill ended up spilling below the grid.
+        .chartPlotStyle { plot in plot.clipped() }
         .chartXAxis {
-            AxisMarks(preset: .aligned, values: .automatic(desiredCount: 6)) { value in
+            AxisMarks(preset: .aligned, values: axisValues.map(Double.init)) { value in
                 AxisValueLabel {
-                    if let number = value.as(Int.self) {
-                        Text("\(number)")
+                    if let number = value.as(Double.self) {
+                        Text("\(Int(number))")
                             .font(MarqueeFont.body(10.5, .semibold, relativeTo: .caption2))
                             .foregroundStyle(Color.mqInkMuted)
                     }
@@ -209,10 +236,32 @@ struct RatingsPanel: View {
             }
         }
         .chartXSelection(value: $selectedEpisode)
+        // A tick under the finger, the way every other scrubbable control on the
+        // system behaves.
+        .sensoryFeedback(.selection, trigger: selectedEpisode)
         .chartOverlay { proxy in
-            if let selectedEpisode,
-               let episode = episodes.first(where: { $0.number == selectedEpisode }) {
-                ScrubReadout(episode: episode, proxy: proxy)
+            GeometryReader { geometry in
+                if let selectedEpisode,
+                   let episode = episodes.first(where: { $0.number == selectedEpisode }),
+                   let anchor = proxy.plotFrame {
+                    let plot = geometry[anchor]
+                    let x = (proxy.position(forX: Double(selectedEpisode)) ?? 0) + plot.minX
+
+                    Rectangle()
+                        .fill(Color.mqBrass.opacity(0.35))
+                        .frame(width: 1, height: plot.height)
+                        .position(x: x, y: plot.midY)
+
+                    ScrubReadout(episode: episode)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                            readoutWidth = width
+                        }
+                        // Follows the finger, but stops at the edges rather than
+                        // hanging off the panel.
+                        .position(x: min(max(x, plot.minX + readoutWidth / 2),
+                                         plot.maxX - readoutWidth / 2),
+                                  y: plot.minY + 2)
+                }
             }
         }
         .accessibilityChartDescriptor(RatingsDescriptor(season: season, episodes: episodes))
@@ -239,7 +288,6 @@ struct RatingsPanel: View {
 /// The value bubble that follows your finger along the line.
 private struct ScrubReadout: View {
     let episode: RatedEpisode
-    let proxy: ChartProxy
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -264,7 +312,7 @@ private struct ScrubReadout: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(.thinMaterial, in: .rect(cornerRadius: 9))
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize()
         .allowsHitTesting(false)
     }
 }

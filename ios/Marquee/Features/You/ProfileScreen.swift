@@ -22,6 +22,7 @@ struct ProfileScreen: View {
     @Environment(Session.self) private var session
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.mqTopInset) private var topInset
+    @Environment(\.colorScheme) private var colorScheme
     @State private var profile: ProfilePayload?
     @State private var stats: Stats?
     @State private var advanced: AdvancedStats?
@@ -98,13 +99,13 @@ struct ProfileScreen: View {
     private func identity(_ profile: ProfilePayload) -> some View {
         ZStack(alignment: .top) {
             if let banner = profile.banner, !banner.isEmpty {
-                ProfileBanner(url: resolved(banner), height: 300 + topInset)
+                ProfileBanner(url: resolved(banner), height: 430 + topInset)
             }
 
             VStack(spacing: 10) {
                 AvatarView(person: profile.person, size: 96, baseURL: session.server?.baseURL)
                     .overlay(Circle().strokeBorder(Color.mqGround, lineWidth: 3))
-                    .padding(.top, hasBanner ? 168 + topInset : 12)
+                    .padding(.top, hasBanner ? 150 + topInset : 12)
 
                 VStack(spacing: 2) {
                     Text(profile.person.name)
@@ -128,6 +129,10 @@ struct ProfileScreen: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal, MQ.gutter)
+            // Over banner art the identity block is reading against a dark image, not
+            // against the page. Flipping the scheme for this subtree turns every
+            // semantic ink light at once, which is what the web client does by hand.
+            .environment(\.colorScheme, hasBanner ? .dark : colorScheme)
         }
     }
 
@@ -430,6 +435,7 @@ struct ProfileScreen: View {
             Button("Unpair", role: .destructive) {
                 Task {
                     WidgetBridge.clear()
+                    Notifications.shared.clearAll()
                     await session.unpair()
                 }
             }

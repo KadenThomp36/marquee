@@ -9,6 +9,7 @@ struct LibraryTab: View {
     @Environment(Session.self) private var session
     @State private var path = NavigationPath()
     @State private var section: Section = .films
+    @State private var query = ""
 
     enum Section: String, CaseIterable, Identifiable {
         case films = "Films"
@@ -21,6 +22,10 @@ struct LibraryTab: View {
         session.me?.features?.tracksReading == true
             ? Section.allCases
             : [.films, .shows]
+    }
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -37,13 +42,18 @@ struct LibraryTab: View {
                     }
 
                     switch section {
-                    case .films: FilmsShelf()
-                    case .shows: ShowsShelf()
-                    case .reading: ReadingShelfScreen()
+                    case .films: FilmsShelf(query: trimmedQuery)
+                    case .shows: ShowsShelf(query: trimmedQuery)
+                    case .reading: ReadingShelfScreen(query: trimmedQuery)
                     }
                 }
             }
             .navigationTitle("Library")
+            // Filters what's already on the shelf. Finding something you *don't*
+            // have is the Search tab's job, and the empty state says so.
+            .searchable(text: $query,
+                        placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Filter your library")
             .marqueeDestinations()
         }
         .routed(into: $path)
@@ -55,6 +65,8 @@ struct LibraryTab: View {
 
 /// Watched and watchlist, the two shelves a film can be on.
 struct FilmsShelf: View {
+    var query: String = ""
+
     @Environment(Session.self) private var session
     @State private var data = RemoteData<MovieShelves>(cacheKey: "movies")
     @State private var tab: Shelf = .watched
@@ -75,7 +87,9 @@ struct FilmsShelf: View {
 
     private var films: [MovieCard] {
         guard let value = data.value else { return [] }
-        return tab == .watched ? value.watched : value.watchlist
+        let shelf = tab == .watched ? value.watched : value.watchlist
+        guard !query.isEmpty else { return shelf }
+        return shelf.filter { $0.displayTitle.localizedCaseInsensitiveContains(query) }
     }
 
     var body: some View {
@@ -90,7 +104,9 @@ struct FilmsShelf: View {
                 .padding(.horizontal, MQ.gutter)
 
                 if films.isEmpty, data.value != nil {
-                    EmptyLine("Nothing here yet — find something in Search.")
+                    EmptyLine(query.isEmpty
+                              ? "Nothing here yet — find something in Search."
+                              : "No film on this shelf matches \u{201C}\(query)\u{201D}.")
                 } else {
                     LazyVGrid(columns: columns, spacing: 16) {
                         ForEach(films) { film in
@@ -243,6 +259,8 @@ private struct FilmTile: View {
 
 /// Every show you've watched anything of, newest first, with how far in you are.
 struct ShowsShelf: View {
+    var query: String = ""
+
     @Environment(Session.self) private var session
     @State private var data = RemoteData<WatchedPage>(cacheKey: "watched-shows")
     @State private var loadingMore = false
@@ -259,12 +277,21 @@ struct ShowsShelf: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 if let page = data.value {
-                    Text("\(page.total) series")
+                    let items = query.isEmpty ? page.items : page.items.filter {
+                        $0.displayTitle.localizedCaseInsensitiveContains(query)
+                    }
+
+                    Text(query.isEmpty ? "\(page.total) series"
+                                       : "\(items.count) of \(page.total) series")
                         .mqEyebrowStyle()
                         .padding(.horizontal, MQ.gutter)
 
+                    if items.isEmpty {
+                        EmptyLine("No series matches \u{201C}\(query)\u{201D}.")
+                    }
+
                     LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(page.items) { item in
+                        ForEach(items) { item in
                             WatchedTile(item: item, kind: "shows")
                         }
                     }

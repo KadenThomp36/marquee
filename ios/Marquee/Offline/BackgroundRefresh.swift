@@ -22,7 +22,9 @@ enum BackgroundRefresh {
 
     static func schedule(id: String) {
         let request = BGAppRefreshTaskRequest(identifier: id)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 2 * 3600)
+        // iOS treats this as "not before", not "at". Asking sooner gives it more
+        // chances to say yes; it will still throttle to whatever it thinks is fair.
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 3600)
         try? BGTaskScheduler.shared.submit(request)
     }
 
