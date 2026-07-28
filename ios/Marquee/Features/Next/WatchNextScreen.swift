@@ -367,6 +367,8 @@ struct HorizontalRail<Content: View>: View {
     var spacing: CGFloat = MQ.railGap
     @ViewBuilder var content: Content
 
+    @State private var punchInFlight = false
+
     var body: some View {
         ScrollView(.horizontal) {
             LazyHStack(alignment: .top, spacing: spacing) {
@@ -382,6 +384,10 @@ struct HorizontalRail<Content: View>: View {
             .scrollTargetLayout()
         }
         .scrollIndicators(.hidden)
+        // Punching lifts a card well outside the rail; clipping resumes the moment
+        // it's gone.
+        .scrollClipDisabled(punchInFlight)
+        .onPreferenceChange(PunchInFlightKey.self) { punchInFlight = $0 }
         .padding(.vertical, -MQ.railShadowRoom)
     }
 }

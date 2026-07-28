@@ -54,18 +54,24 @@ struct PunchReceiptBanner: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Color.mqInkMuted)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // The whole slab is the target, not just the glyphs on it.
+            .contentShape(.rect(cornerRadius: 18))
             .glassEffect(.regular, in: .rect(cornerRadius: 18))
         }
         .buttonStyle(.plain)
         .padding(.horizontal, MQ.gutter)
         .offset(y: max(0, drag))
-        .gesture(
-            DragGesture()
-                .onChanged { drag = $0.translation.height }
+        // Simultaneous, and only after a deliberate 18pt: a plain `gesture` with the
+        // default zero minimum distance claims every touch the moment it lands, so
+        // the link underneath never sees a tap at all.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 18)
+                .onChanged { drag = max(0, $0.translation.height) }
                 .onEnded { value in
-                    if value.translation.height > 30 { onDismiss() } else {
+                    if value.translation.height > 40 { onDismiss() } else {
                         withAnimation(.snappy) { drag = 0 }
                     }
                 }

@@ -14,6 +14,7 @@ struct UpNextRail: View {
 
     @State private var anchor: RailEntry.ID?
     @State private var hasParked = false
+    @State private var punchInFlight = false
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -36,15 +37,22 @@ struct UpNextRail: View {
         }
         .contentMargins(.horizontal, MQ.gutter, for: .scrollContent)
         .scrollIndicators(.hidden)
+        .scrollClipDisabled(punchInFlight)
         // History scrolls up into the leading margin, which left a card sliced off
         // square against the screen edge. Fading it there reads as "there's more
-        // behind you" instead of as a clipping bug.
+        // behind you" instead of as a clipping bug — but the fade is a mask, and a
+        // mask clips too, so it stands down while a ticket is being punched.
         .mask {
-            LinearGradient(stops: [.init(color: .clear, location: 0),
-                                   .init(color: .black, location: 0.05),
-                                   .init(color: .black, location: 1)],
-                           startPoint: .leading, endPoint: .trailing)
+            if punchInFlight {
+                Rectangle()
+            } else {
+                LinearGradient(stops: [.init(color: .clear, location: 0),
+                                       .init(color: .black, location: 0.05),
+                                       .init(color: .black, location: 1)],
+                               startPoint: .leading, endPoint: .trailing)
+            }
         }
+        .onPreferenceChange(PunchInFlightKey.self) { punchInFlight = $0 }
         .padding(.vertical, -MQ.railShadowRoom)
         .scrollPosition(id: $anchor, anchor: .leading)
         .onAppear(perform: park)
@@ -102,6 +110,16 @@ struct PunchedCardValues {
     let episodeLine: String
     let subline: String?
     let progress: Double
+}
+
+/// Raised by a card while its punch is in flight, so the rail around it knows to
+/// stop clipping for a moment. A preference rather than a binding: the card is
+/// several layers down and this is the only thing the rail needs to hear about.
+struct PunchInFlightKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
 }
 
 enum RailEntry: Identifiable, Hashable {
@@ -199,6 +217,7 @@ struct PunchCard: View {
                 y: colorScheme == .light ? 3 : 6)
         // Two sensations: the thud of the die going through, then the mark landing.
         .zIndex(stub == nil ? 0 : 3)
+        .preference(key: PunchInFlightKey.self, value: stub != nil)
         .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
         .sensoryFeedback(.success, trigger: punched)
         .accessibilityElement(children: .contain)
