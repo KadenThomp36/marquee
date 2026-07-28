@@ -18,6 +18,8 @@ struct ShowScreen: View {
     @State private var aheadPrompt: AheadPrompt?
     @State private var rating: Int?
     @Namespace private var artNamespace
+    /// One decision for the page, shared by every review on it.
+    @State private var gate = SpoilerGate()
 
     init(showID: Int) {
         self.showID = showID
@@ -56,6 +58,9 @@ struct ShowScreen: View {
         .navigationTitle(model.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarTitleDisplayMode(.inline)
+        .environment(gate)
+        .onChange(of: model.isComplete) { _, complete in gate.earned = complete }
+        .onAppear { gate.earned = model.isComplete }
         .task { await model.load(session: session) }
         .task { await model.loadRatings(session: session) }
         .task { await model.loadProviders(session: session) }
@@ -343,7 +348,7 @@ struct ShowScreen: View {
                         })
 
         ReviewsSection(itemType: "show", itemID: showID,
-                       hasEarnedSpoilers: model.isComplete)
+                       subject: model.detail?.displayTitle ?? "this show")
     }
 
     private var loadingSkeleton: some View {

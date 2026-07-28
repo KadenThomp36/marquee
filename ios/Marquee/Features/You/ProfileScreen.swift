@@ -69,17 +69,21 @@ struct ProfileScreen: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
             .ignoresSafeArea(.container, edges: hasBanner ? .top : [])
             .refreshable { await loadAll() }
-            .mqPageTitle(isMe ? "You" : (profile?.person.name ?? "Profile"),
-                         handover: hasBanner ? 300 : 150)
+
         }
-        .toolbar {
+        .mqBareNavigationBar()
+        .overlay(alignment: .topTrailing) {
             if isMe {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(value: Navigator.Route.settings) {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel("Settings")
+                NavigationLink(value: Navigator.Route.settings) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Color.mqInk)
+                        .frame(width: 40, height: 40)
+                        .glassEffect(.regular, in: .circle)
                 }
+                .buttonStyle(.plain)
+                .padding(.trailing, MQ.gutter)
+                .accessibilityLabel("Settings")
             }
         }
         .task { await loadAll() }

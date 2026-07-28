@@ -81,7 +81,7 @@ struct UpcomingScreen: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .refreshable { await load(force: true) }
-            .mqPageTitle("Upcoming")
+            .mqBareNavigationBar()
         }
         .task { await load() }
     }

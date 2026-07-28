@@ -56,7 +56,7 @@ struct HistoryScreen: View {
                 .padding(.vertical, 10)
             }
         }
-        .mqPageTitle("History")
+        .mqUntitledNavigationBar()
         .onChange(of: tab) { _, _ in reset() }
     }
 
@@ -364,7 +364,7 @@ struct WatchedGridScreen: View {
                 .padding(.vertical, 10)
             }
         }
-        .mqPageTitle("Watched")
+        .mqUntitledNavigationBar()
         .navigationBarTitleDisplayMode(.inline)
         .task(id: selected) { await load() }
     }

@@ -47,7 +47,7 @@ struct ListsScreen: View {
             }
             .refreshable { await load(force: true) }
         }
-        .mqPageTitle("Lists")
+        .mqUntitledNavigationBar()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { creating = true } label: { Image(systemName: "plus") }
@@ -206,7 +206,8 @@ struct ListScreen: View {
                 SkeletonBlock(height: 200).padding(MQ.gutter)
             }
         }
-        .mqPageTitle(list?.name ?? "List", handover: 90)
+        .navigationTitle(list?.name ?? "List")
+        .navigationBarTitleDisplayMode(.inline)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {

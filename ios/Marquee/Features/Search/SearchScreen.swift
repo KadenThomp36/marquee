@@ -37,7 +37,7 @@ struct SearchScreen: View {
                 .padding(.vertical, 10)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
-            .mqPageTitle("Discover")
+            .mqBareNavigationBar()
         }
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Shows & films")

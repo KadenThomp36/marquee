@@ -17,6 +17,7 @@ struct MovieScreen: View {
     @State private var showingGallery = false
     @State private var showingRequestSheet = false
     @State private var rating: Int?
+    @State private var gate = SpoilerGate()
 
     var body: some View {
         MarqueeScreen {
@@ -43,6 +44,8 @@ struct MovieScreen: View {
         }
         .navigationTitle(movie?.displayTitle ?? "Film")
         .navigationBarTitleDisplayMode(.inline)
+        .environment(gate)
+        .onChange(of: movie?.isWatched) { _, watched in gate.earned = watched ?? false }
         .task { await load() }
         .task { await loadExtras() }
         .fullScreenCover(isPresented: $showingGallery) {
@@ -181,7 +184,7 @@ struct MovieScreen: View {
             DetailSection(title: "Cast") { CastStrip(people: cast) }
         }
 
-        ReviewsSection(itemType: "movie", itemID: movieID, hasEarnedSpoilers: movie.isWatched)
+        ReviewsSection(itemType: "movie", itemID: movieID, subject: "this film")
     }
 
     private func facts(_ movie: MovieDetail) -> String {

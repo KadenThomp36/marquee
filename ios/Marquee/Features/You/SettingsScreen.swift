@@ -38,7 +38,7 @@ struct SettingsScreen: View {
                 .padding(.bottom, 30)
             }
         }
-        .mqPageTitle("Settings")
+        .mqUntitledNavigationBar()
         .task { await loadAll() }
         .confirmationDialog("Unpair this device?", isPresented: $confirmingUnpair,
                             titleVisibility: .visible) {

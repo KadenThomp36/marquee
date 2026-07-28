@@ -9,10 +9,11 @@ import SwiftUI
 struct ReviewsSection: View {
     let itemType: String
     let itemID: Int
-    /// True when the viewer has watched enough for the bodies to be safe.
-    let hasEarnedSpoilers: Bool
+    /// What is being spoiled, said plainly on the cover: "S2 · E6", "this film".
+    var subject = "this"
 
     @Environment(Session.self) private var session
+    @Environment(SpoilerGate.self) private var gate
     @State private var reviews: [Review] = []
     @State private var external: [ExternalReview] = []
     @State private var editing: EditingReview?
@@ -24,7 +25,7 @@ struct ReviewsSection: View {
             DetailSection(title: "Reviews", count: reviews.isEmpty ? nil : "\(reviews.count)") {
                 VStack(spacing: 10) {
                     if let mine = reviews.first(where: \.mine) {
-                        ReviewCard(review: mine, isVeiled: false,
+                        ReviewCard(review: mine,
                                    baseURL: session.server?.baseURL,
                                    onEdit: { editing = EditingReview(existing: mine) },
                                    onDelete: { deleteTarget = mine },
@@ -43,12 +44,19 @@ struct ReviewsSection: View {
                         .mqPanel()
                     }
 
-                    ForEach(reviews.filter { !$0.mine }) { review in
-                        ReviewCard(review: review,
-                                   isVeiled: !hasEarnedSpoilers,
-                                   baseURL: session.server?.baseURL,
-                                   onEdit: nil, onDelete: nil,
-                                   onReply: { replyingTo = review })
+                    let others = reviews.filter { !$0.mine }
+                    if !others.isEmpty {
+                        SpoilerCover(what: "^[\(others.count) review](inflect: true)",
+                                     subject: subject) {
+                            VStack(spacing: 10) {
+                                ForEach(others) { review in
+                                    ReviewCard(review: review,
+                                               baseURL: session.server?.baseURL,
+                                               onEdit: nil, onDelete: nil,
+                                               onReply: { replyingTo = review })
+                                }
+                            }
+                        }
                     }
 
                     if reviews.isEmpty {
@@ -64,9 +72,12 @@ struct ReviewsSection: View {
 
             if !external.isEmpty {
                 DetailSection(title: "From the community", count: "\(external.count)") {
-                    VStack(spacing: 10) {
-                        ForEach(external.prefix(12)) { review in
-                            ExternalReviewCard(review: review, isVeiled: !hasEarnedSpoilers)
+                    SpoilerCover(what: "^[\(external.count) comment](inflect: true)",
+                                 subject: subject) {
+                        VStack(spacing: 10) {
+                            ForEach(external.prefix(12)) { review in
+                                ExternalReviewCard(review: review)
+                            }
                         }
                     }
                     .padding(.horizontal, MQ.gutter)
@@ -143,7 +154,6 @@ struct EditingReview: Identifiable {
 
 private struct ReviewCard: View {
     let review: Review
-    let isVeiled: Bool
     let baseURL: URL?
     let onEdit: (() -> Void)?
     let onDelete: (() -> Void)?
@@ -186,7 +196,7 @@ private struct ReviewCard: View {
             }
 
             if let body = review.body, !body.isEmpty {
-                SpoilerVeil(isVeiled: isVeiled, label: "Spoiler") {
+                Group {
                     Text(body)
                         .font(.mqBody)
                         .foregroundStyle(Color.mqInkSoft)
@@ -236,7 +246,6 @@ private struct ReviewCard: View {
 
 private struct ExternalReviewCard: View {
     let review: ExternalReview
-    let isVeiled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -266,10 +275,8 @@ private struct ExternalReviewCard: View {
                 }
             }
 
-            SpoilerVeil(isVeiled: isVeiled, label: "Spoiler") {
-                ExpandableText(text: review.body, lineLimit: 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            ExpandableText(text: review.body, lineLimit: 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -277,57 +284,6 @@ private struct ExternalReviewCard: View {
     }
 }
 
-/// The frosted curtain over anything you haven't earned yet. One tap lifts it.
-struct SpoilerVeil<Content: View>: View {
-    let isVeiled: Bool
-    var label = "Contains spoilers"
-    @ViewBuilder var content: Content
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @State private var revealed = false
-
-    private var covered: Bool { isVeiled && !revealed }
-
-    var body: some View {
-        content
-            .blur(radius: covered && !reduceTransparency ? 9 : 0)
-            .opacity(covered && reduceTransparency ? 0 : 1)
-            .overlay {
-                if covered {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: MQ.radiusSmall)
-                            .fill(Color.mqGround.opacity(reduceTransparency ? 1 : 0.55))
-                        VStack(spacing: 2) {
-                            Image(systemName: "eye.slash.fill")
-                                .font(.system(size: 17))
-                                .foregroundStyle(Color.mqBrass)
-                            Text(label)
-                                .font(MarqueeFont.body(11.5, .bold, relativeTo: .caption2))
-                                .textCase(.uppercase)
-                                .tracking(1.2)
-                                .foregroundStyle(Color.mqBrassBright)
-                            Text("Tap to reveal")
-                                .font(MarqueeFont.body(11, .regular, relativeTo: .caption2))
-                                .foregroundStyle(Color.mqInkSoft)
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .background(Color.mqPanelRaised.opacity(0.85), in: .capsule)
-                    }
-                }
-            }
-            .contentShape(.rect)
-            .onTapGesture {
-                guard covered else { return }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.4)) { revealed = true }
-            }
-            .accessibilityElement(children: covered ? .ignore : .contain)
-            .accessibilityLabel(covered ? "\(label). Double tap to reveal." : "")
-            .accessibilityAddTraits(covered ? .isButton : [])
-            .accessibilityAction(named: "Reveal") { revealed = true }
-    }
-}
 
 // MARK: - Editors
 

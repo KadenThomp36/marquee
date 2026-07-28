@@ -52,7 +52,7 @@ struct WatchNextScreen: View {
             .scrollEdgeEffectStyle(.soft, for: .top)
             .refreshable { await refresh(force: true) }
             .coordinateSpace(.named(MQ.punchSpace))
-            .mqPageTitle("Watch Next", handover: 72)
+
             // The flight layer, above the scroll view and every rail in it.
             .overlay(alignment: .topLeading) {
                 if let flight {
@@ -81,7 +81,7 @@ struct WatchNextScreen: View {
         }
         // Two sensations: the thud of the die going through, then the mark landing.
         .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
-        .toolbar { toolbar }
+        .mqBareNavigationBar()
         .task { await refresh() }
         .task { await loadDiscover() }
     }
@@ -162,18 +162,36 @@ struct WatchNextScreen: View {
     }
 
     private var greeting: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(timeOfDay)
-                .font(.mqTitle)
-                .foregroundStyle(Color.mqInk)
-            if let name = session.me?.shortName {
-                Text(name)
-                    .font(MarqueeFont.wordmark(21, relativeTo: .title2))
-                    .foregroundStyle(Color.mqBrass)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(timeOfDay)
+                    .font(.mqTitle)
+                    .foregroundStyle(Color.mqInk)
+                if let name = session.me?.shortName {
+                    Text(name)
+                        .font(MarqueeFont.wordmark(21, relativeTo: .title2))
+                        .foregroundStyle(Color.mqBrass)
+                }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            Spacer(minLength: 8)
+
+            NavigationLink(value: Navigator.Route.notifications) {
+                Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
+                    .symbolRenderingMode(.hierarchical)
+                    .font(.system(size: 19))
+                    .foregroundStyle(Color.mqInk)
+                    .frame(width: 40, height: 40)
+                    .glassEffect(.regular, in: .circle)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(unreadCount > 0
+                                ? "Notifications, \(unreadCount) unread"
+                                : "Notifications")
         }
         .padding(.horizontal, MQ.gutter)
-        .accessibilityElement(children: .combine)
     }
 
     private var timeOfDay: String {
@@ -206,18 +224,6 @@ struct WatchNextScreen: View {
         .padding(.horizontal, MQ.gutter)
     }
 
-    @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
-            NavigationLink(value: Navigator.Route.notifications) {
-                Image(systemName: unreadCount > 0 ? "bell.badge.fill" : "bell")
-                    .symbolRenderingMode(.hierarchical)
-            }
-            .accessibilityLabel(unreadCount > 0
-                                ? "Notifications, \(unreadCount) unread"
-                                : "Notifications")
-        }
-    }
 
     // MARK: - Loading
 

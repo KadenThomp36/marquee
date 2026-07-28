@@ -13,6 +13,7 @@ struct ReadingDetailScreen: View {
     var isHardcoverPreview = false
 
     @Environment(Session.self) private var session
+    @State private var gate = SpoilerGate(earned: true)
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.dismiss) private var dismiss
 
@@ -392,7 +393,7 @@ struct ReadingDetailScreen: View {
         .padding(.horizontal, MQ.gutter)
 
         if detail.tracked, let id = item.id {
-            ReviewsSection(itemType: kind.rawValue, itemID: id, hasEarnedSpoilers: true)
+            ReviewsSection(itemType: kind.rawValue, itemID: id, subject: "this")
         }
     }
 

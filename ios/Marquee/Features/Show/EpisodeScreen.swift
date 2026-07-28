@@ -12,6 +12,8 @@ struct EpisodeScreen: View {
     @State private var error: String?
     @State private var aheadPrompt = false
     @State private var busy = false
+    /// One decision for the whole page: summary and comments reveal together.
+    @State private var gate = SpoilerGate()
 
     var body: some View {
         MarqueeScreen {
@@ -39,6 +41,8 @@ struct EpisodeScreen: View {
         }
         .navigationTitle(episode?.showTitle ?? "Episode")
         .navigationBarTitleDisplayMode(.inline)
+        .environment(gate)
+        .onChange(of: episode?.watched) { _, watched in gate.earned = watched ?? false }
         .task { await load() }
         .confirmationDialog(aheadMessage, isPresented: $aheadPrompt, titleVisibility: .visible) {
             if let episode, let behind = episode.earlierUnwatched {
@@ -103,7 +107,9 @@ struct EpisodeScreen: View {
             }
 
             if let overview = episode.overview, !overview.isEmpty {
-                SpoilerVeil(isVeiled: !episode.watched, label: "Episode spoilers") {
+                SpoilerCover(what: "The summary",
+                             subject: episode.code,
+                             compact: true) {
                     Text(overview)
                         .font(.mqBody)
                         .foregroundStyle(Color.mqInkSoft)
@@ -124,7 +130,7 @@ struct EpisodeScreen: View {
             }
 
             ReviewsSection(itemType: "episode", itemID: episode.reviewKey,
-                           hasEarnedSpoilers: episode.watched)
+                           subject: episode.code)
                 .padding(.horizontal, -MQ.gutter)
 
             episodeNav(episode)
