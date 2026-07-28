@@ -23,6 +23,12 @@ struct WatchNextScreen: View {
     /// The stub from the last punch, and the timer that clears it.
     @State private var receipt: PunchReceipt?
     @State private var receiptTimer: Task<Void, Never>?
+    /// The ticket currently in the air, flown here rather than inside a rail so that
+    /// nothing between it and the window can clip it.
+    @State private var flight: PunchFlight?
+    @State private var beat: PunchBeat = .biting
+    @State private var holeRadius: CGFloat = 0
+    @State private var bit = false
 
     var body: some View {
         MarqueeScreen {
@@ -45,6 +51,24 @@ struct WatchNextScreen: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .refreshable { await refresh(force: true) }
+            .coordinateSpace(.named(MQ.punchSpace))
+            // The flight layer, above the scroll view and every rail in it.
+            .overlay(alignment: .topLeading) {
+                if let flight {
+                    PunchedTicket(poster: flight.values.poster,
+                                  title: flight.values.title,
+                                  episodeLine: flight.values.episodeLine,
+                                  subline: flight.values.subline,
+                                  progress: flight.values.progress,
+                                  holeInset: PunchCard.holeInset,
+                                  holeRadius: holeRadius,
+                                  beat: beat)
+                        .frame(width: flight.frame.width, height: flight.frame.height)
+                        .offset(x: flight.frame.minX, y: flight.frame.minY)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
             // Over the tab bar, where the thumb that just punched already is.
             .overlay(alignment: .bottom) {
                 if let receipt {
@@ -54,6 +78,8 @@ struct WatchNextScreen: View {
                 }
             }
         }
+        // Two sensations: the thud of the die going through, then the mark landing.
+        .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
         .navigationTitle("Watch Next")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
@@ -70,7 +96,8 @@ struct WatchNextScreen: View {
                 PlainRailHeader(title: "Up Next")
                 UpNextRail(upNext: dashboard.upNext,
                            recent: dashboard.recent,
-                           onPunch: punch)
+                           onPunch: punch,
+                           onLift: fly)
             }
         }
 
@@ -81,7 +108,7 @@ struct WatchNextScreen: View {
         if !dashboard.stale.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 PlainRailHeader(title: "Haven't watched in a while")
-                ShowCardRail(shows: dashboard.stale, onPunch: punch)
+                ShowCardRail(shows: dashboard.stale, onPunch: punch, onLift: fly)
             }
         }
 
@@ -268,6 +295,42 @@ struct WatchNextScreen: View {
         }
     }
 
+    /// Punch, hold, lift, and away — run here so the ticket can leave the rail it
+    /// came from. Inside the rail it was sliced off at the bounds the moment it grew.
+    private func fly(_ new: PunchFlight) {
+        holeRadius = 0
+        beat = .biting
+        flight = new
+        bit.toggle()
+
+        Task {
+            // 1. The die comes down and bites through. Stiff and fast — a punch is
+            //    not a gentle thing — with the card compressing under it.
+            withAnimation(.spring(response: 0.16, dampingFraction: 0.62)) {
+                holeRadius = 10
+            }
+            try? await Task.sleep(for: PunchTiming.bite)
+
+            // 2. Through. The chad drops, the card springs back, and it *sits there*
+            //    punched. This pause is the whole animation: without it there is no
+            //    moment where you see what happened, only something leaving.
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { beat = .punched }
+            try? await Task.sleep(for: PunchTiming.hold)
+
+            // 3. Lifted off the spike — rises, tips, shadow lengthens underneath.
+            withAnimation(.easeOut(duration: 0.22)) { beat = .lifted }
+            try? await Task.sleep(for: PunchTiming.lift)
+
+            // 4. And away, into the history end of the rail.
+            withAnimation(.easeIn(duration: 0.46)) { beat = .gone }
+            try? await Task.sleep(for: PunchTiming.away)
+
+            flight = nil
+            holeRadius = 0
+            beat = .biting
+        }
+    }
+
     /// Raise the stub, and take it away again a few seconds later. Replacing one
     /// cancels the previous countdown, so punching twice quickly doesn't have the
     /// first timer pull the second receipt off screen early.
@@ -367,8 +430,6 @@ struct HorizontalRail<Content: View>: View {
     var spacing: CGFloat = MQ.railGap
     @ViewBuilder var content: Content
 
-    @State private var punchInFlight = false
-
     var body: some View {
         ScrollView(.horizontal) {
             LazyHStack(alignment: .top, spacing: spacing) {
@@ -384,10 +445,6 @@ struct HorizontalRail<Content: View>: View {
             .scrollTargetLayout()
         }
         .scrollIndicators(.hidden)
-        // Punching lifts a card well outside the rail; clipping resumes the moment
-        // it's gone.
-        .scrollClipDisabled(punchInFlight)
-        .onPreferenceChange(PunchInFlightKey.self) { punchInFlight = $0 }
         .padding(.vertical, -MQ.railShadowRoom)
     }
 }

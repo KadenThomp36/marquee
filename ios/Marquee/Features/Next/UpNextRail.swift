@@ -11,10 +11,11 @@ struct UpNextRail: View {
     let upNext: [ShowCard]
     let recent: [WatchEntry]
     let onPunch: (ShowCard) async -> Void
+    /// Handed up to the screen, which flies the ticket above everything.
+    let onLift: (PunchFlight) -> Void
 
     @State private var anchor: RailEntry.ID?
     @State private var hasParked = false
-    @State private var punchInFlight = false
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -26,7 +27,7 @@ struct UpNextRail: View {
                     case .divider(let label, _):
                         DayDivider(label: label)
                     case .next(let show):
-                        PunchCard(show: show, onPunch: onPunch)
+                        PunchCard(show: show, onPunch: onPunch, onLift: onLift)
                             .frame(width: MQ.upNextWidth,
                                    height: MQ.upNextWidth / MQ.posterAspect)
                     }
@@ -37,22 +38,15 @@ struct UpNextRail: View {
         }
         .contentMargins(.horizontal, MQ.gutter, for: .scrollContent)
         .scrollIndicators(.hidden)
-        .scrollClipDisabled(punchInFlight)
         // History scrolls up into the leading margin, which left a card sliced off
         // square against the screen edge. Fading it there reads as "there's more
-        // behind you" instead of as a clipping bug — but the fade is a mask, and a
-        // mask clips too, so it stands down while a ticket is being punched.
+        // behind you" instead of as a clipping bug.
         .mask {
-            if punchInFlight {
-                Rectangle()
-            } else {
-                LinearGradient(stops: [.init(color: .clear, location: 0),
-                                       .init(color: .black, location: 0.05),
-                                       .init(color: .black, location: 1)],
-                               startPoint: .leading, endPoint: .trailing)
-            }
+            LinearGradient(stops: [.init(color: .clear, location: 0),
+                                   .init(color: .black, location: 0.05),
+                                   .init(color: .black, location: 1)],
+                           startPoint: .leading, endPoint: .trailing)
         }
-        .onPreferenceChange(PunchInFlightKey.self) { punchInFlight = $0 }
         .padding(.vertical, -MQ.railShadowRoom)
         .scrollPosition(id: $anchor, anchor: .leading)
         .onAppear(perform: park)
@@ -112,16 +106,6 @@ struct PunchedCardValues {
     let progress: Double
 }
 
-/// Raised by a card while its punch is in flight, so the rail around it knows to
-/// stop clipping for a moment. A preference rather than a binding: the card is
-/// several layers down and this is the only thing the rail needs to hear about.
-struct PunchInFlightKey: PreferenceKey {
-    static let defaultValue = false
-    static func reduce(value: inout Bool, nextValue: () -> Bool) {
-        value = value || nextValue()
-    }
-}
-
 enum RailEntry: Identifiable, Hashable {
     case past(WatchEntry)
     case divider(String, Int)
@@ -140,11 +124,12 @@ enum RailEntry: Identifiable, Hashable {
 struct ShowCardRail: View {
     let shows: [ShowCard]
     let onPunch: (ShowCard) async -> Void
+    let onLift: (PunchFlight) -> Void
 
     var body: some View {
         HorizontalRail {
             ForEach(shows) { show in
-                PunchCard(show: show, onPunch: onPunch)
+                PunchCard(show: show, onPunch: onPunch, onLift: onLift)
                     .frame(width: MQ.showCardWidth,
                            height: MQ.showCardWidth / MQ.posterAspect)
             }
@@ -158,22 +143,19 @@ struct ShowCardRail: View {
 struct PunchCard: View {
     let show: ShowCard
     let onPunch: (ShowCard) async -> Void
+    var onLift: ((PunchFlight) -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     @State private var punching = false
     @State private var punched = false
-    /// The punched copy of this card, and how far through its flight it is. The
-    /// values are frozen at the tap, because the live card advances underneath it.
-    @State private var stub: PunchedCardValues?
-    @State private var beat: PunchBeat = .biting
-    @State private var holeRadius: CGFloat = 0
-    /// Separate from `punched` so the heavy thud of the die and the little chime of
-    /// the mark landing are two different sensations.
-    @State private var bit = false
+    /// Where this card sits on screen, so the ticket can start exactly here.
+    @State private var frame: CGRect = .zero
+    /// True while the screen is flying this card's ticket.
+    @State private var lifted = false
 
     /// Centre of the punch button: 7pt of padding plus half of its 44pt frame.
-    private static let holeInset = CGSize(width: 29, height: 29)
+    static let holeInset = CGSize(width: 29, height: 29)
     @Namespace private var glass
 
     var body: some View {
@@ -195,30 +177,16 @@ struct PunchCard: View {
             if show.isEnded { EndedTag().padding(9) }
         }
         .overlay(alignment: .topTrailing) {
-            if show.nextEp != nil, stub == nil { punchButton.padding(7) }
-        }
-        // Above the clip, so the punched card can sail off and away down the rail.
-        .overlay {
-            if let stub {
-                PunchedTicket(poster: stub.poster,
-                              title: stub.title,
-                              episodeLine: stub.episodeLine,
-                              subline: stub.subline,
-                              progress: stub.progress,
-                              holeInset: Self.holeInset,
-                              holeRadius: holeRadius,
-                              beat: beat)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+            if show.nextEp != nil, !lifted { punchButton.padding(7) }
         }
         .shadow(color: .black.opacity(colorScheme == .light ? 0.12 : 0.3),
                 radius: colorScheme == .light ? 7 : 12,
                 y: colorScheme == .light ? 3 : 6)
-        // Two sensations: the thud of the die going through, then the mark landing.
-        .zIndex(stub == nil ? 0 : 3)
-        .preference(key: PunchInFlightKey.self, value: stub != nil)
-        .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: bit)
+        // Measured against the screen rather than the rail: the ticket is flown by
+        // the screen, which is the only layer nothing clips.
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named(MQ.punchSpace))
+        } action: { frame = $0 }
         .sensoryFeedback(.success, trigger: punched)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabel)
@@ -264,53 +232,31 @@ struct PunchCard: View {
 
     /// Punch, lift, sail. The mark itself goes to the server in parallel — the
     /// animation is not allowed to slow down the thing you actually asked for.
+    /// Hand the punch to the screen, which owns the flight, and get this card's own
+    /// button out of the way for the duration.
     private func punch() async {
-        guard !reduceMotion else {
+        guard !reduceMotion, let onLift, frame != .zero else {
             await onPunch(show)
             punching = false
             return
         }
 
-        // Freeze the card as it is now; the live one behind advances immediately.
-        holeRadius = 0
-        beat = .biting
-        stub = PunchedCardValues(poster: show.poster,
-                                 title: show.displayTitle,
-                                 episodeLine: episodeLine,
-                                 subline: subline,
-                                 progress: show.progress)
+        lifted = true
+        onLift(PunchFlight(frame: frame,
+                           values: PunchedCardValues(poster: show.poster,
+                                                     title: show.displayTitle,
+                                                     episodeLine: episodeLine,
+                                                     subline: subline,
+                                                     progress: show.progress)))
 
-        // Sent now, and not awaited anywhere below: the flight is decoration and must
-        // never be the reason a mark reaches the server late.
+        // Sent now, and not awaited by the animation: the flight is decoration and
+        // must never be the reason a mark reaches the server late.
         Task { await onPunch(show) }
 
-        // 1. The die comes down and bites through. Stiff and fast — a punch is not
-        //    a gentle thing — with the card compressing under it.
-        bit.toggle()
-        withAnimation(.spring(response: 0.16, dampingFraction: 0.62)) {
-            holeRadius = 10
-        }
-        try? await Task.sleep(for: .milliseconds(190))
-
-        // 2. Through. The chad drops, the card springs back, and it *sits there*
-        //    punched. This pause is the whole animation: without it there is no
-        //    moment where you see what happened, only something leaving.
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) { beat = .punched }
-        try? await Task.sleep(for: .milliseconds(430))
-
-        // 3. Lifted off the spike — rises, tips, shadow lengthens underneath.
-        withAnimation(.easeOut(duration: 0.22)) { beat = .lifted }
-        try? await Task.sleep(for: .milliseconds(200))
-
-        // 4. And away, into the history end of the rail.
-        withAnimation(.easeIn(duration: 0.46)) { beat = .gone }
-        punched.toggle()
-
-        try? await Task.sleep(for: .milliseconds(470))
-        stub = nil
-        holeRadius = 0
-        beat = .biting
+        try? await Task.sleep(for: PunchTiming.total)
+        lifted = false
         punching = false
+        punched.toggle()
     }
 
     private var punchButton: some View {

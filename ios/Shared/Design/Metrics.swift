@@ -26,6 +26,9 @@ public enum MQ {
     public static let watchedWidth: CGFloat = 116
     /// Vertical slack inside a rail's clip so card shadows survive being clipped.
     public static let railShadowRoom: CGFloat = 14
+    /// Coordinate space a punched ticket is measured and flown in — the screen, since
+    /// every rail between the card and it clips.
+    public static let punchSpace = "mq.punch"
 
     /// The poster beside a detail hero. It gives up width at accessibility text
     /// sizes so the facts next to it keep a readable measure instead of wrapping

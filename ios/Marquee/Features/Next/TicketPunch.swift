@@ -31,6 +31,26 @@ struct TicketShape: Shape {
     }
 }
 
+/// How long each beat lasts. Shared, because the card has to keep its own button
+/// out of sight for exactly as long as the screen is flying the ticket.
+enum PunchTiming {
+    static let bite = Duration.milliseconds(190)
+    static let hold = Duration.milliseconds(430)
+    static let lift = Duration.milliseconds(200)
+    static let away = Duration.milliseconds(460)
+    static let total = Duration.milliseconds(190 + 430 + 200 + 460 + 40)
+}
+
+/// A punch in progress: the face that was punched, and where on screen it started.
+struct PunchFlight: Identifiable, Equatable {
+    let id = UUID()
+    /// The card's frame in the screen's punch coordinate space.
+    let frame: CGRect
+    let values: PunchedCardValues
+
+    static func == (lhs: PunchFlight, rhs: PunchFlight) -> Bool { lhs.id == rhs.id }
+}
+
 /// What a punch does, in the order it does it.
 ///
 /// Split into named beats because the whole point is that they are separable. Run
