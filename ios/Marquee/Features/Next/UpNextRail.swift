@@ -31,10 +31,11 @@ struct UpNextRail: View {
                 }
             }
             .padding(.horizontal, MQ.gutter)
+            .padding(.vertical, MQ.railShadowRoom)
             .scrollTargetLayout()
         }
         .scrollIndicators(.hidden)
-        .scrollClipDisabled()
+        .padding(.vertical, -MQ.railShadowRoom)
         .scrollPosition(id: $anchor, anchor: .leading)
         .onAppear(perform: park)
         .onChange(of: upNext.first?.id) { _, _ in
@@ -121,16 +122,17 @@ struct PunchCard: View {
     @Namespace private var glass
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            NavigationLink(value: Navigator.Route.show(show.id)) {
-                PosterArt(url: show.poster, radius: MQ.radius)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("card.show.\(show.id)")
-
-            scrim
-            info
+        // The poster is the card's geometry, with everything else hung off it as an
+        // overlay. As ZStack siblings the art contributed no intrinsic size — it has
+        // none until something proposes a width — so the *title* decided the card's
+        // height, and the 2:3 art then letterboxed inside it with bars either side.
+        NavigationLink(value: Navigator.Route.show(show.id)) {
+            PosterArt(url: show.poster, radius: MQ.radius)
         }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("card.show.\(show.id)")
+        .overlay { scrim }
+        .overlay(alignment: .bottom) { info }
         // Clip the art and its scrim, then hang the controls on top — clipping last
         // would shave the punch button against the card's rounded corner.
         .clipShape(.rect(cornerRadius: MQ.radius))
@@ -344,17 +346,19 @@ struct WatchedMiniCard: View {
     var body: some View {
         NavigationLink(value: destination) {
             VStack(alignment: .leading, spacing: 6) {
-                ZStack(alignment: .bottom) {
-                    PosterArt(url: entry.poster)
-                    if isPast {
-                        LinearGradient(colors: [.clear, Color.mqScrim.opacity(0.9)],
-                                       startPoint: .center, endPoint: .bottom)
-                        Text(MQTime.short(entry.watchedAt))
-                            .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
-                            .foregroundStyle(Color.mqBrassBright)
-                            .padding(.bottom, 4)
+                PosterArt(url: entry.poster)
+                    .overlay {
+                        if isPast {
+                            ZStack(alignment: .bottom) {
+                                LinearGradient(colors: [.clear, Color.mqScrim.opacity(0.9)],
+                                               startPoint: .center, endPoint: .bottom)
+                                Text(MQTime.short(entry.watchedAt))
+                                    .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
+                                    .foregroundStyle(Color.mqBrassBright)
+                                    .padding(.bottom, 4)
+                            }
+                        }
                     }
-                }
                 .overlay(alignment: .topTrailing) {
                     if entry.count > 1 {
                         Text("\(entry.count)")
@@ -430,16 +434,18 @@ struct CalendarCard: View {
                                                       season: episode.season,
                                                       number: episode.number)) {
             VStack(alignment: .leading, spacing: 6) {
-                ZStack(alignment: .bottom) {
-                    PosterArt(url: episode.poster)
-                    LinearGradient(colors: [.clear, Color.mqScrim.opacity(0.9)],
-                                   startPoint: .center, endPoint: .bottom)
-                    Text(MQTime.short(episode.airDate))
-                        .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
-                        .foregroundStyle(Color.mqBrassBright)
-                        .padding(.bottom, 4)
-                }
-                .clipShape(.rect(cornerRadius: MQ.radiusSmall))
+                PosterArt(url: episode.poster)
+                    .overlay {
+                        ZStack(alignment: .bottom) {
+                            LinearGradient(colors: [.clear, Color.mqScrim.opacity(0.9)],
+                                           startPoint: .center, endPoint: .bottom)
+                            Text(MQTime.short(episode.airDate))
+                                .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
+                                .foregroundStyle(Color.mqBrassBright)
+                                .padding(.bottom, 4)
+                        }
+                    }
+                    .clipShape(.rect(cornerRadius: MQ.radiusSmall))
 
                 Text(episode.showTitle ?? "")
                     .font(.mqTile)

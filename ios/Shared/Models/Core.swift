@@ -179,6 +179,13 @@ public struct DeviceSession: Codable, Sendable, Identifiable, Hashable {
 
 public struct DeviceSessions: Codable, Sendable, Equatable {
     public var sessions: [DeviceSession]
+    /// How many sessions exist in total. The server sends only the most recently
+    /// used ones — an account that has been signing in for years has far more rows
+    /// than anyone wants to scroll.
+    public var total: Int?
+
+    /// Sessions the server held back.
+    public var hidden: Int { max(0, (total ?? sessions.count) - sessions.count) }
 }
 
 public struct MembersResponse: Codable, Sendable, Equatable {

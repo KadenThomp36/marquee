@@ -23,6 +23,8 @@ extension View {
                 ReadingDetailScreen(kind: .manga, itemID: id)
             case .profile(let username):
                 ProfileScreen(username: username)
+            case .recap(let year, let username):
+                RecapScreen(year: year, username: username)
             case .history:
                 HistoryScreen()
             case .notifications:

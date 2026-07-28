@@ -7,6 +7,9 @@ struct MovieScreen: View {
     @Environment(Session.self) private var session
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.mqTopInset) private var topInset
+
+    private var hasBackdrop: Bool { movie?.info?.backdrop?.isEmpty == false }
     @State private var movie: MovieDetail?
     @State private var providers: WatchProviders?
     @State private var requestStatus: RequestStatus?
@@ -27,6 +30,11 @@ struct MovieScreen: View {
                     .padding(.bottom, 30)
                 }
                 .scrollEdgeEffectStyle(.soft, for: .top)
+                // See ShowScreen: the wash belongs behind the page, not inside the
+                // scrolling column, or the safe area can't be reached.
+                .background(alignment: .top) {
+                    heroBackdrop(movie).ignoresSafeArea(edges: .top)
+                }
             } else if let error {
                 LoadFailure(message: error) { await load() }
             } else {
@@ -48,17 +56,20 @@ struct MovieScreen: View {
     }
 
     @ViewBuilder
+    private func heroBackdrop(_ movie: MovieDetail) -> some View {
+        if let backdrop = movie.info?.backdrop {
+            FilledArt(url: backdrop, height: 250 + 120)
+                .opacity(colorScheme == .light ? 0.15 : 0.28)
+                .blur(radius: 3)
+                .mask(LinearGradient(colors: [.black, .black, .clear],
+                                     startPoint: .top, endPoint: .bottom))
+                .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
     private func hero(_ movie: MovieDetail) -> some View {
         ZStack(alignment: .top) {
-            if let backdrop = movie.info?.backdrop {
-                FilledArt(url: backdrop, height: 250)
-                    .opacity(colorScheme == .light ? 0.15 : 0.28)
-                    .blur(radius: 3)
-                    .mask(LinearGradient(colors: [.black, .black, .clear],
-                                         startPoint: .top, endPoint: .bottom))
-                    .accessibilityHidden(true)
-            }
-
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top, spacing: 16) {
                     Button { showingGallery = true } label: {

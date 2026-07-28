@@ -7,6 +7,9 @@ struct ShowScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.mqTopInset) private var topInset
+
+    private var hasBackdrop: Bool { model.detail?.backdrop?.isEmpty == false }
     @State private var model: ShowModel
     @State private var showingGallery = false
     @State private var showingRequestSheet = false
@@ -38,6 +41,12 @@ struct ShowScreen: View {
                 }
                 .scrollEdgeEffectStyle(.soft, for: .top)
                 .refreshable { await model.load(session: session, force: false) }
+                // Behind the page rather than inside the scrolling column: only out
+                // here does ignoring the safe area actually reach the top of the
+                // window, instead of being clipped at the scroll view's bounds.
+                .background(alignment: .top) {
+                    backdrop(detail).ignoresSafeArea(edges: .top)
+                }
             } else if let error = model.error {
                 LoadFailure(message: error) { await model.load(session: session) }
             } else {
@@ -106,8 +115,6 @@ struct ShowScreen: View {
     @ViewBuilder
     private func hero(_ detail: ShowDetail) -> some View {
         ZStack(alignment: .top) {
-            backdrop(detail)
-
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top, spacing: 16) {
                     Button { showingGallery = true } label: {
@@ -167,7 +174,7 @@ struct ShowScreen: View {
     @ViewBuilder
     private func backdrop(_ detail: ShowDetail) -> some View {
         if let backdrop = detail.backdrop {
-            FilledArt(url: backdrop, height: 260)
+            FilledArt(url: backdrop, height: 260 + 120)
                 .opacity(colorScheme == .light ? 0.15 : 0.28)
                 .blur(radius: 3)
                 .mask(LinearGradient(colors: [.black, .black, .clear],

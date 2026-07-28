@@ -10,6 +10,7 @@ struct SettingsScreen: View {
     @State private var imdb: IMDbStatus?
     @State private var prefs: [NotificationPref] = []
     @State private var devices: [DeviceSession] = []
+    @State private var hiddenDevices = 0
     @State private var pendingWrites = 0
     @State private var plexPin: PlexPin?
     @State private var plexWaiting = false
@@ -94,6 +95,17 @@ struct SettingsScreen: View {
                 }
                 if devices.isEmpty {
                     Text("Loading…").font(.mqCaption).foregroundStyle(Color.mqInkMuted)
+                }
+                if hiddenDevices > 0 {
+                    Divider().overlay(Color.mqHairline)
+                    // Years of browser logins pile up behind these. Naming the number
+                    // is more use than listing them, and there's one button for it.
+                    Text("^[\(hiddenDevices) older session](inflect: true) not shown. "
+                         + "Signing out every other device clears them.")
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 10)
                 }
             }
         }
@@ -365,7 +377,9 @@ struct SettingsScreen: View {
         overseerr = await overseerrTask
         imdb = await imdbTask
         prefs = await prefsTask?.prefs ?? []
-        devices = await devicesTask?.sessions ?? []
+        let deviceResponse = await devicesTask
+        devices = deviceResponse?.sessions ?? []
+        hiddenDevices = deviceResponse?.hidden ?? 0
     }
 
     // MARK: - Actions

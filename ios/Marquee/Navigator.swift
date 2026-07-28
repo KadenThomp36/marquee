@@ -21,6 +21,8 @@ public final class Navigator {
         case book(Int)
         case manga(Int)
         case profile(String)
+        /// Year in Review. `username` nil means "me".
+        case recap(year: Int, username: String?)
         case history
         case notifications
         case settings
@@ -53,7 +55,7 @@ public final class Navigator {
         case .movie, .book, .manga: .library
         case .search: .search
         case .person: .search
-        case .list, .profile, .history, .notifications, .settings: .you
+        case .list, .profile, .history, .notifications, .settings, .recap: .you
         }
     }
 
@@ -90,6 +92,8 @@ public final class Navigator {
             return .notifications
         case "settings":
             return .settings
+        case "recap":
+            return parts.count > 1 ? Int(parts[1]).map { .recap(year: $0, username: nil) } ?? nil : nil
         default:
             return nil
         }

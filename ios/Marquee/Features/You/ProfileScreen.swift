@@ -21,6 +21,7 @@ struct ProfileScreen: View {
 
     @Environment(Session.self) private var session
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.mqTopInset) private var topInset
     @State private var profile: ProfilePayload?
     @State private var stats: Stats?
     @State private var advanced: AdvancedStats?
@@ -38,6 +39,7 @@ struct ProfileScreen: View {
         return username.lowercased() == (session.me?.username ?? "").lowercased()
     }
     private var who: String { isMe ? "me" : (username ?? "me") }
+    private var hasBanner: Bool { profile?.banner?.isEmpty == false }
 
     var body: some View {
         MarqueeScreen {
@@ -64,6 +66,7 @@ struct ProfileScreen: View {
                 .padding(.bottom, 30)
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
+            .ignoresSafeArea(.container, edges: hasBanner ? .top : [])
             .refreshable { await loadAll() }
         }
         .navigationTitle(isMe ? "You" : (profile?.person.name ?? "Profile"))
@@ -95,29 +98,13 @@ struct ProfileScreen: View {
     private func identity(_ profile: ProfilePayload) -> some View {
         ZStack(alignment: .top) {
             if let banner = profile.banner, !banner.isEmpty {
-                // A stepped blur ramp rather than one uniform blur: sharp at the top,
-                // dissolving into the page by the bottom, the way the web client does it.
-                ZStack {
-                    ForEach(0..<4, id: \.self) { step in
-                        FilledArt(url: resolved(banner), height: 200)
-                            .blur(radius: CGFloat(step) * 7)
-                            .mask(LinearGradient(
-                                stops: [.init(color: .black, location: Double(step) * 0.24),
-                                        .init(color: .clear, location: Double(step) * 0.24 + 0.3)],
-                                startPoint: .bottom, endPoint: .top))
-                    }
-                    LinearGradient(colors: [Color.mqGround.opacity(0.1), Color.mqGround],
-                                   startPoint: .top, endPoint: .bottom)
-                }
-                .frame(height: 200)
-                .clipped()
-                .accessibilityHidden(true)
+                ProfileBanner(url: resolved(banner), height: 300 + topInset)
             }
 
             VStack(spacing: 10) {
                 AvatarView(person: profile.person, size: 96, baseURL: session.server?.baseURL)
                     .overlay(Circle().strokeBorder(Color.mqGround, lineWidth: 3))
-                    .padding(.top, profile.banner?.isEmpty == false ? 92 : 12)
+                    .padding(.top, hasBanner ? 168 + topInset : 12)
 
                 VStack(spacing: 2) {
                     Text(profile.person.name)
@@ -245,13 +232,15 @@ struct ProfileScreen: View {
     @ViewBuilder
     private func recapTeaser(_ profile: ProfilePayload) -> some View {
         if let year = profile.recapYears.first {
-            NavigationLink(value: Navigator.Route.profile(profile.username)) {
+            NavigationLink(value: Navigator.Route.recap(year: year,
+                                                        username: isMe ? nil : profile.username)) {
                 recapCard(kicker: "Year in Review",
                           title: "\(isMe ? "Your" : profile.person.shortName + "'s") \(year), wrapped",
                           detail: "A slideshow of everything watched in \(year)",
                           locked: false)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("card.recap")
             .padding(.horizontal, MQ.gutter)
         } else if isMe, profile.recapSoon == true {
             recapCard(kicker: "Year in Review",

@@ -21,6 +21,8 @@ public enum MQ {
     public static let tileWidth: CGFloat = 124
     /// Width of a small "what you watched" card.
     public static let watchedWidth: CGFloat = 116
+    /// Vertical slack inside a rail's clip so card shadows survive being clipped.
+    public static let railShadowRoom: CGFloat = 14
 
     /// The poster beside a detail hero. It gives up width at accessibility text
     /// sizes so the facts next to it keep a readable measure instead of wrapping

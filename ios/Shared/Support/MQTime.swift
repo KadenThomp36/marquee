@@ -116,9 +116,17 @@ public enum MQTime {
             ? "\(minutes / 60)h\(minutes % 60 > 0 ? " \(minutes % 60)m" : "")"
             : "\(minutes)m"
     }
+
+    /// "January" for 0. Used where a one-letter axis label needs spelling out.
+    static func monthName(_ index: Int) -> String {
+        let names = ["January", "February", "March", "April", "May", "June", "July",
+                     "August", "September", "October", "November", "December"]
+        return names[((index % 12) + 12) % 12]
+    }
 }
 
 public extension Int {
     /// 1,482 — counts read better with separators everywhere they appear.
     var mqGrouped: String { formatted(.number.grouping(.automatic)) }
+
 }

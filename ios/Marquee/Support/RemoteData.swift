@@ -81,10 +81,32 @@ struct MarqueeScreen<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        ZStack {
-            Color.mqGround.ignoresSafeArea()
-            content
+        // Publish the top inset so hero art can bleed up under the status and
+        // navigation bars. Measured here, outside the scroll view: a GeometryReader
+        // inside one reports zero, because the scroll view has already eaten the inset.
+        GeometryReader { proxy in
+            ZStack {
+                Color.mqGround.ignoresSafeArea()
+                content
+            }
+            // `safeAreaInsets` reads zero here, because by the time a screen is inside
+            // a NavigationStack the inset has already been applied to its frame. What's
+            // left that still describes it is how far down the window this screen starts.
+            .environment(\.mqTopInset, max(proxy.safeAreaInsets.top,
+                                           proxy.frame(in: .global).minY))
         }
+    }
+}
+
+private struct TopInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    /// Height of the status bar plus navigation bar above the current screen.
+    var mqTopInset: CGFloat {
+        get { self[TopInsetKey.self] }
+        set { self[TopInsetKey.self] = newValue }
     }
 }
 

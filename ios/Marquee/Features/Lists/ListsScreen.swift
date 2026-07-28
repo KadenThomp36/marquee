@@ -388,18 +388,20 @@ private struct ListItemCard: View {
     let remove: () async -> Void
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            NavigationLink(value: item.isShow ? Navigator.Route.show(item.id)
-                                              : Navigator.Route.movie(item.id)) {
-                PosterArt(url: item.poster, radius: MQ.radius)
-            }
-            .buttonStyle(.plain)
-
+        // Poster first, everything else overlaid: as stack siblings the title would
+        // set the tile's height and leave the art letterboxed inside it.
+        NavigationLink(value: item.isShow ? Navigator.Route.show(item.id)
+                                          : Navigator.Route.movie(item.id)) {
+            PosterArt(url: item.poster, radius: MQ.radius)
+        }
+        .buttonStyle(.plain)
+        .overlay {
             LinearGradient(stops: [.init(color: .clear, location: 0.4),
                                    .init(color: Color.mqScrim.opacity(0.95), location: 0.92)],
                            startPoint: .top, endPoint: .bottom)
                 .allowsHitTesting(false)
-
+        }
+        .overlay(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.displayTitle)
                     .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
@@ -421,6 +423,7 @@ private struct ListItemCard: View {
             .allowsHitTesting(false)
         }
         .clipShape(.rect(cornerRadius: MQ.radius))
+
         .overlay(alignment: .topLeading) {
             if item.ended == true { EndedTag().padding(8) }
             else { TypeBadge(isShow: item.isShow).padding(8) }

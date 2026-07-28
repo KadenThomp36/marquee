@@ -334,9 +334,15 @@ struct HorizontalRail<Content: View>: View {
                 content
             }
             .padding(.horizontal, MQ.gutter)
+            // Breathing room *inside* the clip so card shadows aren't shaved off,
+            // taken back outside it so the rail keeps its place in the rhythm.
+            // Previously this was `.scrollClipDisabled()`, which let a scrolling rail
+            // draw its cards straight over the sections above and below it — the page
+            // read like an overflowing webview.
+            .padding(.vertical, MQ.railShadowRoom)
             .scrollTargetLayout()
         }
         .scrollIndicators(.hidden)
-        .scrollClipDisabled()
+        .padding(.vertical, -MQ.railShadowRoom)
     }
 }
