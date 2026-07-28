@@ -45,9 +45,14 @@ final class ArtLoader {
         if let hit = cached(url) { return hit }
         if let running = inFlight[url] { return await running.value }
 
-        let task = Task<UIImage?, Never> {
+        // Detached, and decoded up front. `Task {}` here would inherit this actor and
+        // decode a full-resolution poster on the main thread — and UIImage decodes
+        // lazily at draw time, so without `preparingForDisplay` the cost lands during
+        // the swipe that revealed it. That is what made the artwork gallery stutter.
+        let task = Task.detached(priority: .userInitiated) { () -> UIImage? in
             guard let (data, _) = try? await Self.session.data(from: url) else { return nil }
-            return UIImage(data: data)
+            guard let image = UIImage(data: data) else { return nil }
+            return image.preparingForDisplay() ?? image
         }
         inFlight[url] = task
         let image = await task.value

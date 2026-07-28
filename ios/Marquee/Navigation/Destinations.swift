@@ -25,6 +25,8 @@ extension View {
                 ProfileScreen(username: username)
             case .recap(let year, let username):
                 RecapScreen(year: year, username: username)
+            case .watched(let username, let kind):
+                WatchedGridScreen(username: username, kind: kind)
             case .history:
                 HistoryScreen()
             case .notifications:

@@ -309,9 +309,8 @@ struct ProfileScreen: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).mqEyebrowStyle()
                 Spacer(minLength: 8)
-                NavigationLink {
-                    WatchedGridScreen(username: username, kind: kind)
-                } label: {
+                NavigationLink(value: Navigator.Route.watched(username: username,
+                                                              kind: kind)) {
                     HStack(spacing: 3) {
                         Text("\(page.total) · Show all")
                         Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold))

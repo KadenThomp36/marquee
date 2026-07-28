@@ -77,6 +77,23 @@ struct EpisodeScreen: View {
     private func details(_ episode: EpisodeDetail) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
+                // The way back up to the series. Previously the only route to it was
+                // the back button, which only works if that's where you came from —
+                // arrive here from search, a notification or a widget and the show
+                // this episode belongs to was unreachable.
+                NavigationLink(value: Navigator.Route.show(showID)) {
+                    HStack(spacing: 4) {
+                        Text(episode.showTitle ?? "Show")
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .font(MarqueeFont.body(13, .bold, relativeTo: .caption))
+                    .foregroundStyle(Color.mqBrass)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(episode.showTitle ?? "Show"). Opens the series.")
+
                 Text(episode.displayTitle)
                     .font(MarqueeFont.body(24, .bold, relativeTo: .title))
                     .foregroundStyle(Color.mqInk)

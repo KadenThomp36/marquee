@@ -23,6 +23,8 @@ public final class Navigator {
         case profile(String)
         /// Year in Review. `username` nil means "me".
         case recap(year: Int, username: String?)
+        /// Everything watched, as a grid. `username` nil means "me".
+        case watched(username: String?, kind: String)
         case history
         case notifications
         case settings
@@ -55,7 +57,7 @@ public final class Navigator {
         case .movie, .book, .manga: .library
         case .search: .search
         case .person: .search
-        case .list, .profile, .history, .notifications, .settings, .recap: .you
+        case .list, .profile, .history, .notifications, .settings, .recap, .watched: .you
         }
     }
 

@@ -14,6 +14,7 @@ struct ArtworkGallery: View {
 
     @State private var artwork: ArtworkResponse?
     @State private var index = 0
+    @State private var paged: Int?
     @State private var loadFailed = false
     @State private var chromeVisible = true
 
@@ -33,15 +34,28 @@ struct ArtworkGallery: View {
                     ProgressView().tint(Color.mqBrass)
                 }
             } else {
-                TabView(selection: $index) {
-                    ForEach(Array(images.enumerated()), id: \.offset) { offset, art in
-                        RemoteImage(url: art.full ?? art.thumb, contentMode: .fit)
-                            .tag(offset)
-                            .accessibilityLabel("\(art.kind == "poster" ? "Poster" : "Backdrop") \(offset + 1) of \(images.count)")
+                // A paging scroll view rather than TabView's page style: it keeps its
+                // place properly as pages come and go, and hands off to the thumbnail
+                // strip through one shared position.
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(Array(images.enumerated()), id: \.offset) { offset, art in
+                            RemoteImage(url: art.full ?? art.thumb, contentMode: .fit)
+                                .containerRelativeFrame(.horizontal)
+                                .id(offset)
+                                .accessibilityLabel("\(art.kind == "poster" ? "Poster" : "Backdrop") \(offset + 1) of \(images.count)")
+                        }
                     }
+                    .scrollTargetLayout()
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
+                .scrollTargetBehavior(.paging)
+                .scrollPosition(id: $paged)
+                .scrollIndicators(.hidden)
                 .ignoresSafeArea()
+                .onAppear { paged = index }
+                .onChange(of: paged) { _, new in
+                    if let new { index = new }
+                }
                 .onTapGesture {
                     withAnimation(.easeInOut(duration: 0.2)) { chromeVisible.toggle() }
                 }
@@ -94,7 +108,12 @@ struct ArtworkGallery: View {
             ScrollView(.horizontal) {
                 HStack(spacing: 7) {
                     ForEach(Array(images.enumerated()), id: \.offset) { offset, art in
-                        Button { withAnimation(.snappy) { index = offset } } label: {
+                        Button {
+                            withAnimation(.snappy) {
+                                index = offset
+                                paged = offset
+                            }
+                        } label: {
                             RemoteImage(url: art.thumb, contentMode: .fill)
                                 .frame(width: 46, height: 69)
                                 .clipShape(.rect(cornerRadius: 6))

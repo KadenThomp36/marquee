@@ -29,16 +29,21 @@ struct RemoteImage: View {
     }
 
     var body: some View {
-        Group {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: contentMode)
-            } else {
-                placeholder
+        // Through a clear frame, always. A resizable Image carries an ideal size taken
+        // from the source pixels, so laid out directly it made every poster in a list
+        // a slightly different size depending on how large TMDB's copy happened to be.
+        // AsyncImage never contributed a size; neither does this.
+        Color.clear
+            .overlay {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: contentMode)
+                } else {
+                    placeholder
+                }
             }
-        }
-        .clipped()
+            .clipped()
         .task(id: url) {
             guard let parsed, ArtLoader.shared.cached(parsed) == nil else { return }
             let loaded = await ArtLoader.shared.load(parsed)
