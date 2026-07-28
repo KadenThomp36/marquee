@@ -16,6 +16,8 @@ struct UpNextRail: View {
 
     @State private var anchor: RailEntry.ID?
     @State private var hasParked = false
+    /// Bumped each time the rail comes to rest on a date barrier.
+    @State private var barrierTicks = 0
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -36,8 +38,16 @@ struct UpNextRail: View {
             .padding(.vertical, MQ.railShadowRoom)
             .scrollTargetLayout()
         }
+        .accessibilityIdentifier("rail.upnext")
         .contentMargins(.horizontal, MQ.gutter, for: .scrollContent)
         .scrollIndicators(.hidden)
+        // The system's own snapping, rather than a hand-rolled target behaviour. It
+        // is the documented partner of scrollTargetLayout and scrollPosition, which
+        // this rail already had; a custom one fought scrollPosition every frame and
+        // locked the rail up. Every entry becomes a place the rail can rest, so it
+        // always settles tidily — and the date dividers are entries too, which is
+        // what gives the barriers their catch.
+        .scrollTargetBehavior(.viewAligned)
         // History scrolls up into the leading margin, which left a card sliced off
         // square against the screen edge. Fading it there reads as "there's more
         // behind you" instead of as a clipping bug.
@@ -49,6 +59,13 @@ struct UpNextRail: View {
         }
         .padding(.vertical, -MQ.railShadowRoom)
         .scrollPosition(id: $anchor, anchor: .leading)
+        // Resting on a barrier is the crossing. No offsets, no arithmetic: the rail
+        // tells us what it settled on, and only barriers are worth a knock.
+        .onChange(of: anchor) { _, settled in
+            guard let settled, isBarrier(settled) else { return }
+            barrierTicks += 1
+        }
+        .sensoryFeedback(.impact(flexibility: .rigid, intensity: 0.85), trigger: barrierTicks)
         .onAppear(perform: park)
         // `onAppear` fires before the lazy stack has built anything, so on a cold
         // load there is no row yet for the anchor to resolve against and the rail
@@ -61,6 +78,16 @@ struct UpNextRail: View {
             hasParked = false
             park()
         }
+    }
+
+    /// The queue's first card and every date divider. Leaving Up Next is the first
+    /// of these; the rest are the days receding behind it.
+    private func isBarrier(_ id: RailEntry.ID) -> Bool {
+        id.hasPrefix("div:") || id == firstQueueID
+    }
+
+    private var firstQueueID: RailEntry.ID? {
+        entries.first(where: { if case .next = $0 { true } else { false } })?.id
     }
 
     /// Park on the first queue card, so history starts off-screen to the left.
