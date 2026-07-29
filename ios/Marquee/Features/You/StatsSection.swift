@@ -132,6 +132,7 @@ struct StatsSection: View {
                 }
                 .chartYAxis { AxisMarks(position: .leading) }
                 .frame(height: 150)
+                .accessibilityIdentifier("chart.months")
             }
         }
     }
@@ -163,6 +164,7 @@ struct StatsSection: View {
                 .sensoryFeedback(.selection, trigger: pickedYear)
                 .chartYAxis { AxisMarks(position: .leading) }
                 .frame(height: 140)
+                .accessibilityIdentifier("chart.years")
             }
         }
     }

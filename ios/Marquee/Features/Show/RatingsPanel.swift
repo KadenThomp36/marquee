@@ -331,7 +331,13 @@ private struct ScrubReadout: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(.thinMaterial, in: .rect(cornerRadius: 9))
+        // Opaque panel, not material: drawn inside the chart, a material has no
+        // backdrop to sample and falls back dark in both appearances — which read
+        // as a black bubble around black text in light mode. House rule anyway:
+        // nothing translucent behind body text.
+        .background(Color.mqPanelRaised, in: .rect(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.mqHairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.22), radius: 8, y: 2)
         .fixedSize()
         .allowsHitTesting(false)
     }

@@ -265,7 +265,13 @@ struct ChartReadout: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
-        .background(.thinMaterial, in: .rect(cornerRadius: 9))
+        // Opaque panel, not material: a chart annotation renders where a material
+        // has no backdrop to sample, and the fallback comes out dark in both
+        // appearances — a black bubble around light-mode black text. The house
+        // rule would have caught this: nothing translucent behind body text.
+        .background(Color.mqPanelRaised, in: .rect(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.mqHairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.22), radius: 8, y: 2)
         .fixedSize()
         .allowsHitTesting(false)
     }
