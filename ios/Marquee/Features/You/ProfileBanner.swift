@@ -66,9 +66,14 @@ struct ProfileBanner: View {
         // Pull down and the banner grows to keep filling the space rather than
         // leaving the page colour behind it. Driven by the scroll geometry during
         // layout, so it tracks the finger exactly and costs no state.
+        //
+        // Anchored at the bottom: the frame itself has already slid down with the
+        // pull, so scaling by 1 + pulled/height from the bottom edge puts the
+        // rendered top exactly back at the screen top while the bottom stays glued
+        // to the content below it.
         .visualEffect { view, proxy in
             let pulled = max(0, proxy.frame(in: .scrollView(axis: .vertical)).minY)
-            return view.scaleEffect(1 + pulled / max(full, 1), anchor: .top)
+            return view.scaleEffect(1 + pulled / max(full, 1), anchor: .bottom)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
