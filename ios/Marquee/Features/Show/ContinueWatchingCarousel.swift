@@ -21,7 +21,12 @@ struct ContinueWatchingCarousel: View {
     var body: some View {
         if !window.isEmpty {
             ScrollView(.horizontal) {
-                LazyHStack(spacing: 14) {
+                // Static, not lazy: two dozen slides at most, and the combination of
+                // a lazy stack with viewAligned + scrollPosition livelocked the Up
+                // Next rail (endless LazySubviewPlacements churn after a drag). Same
+                // recipe here, so the same cure — a static stack has no placement
+                // machinery to loop.
+                HStack(spacing: 14) {
                     ForEach(window) { episode in
                         EpisodeSlide(episode: episode,
                                      showID: model.showID,

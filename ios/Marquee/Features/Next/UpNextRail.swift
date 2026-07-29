@@ -21,7 +21,14 @@ struct UpNextRail: View {
 
     var body: some View {
         ScrollView(.horizontal) {
-            LazyHStack(alignment: .center, spacing: MQ.railGap) {
+            // A plain HStack, deliberately. This rail is a few dozen fixed-size
+            // cards, so laziness buys nothing — and under iOS 26, a lazy stack
+            // wrapped in viewAligned + scrollPosition could fall into an endless
+            // placement loop after a drag (anchor translation nudges content,
+            // placements invalidate, the graph re-runs, the main thread never
+            // returns). Sampled twice, the storm was entirely inside
+            // LazySubviewPlacements; a static stack has none of that machinery.
+            HStack(alignment: .center, spacing: MQ.railGap) {
                 ForEach(entries) { entry in
                     switch entry {
                     case .past(let watch):
@@ -177,7 +184,15 @@ struct PunchCard: View {
     @State private var punching = false
     @State private var punched = false
     /// Where this card sits on screen, so the ticket can start exactly here.
-    @State private var frame: CGRect = .zero
+    ///
+    /// A plain box, not view state, and that is load-bearing: the rail scrolls this
+    /// frame continuously, and a state write per scroll frame from every card fed a
+    /// layout loop — the lazy stack nudges its anchor translation, every card's
+    /// frame moves, every card writes, the graph re-runs, and the main thread never
+    /// comes back. Nothing draws from this value; it's read exactly once, at the
+    /// punch, so mutating the box invalidates nothing.
+    private final class FrameBox { var rect: CGRect = .zero }
+    @State private var frameBox = FrameBox()
     /// True while the screen is flying this card's ticket.
     @State private var lifted = false
 
@@ -213,7 +228,7 @@ struct PunchCard: View {
         // the screen, which is the only layer nothing clips.
         .onGeometryChange(for: CGRect.self) { proxy in
             proxy.frame(in: .named(MQ.punchSpace))
-        } action: { frame = $0 }
+        } action: { frameBox.rect = $0 }
         .sensoryFeedback(.success, trigger: punched)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityLabel)
@@ -262,14 +277,14 @@ struct PunchCard: View {
     /// Hand the punch to the screen, which owns the flight, and get this card's own
     /// button out of the way for the duration.
     private func punch() async {
-        guard !reduceMotion, let onLift, frame != .zero else {
+        guard !reduceMotion, let onLift, frameBox.rect != .zero else {
             await onPunch(show)
             punching = false
             return
         }
 
         lifted = true
-        onLift(PunchFlight(frame: frame,
+        onLift(PunchFlight(frame: frameBox.rect,
                            values: PunchedCardValues(poster: show.poster,
                                                      title: show.displayTitle,
                                                      episodeLine: episodeLine,
@@ -649,7 +664,7 @@ struct PosterTile: View {
                 Text(result.displayTitle)
                     .font(.mqTile)
                     .foregroundStyle(Color.mqInk)
-                    .lineLimit(2)
+                    .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
 
                 Text([result.year?.text, result.stateLabel].compactMap { $0 }
