@@ -20,29 +20,32 @@ struct ProfileBanner: View {
         let stops: [Gradient.Stop]
     }
 
+    /// The ramp holds off far longer than it used to. Blurring from a quarter of the
+    /// way down meant the picture was gone before you'd taken it in; the art now stays
+    /// sharp through the top half and only dissolves as it reaches the page.
     private static let layers: [Layer] = [
         Layer(blur: 0, stops: [
             .init(color: .black, location: 0),
-            .init(color: .black, location: 0.28),
-            .init(color: .clear, location: 0.44)]),
-        Layer(blur: 4, stops: [
-            .init(color: .clear, location: 0.26),
-            .init(color: .black, location: 0.40),
             .init(color: .black, location: 0.46),
             .init(color: .clear, location: 0.60)]),
+        Layer(blur: 4, stops: [
+            .init(color: .clear, location: 0.44),
+            .init(color: .black, location: 0.57),
+            .init(color: .black, location: 0.63),
+            .init(color: .clear, location: 0.74)]),
         Layer(blur: 10, stops: [
-            .init(color: .clear, location: 0.42),
-            .init(color: .black, location: 0.56),
-            .init(color: .black, location: 0.62),
-            .init(color: .clear, location: 0.76)]),
+            .init(color: .clear, location: 0.60),
+            .init(color: .black, location: 0.71),
+            .init(color: .black, location: 0.77),
+            .init(color: .clear, location: 0.87)]),
         Layer(blur: 20, stops: [
-            .init(color: .clear, location: 0.58),
-            .init(color: .black, location: 0.72),
-            .init(color: .black, location: 0.78),
-            .init(color: .clear, location: 0.90)]),
-        Layer(blur: 34, stops: [
             .init(color: .clear, location: 0.74),
-            .init(color: .black, location: 0.88),
+            .init(color: .black, location: 0.84),
+            .init(color: .black, location: 0.90),
+            .init(color: .clear, location: 0.96)]),
+        Layer(blur: 34, stops: [
+            .init(color: .clear, location: 0.87),
+            .init(color: .black, location: 0.95),
             .init(color: .clear, location: 1)]),
     ]
 
@@ -60,6 +63,13 @@ struct ProfileBanner: View {
         }
         .frame(height: full)
         .clipped()
+        // Pull down and the banner grows to keep filling the space rather than
+        // leaving the page colour behind it. Driven by the scroll geometry during
+        // layout, so it tracks the finger exactly and costs no state.
+        .visualEffect { view, proxy in
+            let pulled = max(0, proxy.frame(in: .scrollView(axis: .vertical)).minY)
+            return view.scaleEffect(1 + pulled / max(full, 1), anchor: .top)
+        }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -69,9 +79,9 @@ struct ProfileBanner: View {
     private var tint: some View {
         LinearGradient(stops: [
             .init(color: .clear, location: 0),
-            .init(color: .clear, location: 0.22),
-            .init(color: Color.mqScrim.opacity(0.28), location: 0.44),
-            .init(color: Color.mqScrim.opacity(0.6), location: 0.70),
+            .init(color: .clear, location: 0.44),
+            .init(color: Color.mqScrim.opacity(0.16), location: 0.64),
+            .init(color: Color.mqScrim.opacity(0.44), location: 0.84),
             .init(color: Color.mqGround, location: 1),
         ], startPoint: .top, endPoint: .bottom)
     }

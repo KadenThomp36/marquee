@@ -117,6 +117,15 @@ public enum MQTime {
             : "\(minutes)m"
     }
 
+    /// "2026-03" as "March 2026", for a chart readout.
+    static func monthKeyLabel(_ key: String) -> String {
+        let parts = key.split(separator: "-")
+        guard parts.count == 2, let month = Int(parts[1]), (1...12).contains(month) else {
+            return key
+        }
+        return "\(monthName(month - 1)) \(parts[0])"
+    }
+
     /// "January" for 0. Used where a one-letter axis label needs spelling out.
     static func monthName(_ index: Int) -> String {
         let names = ["January", "February", "March", "April", "May", "June", "July",

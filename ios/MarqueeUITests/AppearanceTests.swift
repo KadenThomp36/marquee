@@ -66,12 +66,23 @@ final class AppearanceTests: XCTestCase {
         app.swipeUp(velocity: .slow)
         sleep(1)
         attach(name: "12b-light-scrolled")
+        // Back to the top, or the minimised tab bar has no buttons to tap.
+        app.swipeDown(velocity: .fast)
+        sleep(1)
         for tab in ["Library", "You"] {
             let button = app.tabBars.buttons[tab]
             guard button.waitForExistence(timeout: 3) else { continue }
             button.tap()
             sleep(2)
             attach(name: "13-light-\(tab.lowercased())")
+            if tab == "You" {
+                app.swipeUp(velocity: .slow)
+                sleep(1)
+                attach(name: "13b-you-mid")
+                app.swipeUp(velocity: .slow)
+                sleep(1)
+                attach(name: "13c-you-stats")
+            }
         }
     }
 

@@ -11,6 +11,10 @@ struct StatsSection: View {
     let advanced: AdvancedStats?
 
     @State private var heatYear = "all"
+    /// What each chart is currently scrubbed to.
+    @State private var pickedMonth: String?
+    @State private var pickedYear: String?
+    @State private var pickedScore: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -99,7 +103,24 @@ struct StatsSection: View {
                         .foregroundStyle(Color.mqBrass)
                         .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round))
                         .interpolationMethod(.monotone)
+
+                    if pickedMonth == point.key {
+                        RuleMark(x: .value("Month", point.key))
+                            .foregroundStyle(Color.mqBrass.opacity(0.4))
+                            .annotation(position: .top,
+                                        overflowResolution: .init(x: .fit(to: .chart),
+                                                                  y: .disabled)) {
+                                ChartReadout(caption: MQTime.monthKeyLabel(point.key),
+                                             value: "\(point.value) watched")
+                            }
+                        PointMark(x: .value("Month", point.key),
+                                  y: .value("Watched", point.value))
+                            .foregroundStyle(Color.mqBrass)
+                            .symbolSize(60)
+                    }
                 }
+                .chartXSelection(value: $pickedMonth)
+                .sensoryFeedback(.selection, trigger: pickedMonth)
                 .chartXAxis {
                     AxisMarks(values: points.map(\.key).filter { $0.hasSuffix("-01") }) { value in
                         AxisValueLabel {
@@ -123,9 +144,23 @@ struct StatsSection: View {
                       subtitle: "episodes per year") {
                 Chart(stats.yearly) { year in
                     BarMark(x: .value("Year", year.y), y: .value("Episodes", year.c))
-                        .foregroundStyle(Color.mqChartAmber)
+                        .foregroundStyle(pickedYear == year.y
+                                         ? Color.mqBrass : Color.mqChartAmber)
                         .cornerRadius(3)
+
+                    if pickedYear == year.y {
+                        RuleMark(x: .value("Year", year.y))
+                            .foregroundStyle(.clear)
+                            .annotation(position: .top,
+                                        overflowResolution: .init(x: .fit(to: .chart),
+                                                                  y: .disabled)) {
+                                ChartReadout(caption: year.y,
+                                             value: "\(year.c.mqGrouped) episodes")
+                            }
+                    }
                 }
+                .chartXSelection(value: $pickedYear)
+                .sensoryFeedback(.selection, trigger: pickedYear)
                 .chartYAxis { AxisMarks(position: .leading) }
                 .frame(height: 140)
             }
@@ -265,8 +300,22 @@ struct StatsSection: View {
                     BarMark(x: .value("Score", score), y: .value("Titles", count))
                         // The one place a per-bar colour is a scale, not decoration.
                         .foregroundStyle(Color.mqRating(score))
+                        .opacity(pickedScore == nil || pickedScore == score ? 1 : 0.45)
                         .cornerRadius(3)
+
+                    if pickedScore == score {
+                        RuleMark(x: .value("Score", score))
+                            .foregroundStyle(.clear)
+                            .annotation(position: .top,
+                                        overflowResolution: .init(x: .fit(to: .chart),
+                                                                  y: .disabled)) {
+                                ChartReadout(caption: "Rated \(score)",
+                                             value: count == 1 ? "1 title" : "\(count) titles")
+                            }
+                    }
                 }
+                .chartXSelection(value: $pickedScore)
+                .sensoryFeedback(.selection, trigger: pickedScore)
                 .chartXScale(domain: 1...10)
                 .chartXAxis {
                     AxisMarks(values: Array(1...10)) { value in

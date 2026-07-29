@@ -104,32 +104,35 @@ struct ProfileScreen: View {
     private func identity(_ profile: ProfilePayload) -> some View {
         ZStack(alignment: .top) {
             if let banner = profile.banner, !banner.isEmpty {
-                ProfileBanner(url: resolved(banner), height: 430 + topInset)
+                ProfileBanner(url: resolved(banner), height: 510 + topInset)
             }
 
             VStack(spacing: 10) {
                 AvatarView(person: profile.person, size: 96, baseURL: session.server?.baseURL)
                     .overlay(Circle().strokeBorder(Color.mqGround, lineWidth: 3))
-                    .padding(.top, hasBanner ? 150 + topInset : 12)
+                    .padding(.top, hasBanner ? 196 + topInset : 12)
 
                 VStack(spacing: 2) {
                     Text(profile.person.name)
                         .font(MarqueeFont.body(21, .bold, relativeTo: .title2))
-                        .foregroundStyle(Color.mqInk)
+                        .foregroundStyle(hasBanner ? Color.mqInkOnArt : Color.mqInk)
+                    // Muted inks are cut against the page. Over a photograph they're
+                    // nearly gone, so on a banner this line takes a pinned light ink
+                    // and a little shadow to lift it off whatever is behind it.
                     Text(subtitle(profile))
                         .font(.mqCaption)
-                        .foregroundStyle(Color.mqInkMuted)
+                        .foregroundStyle(hasBanner ? Color.mqInkSoftOnArt : Color.mqInkMuted)
                 }
+                .shadow(color: .black.opacity(hasBanner ? 0.5 : 0), radius: 6, y: 1)
 
                 if let headline = profile.headline { headlineRow(headline) }
 
                 if isMe {
-                    HStack(spacing: 8) {
-                        Button("Edit profile") { editing = true }
-                            .buttonStyle(.mqChip)
-                        Button("Change banner") { pickingBanner = true }
-                            .buttonStyle(.mqChip)
+                    HStack(spacing: 9) {
+                        bannerButton("Edit profile", "square.and.pencil") { editing = true }
+                        bannerButton("Change banner", "photo") { pickingBanner = true }
                     }
+                    .padding(.top, 2)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -139,6 +142,21 @@ struct ProfileScreen: View {
             // semantic ink light at once, which is what the web client does by hand.
             .environment(\.colorScheme, hasBanner ? .dark : colorScheme)
         }
+    }
+
+    /// Glass over the art rather than a filled chip. A solid pill on a photograph
+    /// reads as a sticker; glass reads as something resting on it.
+    private func bannerButton(_ title: String, _ symbol: String,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(MarqueeFont.body(12.5, .semibold, relativeTo: .caption))
+                .foregroundStyle(hasBanner ? Color.mqInkOnArt : Color.mqInk)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 9)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .capsule)
     }
 
     private func subtitle(_ profile: ProfilePayload) -> String {
@@ -166,14 +184,15 @@ struct ProfileScreen: View {
         VStack(spacing: 1) {
             Text(value.mqGrouped)
                 .font(MarqueeFont.body(17, .bold, relativeTo: .title3))
-                .foregroundStyle(Color.mqBrass)
+                .foregroundStyle(hasBanner ? Color.mqBrassOnArt : Color.mqBrass)
                 .monospacedDigit()
             Text(label)
                 .font(MarqueeFont.body(10.5, .semibold, relativeTo: .caption2))
                 .textCase(.uppercase)
                 .tracking(0.8)
-                .foregroundStyle(Color.mqInkMuted)
+                .foregroundStyle(hasBanner ? Color.mqInkSoftOnArt : Color.mqInkMuted)
         }
+        .shadow(color: .black.opacity(hasBanner ? 0.5 : 0), radius: 6, y: 1)
         .frame(minWidth: 70)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(value) \(label)")

@@ -230,20 +230,44 @@ struct StatTileGrid: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(13)
-                .background(Color.mqPanel, in: .rect(cornerRadius: MQ.radiusSmall))
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(tile.tint).frame(width: 3)
-                        .clipShape(.rect(topLeadingRadius: MQ.radiusSmall,
-                                         bottomLeadingRadius: MQ.radiusSmall))
-                }
-                .overlay(RoundedRectangle(cornerRadius: MQ.radiusSmall)
-                    .strokeBorder(Color.mqHairline, lineWidth: 1))
+                .padding(14)
+                // Tinted glass rather than a panel with a coloured stripe down one
+                // edge. The stripe was a separate object sitting against the card
+                // instead of part of it, and it caught the corner radius awkwardly;
+                // the tint carries the same colour through the whole tile.
+                .glassEffect(.regular.tint(tile.tint.opacity(0.18)),
+                             in: .rect(cornerRadius: MQ.radius))
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("\(tile.value) \(tile.unit ?? "") \(tile.label). \(tile.detail ?? "")")
             }
         }
         .padding(.horizontal, MQ.gutter)
+    }
+}
+
+/// The bubble a scrubbed chart puts up.
+///
+/// Hung off a `RuleMark` annotation rather than positioned by hand: Charts keeps it
+/// with the rule and, told to fit, keeps it inside the plot at either end — which is
+/// the whole of the geometry work that would otherwise be needed.
+struct ChartReadout: View {
+    let caption: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(caption)
+                .font(.mqCaption)
+                .foregroundStyle(Color.mqInkMuted)
+            Text(value)
+                .font(MarqueeFont.body(13.5, .bold, relativeTo: .caption))
+                .foregroundStyle(Color.mqInk)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.thinMaterial, in: .rect(cornerRadius: 9))
+        .fixedSize()
+        .allowsHitTesting(false)
     }
 }
 
