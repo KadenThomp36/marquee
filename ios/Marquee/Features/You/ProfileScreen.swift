@@ -31,6 +31,7 @@ struct ProfileScreen: View {
     @State private var lists: [ListCard] = []
     @State private var members: [Person] = []
     @State private var editing = false
+    @State private var refreshing = false
     @State private var pickingBanner = false
     @State private var pickingFavorite = false
     @State private var confirmingUnpair = false
@@ -68,11 +69,46 @@ struct ProfileScreen: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .mqTopEdgeBlur()
+            // The refresh spinner claims its space by pushing the scroll view's own
+            // top edge down — and the scroll view clips there, cutting the head off
+            // the stretched banner while the spinner runs. The scroll view fills the
+            // screen, so nothing else can escape: this only frees the banner to keep
+            // reaching the screen top behind the spinner.
+            .scrollClipDisabled()
             .ignoresSafeArea(.container, edges: hasBanner ? .top : [])
-            .refreshable { await loadAll() }
+            .refreshable {
+                refreshing = true
+                defer { refreshing = false }
+                // Unstructured on purpose. Mutating state from in here rebuilds the
+                // view, which cancels the refresh task — and a cancelled task makes
+                // every awaited request in loadAll fail instantly. The work runs in
+                // its own task so nothing the system does to this one can gut it.
+                let job = Task {
+                    // Diagnostics only: hold the spinner open long enough to photograph.
+                    if ProcessInfo.processInfo.arguments.contains("-mq-slow-refresh") {
+                        try? await Task.sleep(for: .seconds(3))
+                    }
+                    await loadAll()
+                }
+                await job.value
+            }
 
         }
         .mqBareNavigationBar()
+        // The system spinner sits behind the scrolled content, so on a bannered
+        // profile the stretch bleed covers it completely. This one floats above
+        // the art in the same spot instead. Bannerless profiles keep the stock
+        // spinner — there's nothing covering it there.
+        .overlay(alignment: .top) {
+            if hasBanner, refreshing {
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(Color.mqInkOnArt)
+                    .padding(.top, 8)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: refreshing)
         .overlay(alignment: .topTrailing) {
             if isMe {
                 NavigationLink(value: Navigator.Route.settings) {
@@ -482,36 +518,54 @@ struct ProfileScreen: View {
         _ = await (statsTask, watchedTask, listsTask, membersTask)
     }
 
+    // Each loader keeps what it has unless the request actually delivers. A refresh
+    // that fails — offline, cancelled, server hiccup — must never blank a page the
+    // person is already reading; `x = try? await …` did exactly that.
+
     private func loadProfile() async {
         guard let client = session.client else { return }
         let path = isMe ? "profile" : "profile/\(username ?? "")"
-        profile = try? await client.get(path, as: ProfilePayload.self)
+        if let fresh = try? await client.get(path, as: ProfilePayload.self) {
+            profile = fresh
+        }
     }
 
     private func loadStats() async {
         guard let client = session.client else { return }
         let base = isMe ? "stats" : "profile/\(username ?? "")/stats"
-        stats = try? await client.get(base, as: Stats.self)
-        advanced = try? await client.get(isMe ? "stats/advanced" : "\(base)/advanced",
-                                         as: AdvancedStats.self)
+        if let fresh = try? await client.get(base, as: Stats.self) {
+            stats = fresh
+        }
+        if let fresh = try? await client.get(isMe ? "stats/advanced" : "\(base)/advanced",
+                                             as: AdvancedStats.self) {
+            advanced = fresh
+        }
     }
 
     private func loadWatched() async {
         guard let client = session.client else { return }
-        shows = try? await client.get("watched/\(who)/shows", query: ["limit": "14"],
-                                      as: WatchedPage.self)
-        films = try? await client.get("watched/\(who)/movies", query: ["limit": "14"],
-                                      as: WatchedPage.self)
+        if let fresh = try? await client.get("watched/\(who)/shows", query: ["limit": "14"],
+                                             as: WatchedPage.self) {
+            shows = fresh
+        }
+        if let fresh = try? await client.get("watched/\(who)/movies", query: ["limit": "14"],
+                                             as: WatchedPage.self) {
+            films = fresh
+        }
     }
 
     private func loadLists() async {
         guard let client = session.client, let name = profile?.username else { return }
-        lists = (try? await client.get("user/\(name)/lists", as: UserListsResponse.self))?.lists ?? []
+        if let fresh = try? await client.get("user/\(name)/lists", as: UserListsResponse.self) {
+            lists = fresh.lists
+        }
     }
 
     private func loadMembers() async {
         guard let client = session.client else { return }
-        members = (try? await client.get("members", as: MembersResponse.self))?.members ?? []
+        if let fresh = try? await client.get("members", as: MembersResponse.self) {
+            members = fresh.members
+        }
     }
 
     private func removeFavorite(_ favorite: Favorite) async {

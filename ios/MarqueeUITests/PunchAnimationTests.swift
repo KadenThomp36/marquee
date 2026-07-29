@@ -106,7 +106,7 @@ final class PunchAnimationTests: XCTestCase {
             }
         }
         let nice = app.buttons["Nice"]
-        if nice.waitForExistence(timeout: 4) { nice.tap(); sleep(1) }
+        if nice.waitForExistence(timeout: 4), nice.exists, nice.isHittable { nice.tap(); sleep(1) }   // re-checked: the celebration can auto-dismiss between existence and tap
     }
 
     private func attach(name: String) {

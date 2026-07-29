@@ -181,7 +181,7 @@ struct QuickAddTile: View {
                 Text(result.displayTitle)
                     .font(.mqTile)
                     .foregroundStyle(Color.mqInk)
-                    .lineLimit(2)
+                    .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
                 Text([result.year?.text, result.stateLabel]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))

@@ -169,8 +169,11 @@ final class PairingWalkthroughTests: XCTestCase {
         let nice = app.buttons["Nice"]
         if nice.waitForExistence(timeout: 4) {
             attach(name: "04a-celebration")
-            nice.tap()
-            sleep(1)
+            // Re-checked: the celebration can auto-dismiss between existence and tap.
+            if nice.exists, nice.isHittable {
+                nice.tap()
+                sleep(1)
+            }
         }
     }
 

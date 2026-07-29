@@ -384,7 +384,10 @@ struct WatchedTile: View {
                 Text(item.displayTitle)
                     .font(.mqTile)
                     .foregroundStyle(Color.mqInk)
-                    .lineLimit(2)
+                    // Reserved, so every tile in a rail has the same ideal height —
+                    // otherwise the rail sizes itself to whichever tiles it laid out
+                    // first and the odd ones out get squeezed or clipped.
+                    .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
                 Text(subtitle)
                     .font(.mqCaption)
