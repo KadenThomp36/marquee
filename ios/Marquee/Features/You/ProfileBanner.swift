@@ -71,8 +71,15 @@ struct ProfileBanner: View {
         // pull, so scaling by 1 + pulled/height from the bottom edge puts the
         // rendered top exactly back at the screen top while the bottom stays glued
         // to the content below it.
+        //
+        // Measured in global space, not the scroll view's: the refresh spinner
+        // holds the content down with an inset, which displaces the banner on
+        // screen without moving it in scroll coordinates — read those and the
+        // stretch lets go the moment the spinner appears, leaving a bare band
+        // behind it. The screen ignores the top safe area, so the banner rests
+        // at global zero and any displacement, dragged or held, reads the same.
         .visualEffect { view, proxy in
-            let pulled = max(0, proxy.frame(in: .scrollView(axis: .vertical)).minY)
+            let pulled = max(0, proxy.frame(in: .global).minY)
             return view.scaleEffect(1 + pulled / max(full, 1), anchor: .bottom)
         }
         .allowsHitTesting(false)
