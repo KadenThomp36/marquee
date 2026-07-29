@@ -857,6 +857,12 @@ async def login(request: Request, response: Response):
                         (body.get("username", "").strip(),)).fetchone()
         if not u or not check_pw(body.get("password", ""), u["pass"]):
             raise HTTPException(401, "wrong username or password")
+        # A browser re-logging in overwrites its sid cookie, so whatever row the old
+        # cookie pointed at can never be presented again. Historically it was left
+        # behind anyway — one "Web browser" corpse in the devices list per re-login.
+        stale = request.cookies.get("sid")
+        if stale:
+            con.execute("DELETE FROM sessions WHERE token=?", (stale,))
         tok = new_session(con, u["id"], body.get("device_name"))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
     out = {"username": u["username"], "is_admin": bool(u["is_admin"])}
@@ -959,21 +965,30 @@ def _session_fp(token):
 
 SESSION_LIST_LIMIT = 40
 
+# A cookie may live a year (SESSION_DAYS), but a device you haven't used in a month
+# isn't a device — it's history wearing a token. Pruning on the full cookie lifetime
+# kept every login from the past year in the list.
+SESSION_IDLE_DAYS = 30
+
 
 def prune_dead_sessions(con):
-    """Drop sessions nothing has used inside the cookie's own lifetime.
+    """Drop sessions that are provably not devices.
 
-    Nothing ever expired these rows: `SESSION_DAYS` sets the cookie's max-age, but
-    the row behind it lived forever, so a year of logins piles up in the devices
-    list. Keyed on last_seen and only falling back to created_at, so a token still
-    in daily use is never cut — including an app's bearer token, which has no cookie
-    to expire on its own."""
-    cutoff = (datetime.now() - timedelta(days=SESSION_DAYS)).isoformat()
+    Two kinds of corpse: rows nothing has touched in SESSION_IDLE_DAYS, and rows
+    never used after minting — anything that POSTs /api/login as a health probe
+    mints a token per probe and never presents it again, so last_seen still equals
+    created_at a day later. An active browser or app refreshes last_seen on every
+    request, so neither rule can cut a session that's actually in use."""
+    now = datetime.now()
+    idle = (now - timedelta(days=SESSION_IDLE_DAYS)).isoformat()
+    unused = (now - timedelta(days=1)).isoformat()
     try:
         con.execute("DELETE FROM sessions WHERE COALESCE(last_seen, created_at) < ?",
-                    (cutoff,))
+                    (idle,))
+        con.execute("""DELETE FROM sessions WHERE last_seen IS NOT NULL
+                       AND last_seen = created_at AND created_at < ?""", (unused,))
     except sqlite3.OperationalError:          # pre-migration schema
-        con.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+        con.execute("DELETE FROM sessions WHERE created_at < ?", (idle,))
 
 
 @app.get("/api/sessions")
