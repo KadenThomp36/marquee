@@ -2145,3 +2145,56 @@ body.recap-open{overflow:hidden}
 .pc-help b{color:var(--ink)}
 .pc-left{display:block;color:var(--mut);font-variant-numeric:tabular-nums}
 @media(max-width:700px){.pc-digits b{font-size:28px;min-width:26px}}
+
+/* ── the scrubber: update reading progress with a thumb, not a number box ── */
+.scrubsheet .scrub{display:flex;flex-direction:column;gap:14px}
+.scrub-head{display:flex;align-items:center;gap:12px}
+.scrub-cover{width:40px;height:60px;object-fit:cover;border-radius:7px;flex:none;
+  background:var(--panel-2);box-shadow:0 4px 14px rgba(0,0,0,.4)}
+.scrub-ht{min-width:0;display:flex;flex-direction:column;gap:3px}
+.scrub-ht b{font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.scrub-sub2{font-size:12px;color:var(--mut)}
+.scrub-read{text-align:center;min-height:74px;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px}
+.scrub-big{display:inline-flex;align-items:baseline;gap:7px;padding:2px 10px;border-radius:12px}
+.scrub-big:active{background:var(--panel-2)}
+.scrub-big b{font-family:var(--disp);font-size:44px;line-height:1;color:var(--amber);
+  font-weight:400;letter-spacing:.02em}
+.scrub-big i{font-style:normal;font-size:12px;font-weight:700;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--mut)}
+.scrub-sub{font-size:12.5px;color:var(--ink-2)}
+#scrubin{width:130px;text-align:center;font-size:30px;font-weight:800;color:var(--amber);
+  background:var(--panel-2);border:1px solid var(--amber-dim);border-radius:12px;padding:6px 4px}
+.scrub-track{position:relative;height:44px;border-radius:99px;background:var(--panel-2);
+  box-shadow:inset 0 0 0 1px var(--line-2);touch-action:none;cursor:pointer;overflow:visible}
+.scrub-fill{position:absolute;inset:0 auto 0 0;border-radius:99px;min-width:12px;
+  background:linear-gradient(90deg,var(--amber-dim),var(--amber));
+  box-shadow:0 0 18px rgba(240,181,68,.25)}
+.scrub-thumb{position:absolute;top:50%;translate:-50% -50%;width:30px;height:30px;border-radius:50%;
+  background:var(--amber-2);box-shadow:0 2px 10px rgba(0,0,0,.55),0 0 0 4px rgba(240,181,68,.25);
+  pointer-events:none}
+.scrub-mark{position:absolute;top:6px;bottom:6px;width:2px;translate:-50%;
+  background:var(--ink-2);opacity:.55;border-radius:2px;pointer-events:none}
+.scrub-chips{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.scrub-chips .chip-btn.done.on{color:#06140b;background:#22a85a;border-color:#22a85a}
+.scrub-delta{text-align:center;font-size:12.5px;color:var(--amber-2);font-weight:650;
+  font-variant-numeric:tabular-nums}
+.scrub-save{width:100%;justify-content:center}
+.scrub-discard{width:100%;justify-content:center}
+
+/* detail page: the progress block is one fat tappable control */
+.rdt-progress{display:block;width:100%;text-align:left;padding:0;margin:2px 0 12px;
+  -webkit-tap-highlight-color:transparent}
+.rdt-bar.big{height:13px;border-radius:99px}
+.rdt-bar.big i{box-shadow:0 0 14px rgba(240,181,68,.3)}
+.rdt-blabel{display:flex;align-items:center;justify-content:space-between;margin-top:8px}
+.rdt-blabel b{font-size:13.5px;font-weight:700;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.rdt-upd{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:750;
+  color:var(--amber);letter-spacing:.03em}
+.rdt-upd svg{width:13px;height:13px}
+.rdt-progress:hover .rdt-upd{color:var(--amber-2)}
+.rdt-progress:active .rdt-bar.big{filter:brightness(1.15)}
+/* shelf: progress bars are tappable now (.bcard .info blanket-disables pointer
+   events for the overlay, so the reading big-cards' bar must opt back in) */
+.rdcard .pbar{cursor:pointer}
+.bcard.rdcard .pbar{pointer-events:auto}

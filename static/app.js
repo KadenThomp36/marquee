@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260727a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20260812a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -1979,24 +1979,13 @@ function renderRDetail(d) {
         const modes = kind === "book"
           ? [["pages", "Pages"], ...(it.pages ? [["pct", "%"]] : []), ...(chAvail ? [["chapters", "Chapters"]] : [])]
           : [["chapters", "Chapters"], ...(total ? [["pct", "%"]] : [])];
-        const curCh = rdChOf({ ...it, progress: st.progress });
-        const dispVal = mode === "pct" && total
-          ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : (st.progress || 0);
-        const ctrl = (kind === "book" && mode === "chapters" && chAvail)
-          ? `<select id="rdch">${["Not started", ...Array.from({ length: it.chapters }, (_, i) =>
-              `${i + 1}. ${(it.toc || [])[i] ? esc(String(it.toc[i]).slice(0, 44)) : "Chapter " + (i + 1)}`)]
-              .map((l, i) => `<option value="${i}" ${i === curCh ? "selected" : ""}>${l}</option>`).join("")}</select>`
-          : `<button class="iconbtn" id="rdminus">−</button>
-             <input id="rdprog" type="number" min="0" ${mode === "pct" ? `max="100"` : total ? `max="${total}"` : ""} value="${dispVal}">
-             <button class="iconbtn" id="rdplus">+</button>`;
         return `
-      <div class="rdt-bar"><i style="width:${pct}%"></i></div>
+      <button class="rdt-progress" id="rdbar" aria-label="Update progress">
+        <div class="rdt-bar big"><i id="rdbarfill" style="width:${pct}%"></i></div>
+        <div class="rdt-blabel"><b id="rdbig"></b><span class="rdt-upd">${I.edit} Update</span></div>
+      </button>
       ${modes.length > 1 ? `<div class="tabs unitpick rdt-mode">${modes.map(([m, l]) =>
-        `<button data-m="${m}" class="${mode === m ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
-      <div class="rd-progrow"><label>Progress</label>${ctrl}
-        <span class="hint">${mode === "pct" ? `% · ${st.progress || 0}${total ? "/" + total : ""} ${unit}`
-          : mode === "chapters" && chAvail ? `of ${it.chapters} ch · ${pct}%`
-          : `${total ? `of ${total}` : ""} ${unit}${total ? ` · ${pct}%` : ""}`}</span></div>`;
+        `<button data-m="${m}" class="${mode === m ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}`;
       })() : ""}
       <div class="rd-sesrow">${live
         ? `<span class="rd-livechip"><span class="rd-pulse"></span>reading for <b class="rd-el" data-t="${live.started_at}"></b></span>
@@ -2063,17 +2052,45 @@ function renderRDetail(d) {
     $$(".rdt-mode button", view).forEach(b => b.onclick = () => {
       st.mode = b.dataset.m; post({ mode: st.mode }); d.state = st; renderRDetail(d);
     });
-    const setProg = v => { st.progress = Math.max(0, total ? Math.min(total, v) : v);
-      post({ progress: st.progress }); d.state = st; renderRDetail(d); };
-    const step = mode === "pct" && total ? Math.max(1, Math.round(total / 100)) : 1;
-    if ($("#rdminus")) $("#rdminus").onclick = () => setProg((st.progress || 0) - step);
-    if ($("#rdplus")) $("#rdplus").onclick = () => setProg((st.progress || 0) + step);
-    if ($("#rdprog")) $("#rdprog").onchange = () => {
-      const v = +$("#rdprog").value || 0;
-      setProg(mode === "pct" && total ? Math.round(v / 100 * total) : v);
+    const chAvail2 = kind === "book" && it.chapters && it.pages;
+    // patch progress into the page in place — dragging a slider must not cost a
+    // full re-render (it loses scroll position and feels like a page load)
+    const progLabel = () => {
+      const p = total ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : 0;
+      if (mode === "pct" && total) return `${p}% · ${st.progress || 0} of ${total} ${unit}`;
+      if (kind === "book" && mode === "chapters" && chAvail2)
+        return `ch ${rdChOf({ ...it, progress: st.progress })} of ${it.chapters} · ${p}%`;
+      return `${st.progress || 0}${total ? ` of ${total}` : ""} ${unit}${total ? ` · ${p}%` : ""}`;
     };
-    if ($("#rdch")) $("#rdch").onchange = () =>
-      setProg(Math.round((+$("#rdch").value || 0) / it.chapters * it.pages));
+    const paintProg = () => {
+      const p = total ? Math.min(100, Math.round(100 * (st.progress || 0) / total)) : 0;
+      const f = $("#rdbarfill"); if (f) f.style.width = p + "%";
+      const b2 = $("#rdbig"); if (b2) b2.textContent = progLabel();
+      $$(".rdt-ch", view).forEach(row => {
+        const n = +row.dataset.n, read = n <= (st.progress || 0);
+        row.classList.toggle("read", read);
+        const tick = row.querySelector("b");
+        if (read && !tick) row.insertAdjacentHTML("beforeend", `<b>${I.check}</b>`);
+        if (!read && tick) tick.remove();
+      });
+    };
+    const setProg = v => { st.progress = Math.max(0, total ? Math.min(total, v) : v);
+      post({ progress: st.progress }); d.state = st; paintProg(); };
+    paintProg();
+    const openScrub = () => rdScrubber({
+      kind, title: it.title, cover: it.cover, total,
+      pages: it.pages, chapters: it.chapters, toc: it.toc,
+      mode, cur: st.progress || 0, state: st.state, session: null,
+      onSave: (p, fx) => {
+        if (fx.finished) {
+          st.state = "finished"; st.progress = p;
+          if (!st.finished_at) st.finished_at = nowStamp();
+          post({ state: "finished", progress: p }); d.state = st; renderRDetail(d);
+          toast("Finished — nice one");
+        } else setProg(p);
+      },
+    });
+    if ($("#rdbar")) $("#rdbar").onclick = openScrub;
     $$(".rdt-ch", view).forEach(row => row.onclick = () => {
       const n = +row.dataset.n;
       sparks(row);
@@ -2103,8 +2120,10 @@ function renderRDetail(d) {
       renderRDetail(d);
     };
     if ($("#sesend")) $("#sesend").onclick = () =>
-      rdEndSession({ ...live, pages: kind === "book" ? total : null,
-        chapters: kind === "manga" ? total : null }, rerun);
+      rdEndSession({ ...live, pages: kind === "book" ? it.pages : null,
+        chapters: kind === "manga" ? it.chapters : null, book_chapters: it.chapters,
+        toc: it.toc, cur: st.progress, item_state: st.state,
+        title: it.title, cover: it.cover }, rerun);
     if ($("#rdtfix")) $("#rdtfix").onclick = () => rdFixMatch(it);
     $("#rdtremove").onclick = async () => {
       await api(`/${kind}/${it.id}/state`, { body: { state: "none" } }).catch(() => {});
@@ -2309,50 +2328,156 @@ function rdTickTimers() {
     { el.textContent = rdElapsed(el.dataset.t); }), 30000);
   $$(".rd-el").forEach(el => { el.textContent = rdElapsed(el.dataset.t); });
 }
-/* position entry accepting the item's native unit (pages / chapters) OR percent */
-function posSheet({ title, total, unit, cur, onSave, mode, chapters }) {
-  // chips reflect the item's saved progress mode; conversions are internal and
-  // onSave always receives the canonical position (pages for books)
-  const chips = [["u", unit], ...(total ? [["pct", "%"]] : []),
-                 ...(chapters && total ? [["ch", "chapters"]] : [])];
-  let u = mode === "pct" && total ? "pct" : mode === "chapters" && chapters && total ? "ch" : "u";
-  const disp = (pos, uu) => uu === "pct" ? Math.min(100, Math.round(100 * pos / total))
-    : uu === "ch" ? Math.min(chapters, Math.round(pos / total * chapters)) : pos;
-  const toPos = (v, uu) => uu === "pct" ? Math.round(v / 100 * total)
-    : uu === "ch" ? Math.round(v / chapters * total) : v;
-  const hint = uu => uu === "pct" ? "% read" : uu === "ch" ? `of ${chapters} chapters` : `of ${total || "?"} ${unit}`;
-  const s = sheet(`<div class="rd-sheet">
-    <div class="sh-t">${esc(title)}</div>
-    ${chips.length > 1 ? `<div class="tabs unitpick">${chips.map(([cu, l]) =>
-      `<button data-u="${cu}" class="${u === cu ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
-    <div class="rd-progrow"><input id="posv" type="number" min="0" inputmode="numeric"
-        value="${disp(cur || 0, u)}" autofocus><span class="hint" id="posmax">${hint(u)}</span></div>
-    <button class="btn pri" id="possave" style="width:100%;justify-content:center">${I.check} Save</button></div>`);
-  $$(".unitpick button", s.el).forEach(b => b.onclick = () => {
-    if (b.dataset.u === u) return;
-    const pos = toPos(+$("#posv", s.el).value || 0, u);
-    u = b.dataset.u;
-    $$(".unitpick button", s.el).forEach(x => x.classList.toggle("on", x === b));
-    $("#posv", s.el).value = disp(pos, u);
-    $("#posmax", s.el).textContent = hint(u);
-  });
-  $("#possave", s.el).onclick = () => {
-    let pos = toPos(+$("#posv", s.el).value || 0, u);
-    if (total) pos = Math.min(pos, total);
-    s.close(); onSave(Math.max(0, pos));
+/* ---- the scrubber: one thumb-sized sheet for "where am I up to?" ----
+   Replaces the old number-box flows (a stepper that moved one page per tap, and a
+   bare type-a-number box at session end). A big drag-anywhere bar, quick +N chips,
+   a tap-to-type readout, chapter snapping with TOC titles, and — when ending a
+   session — the session's own numbers (elapsed, gained, pace) right above Save. */
+function rdScrubber(o) {
+  const kind = o.kind, total = o.total || 0;
+  const mode = o.mode || (kind === "manga" ? "chapters" : "pages");
+  const chAvail = kind === "book" && o.chapters && o.pages;
+  const unit = kind === "book" ? "pages" : "chapters";
+  const chOf = p => chAvail ? Math.min(o.chapters, Math.round(p / o.pages * o.chapters)) : p;
+  const chToPos = c => chAvail ? Math.round(c / o.chapters * o.pages) : c;
+  const pctOf = p => total ? Math.min(100, Math.round(100 * p / total)) : 0;
+  let pos = Math.max(0, Math.min(o.cur || 0, total || 1e9));
+
+  const inChapters = kind === "manga" || (mode === "chapters" && chAvail);
+  const big = p => mode === "pct" && total ? pctOf(p) + "%" : String(kind === "manga" ? p : inChapters ? chOf(p) : p);
+  const bigUnit = () => mode === "pct" && total ? "read" : inChapters ? "chapter" : "page";
+  const sub = p => {
+    if (!total) return unit;
+    if (mode === "pct") return `${p} of ${total} ${unit}`;
+    if (kind === "book" && inChapters) {
+      const t = (o.toc || [])[chOf(p) - 1];
+      return `${t ? String(t).slice(0, 40) + " · " : ""}p ${p} · ${pctOf(p)}%`;
+    }
+    return `of ${total} ${unit} · ${pctOf(p)}%`;
   };
+  const chipDefs = kind === "manga" ? [["+1 ch", p => p + 1], ["+5 ch", p => p + 5]]
+    : (mode === "chapters" && chAvail) ? [["+1 ch", p => chToPos(chOf(p) + 1)]]
+    : (mode === "pct" && total) ? [["+1%", p => p + Math.max(1, Math.round(total / 100))],
+        ["+5%", p => p + Math.round(total / 20)], ["+10%", p => p + Math.round(total / 10)]]
+    : [["+5", p => p + 5], ["+10", p => p + 10], ["+25", p => p + 25], ["+50", p => p + 50]];
+  const delta = () => {
+    if (!o.session) return "";
+    const dp = pos - (o.session.start_pos || 0);
+    const mins = Math.max(1, Math.round((Date.now() - new Date(o.session.started_at).getTime()) / 60000));
+    const pace = dp > 0 && mins >= 3 ? Math.round(dp / (mins / 60)) : null;
+    return dp > 0 ? `+${dp} ${unit} in ${rdElapsed(o.session.started_at)}${pace ? ` · ≈${pace} ${unit}/hr` : ""}`
+      : `drag to where you stopped`;
+  };
+
+  const readHTML = () => `<button class="scrub-big" id="scrubbig"><b id="scrubnum">${big(pos)}</b><i id="scrubunit">${bigUnit()}</i></button>
+      <span class="scrub-sub" id="scrubsub">${sub(pos)}</span>`;
+  const s = sheet(`<div class="scrub">
+    <div class="scrub-head">
+      <img class="scrub-cover" src="${POSTER(o.cover)}" alt="">
+      <div class="scrub-ht"><b>${esc(o.title || "")}</b>
+        ${o.session ? `<span class="rd-livechip"><span class="rd-pulse"></span><b class="rd-el" data-t="${o.session.started_at}"></b> this session</span>`
+                    : `<span class="scrub-sub2">Where are you up to?</span>`}</div>
+    </div>
+    <div class="scrub-read" id="scrubread">${readHTML()}</div>
+    ${total ? `<div class="scrub-track" id="scrubtrack" aria-label="progress">
+        ${o.session && o.session.start_pos ? `<div class="scrub-mark" style="left:${pctOf(o.session.start_pos)}%"></div>` : ""}
+        <div class="scrub-fill" id="scrubfill"></div>
+        <div class="scrub-thumb" id="scrubthumb"></div>
+      </div>` : ""}
+    <div class="scrub-chips">${chipDefs.map((c, i) => `<button class="chip-btn" data-c="${i}">${c[0]}</button>`).join("")}
+      ${total ? `<button class="chip-btn done" id="scrubdone">${I.check} Finished it</button>` : ""}</div>
+    ${o.session ? `<div class="scrub-delta" id="scrubdelta">${delta()}</div>` : ""}
+    <button class="btn pri scrub-save" id="scrubsave">${I.check} ${o.session ? "End session & save" : "Save"}</button>
+    ${o.session ? `<button class="btn ghost scrub-discard" id="scrubdiscard">Discard this session</button>` : ""}
+  </div>`, { cls: "scrubsheet" });
+
+  const paint = () => {
+    const n = $("#scrubnum", s.el); if (n) n.textContent = big(pos);
+    const su = $("#scrubsub", s.el); if (su) su.textContent = sub(pos);
+    if (total) {
+      $("#scrubfill", s.el).style.width = pctOf(pos) + "%";
+      $("#scrubthumb", s.el).style.left = pctOf(pos) + "%";
+      $("#scrubdone", s.el).classList.toggle("on", pos >= total);
+    }
+    const dl = $("#scrubdelta", s.el); if (dl) dl.textContent = delta();
+  };
+  let lastShown = big(pos), lastHap = 0;
+  const setPos = (p, hap = true) => {
+    pos = Math.max(0, Math.min(total || 1e9, Math.round(p || 0)));
+    if (kind === "book" && mode === "chapters" && chAvail) pos = chToPos(chOf(pos));
+    const shown = big(pos);
+    if (hap && shown !== lastShown && Date.now() - lastHap > 40) { hapticTick(); lastHap = Date.now(); }
+    lastShown = shown;
+    paint();
+  };
+  const track = $("#scrubtrack", s.el);
+  if (track) {
+    const fromEvent = e => {
+      const r = track.getBoundingClientRect();
+      return ((e.clientX - r.left) / r.width) * total;
+    };
+    let drag = false;
+    track.addEventListener("pointerdown", e => { drag = true;
+      try { track.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
+      setPos(fromEvent(e)); });
+    track.addEventListener("pointermove", e => { if (drag) setPos(fromEvent(e)); });
+    track.addEventListener("pointerup", () => { drag = false; });
+    track.addEventListener("pointercancel", () => { drag = false; });
+  }
+  const wireBig = () => {
+    $("#scrubbig", s.el).onclick = () => {
+      const cur = mode === "pct" && total ? pctOf(pos) : inChapters ? chOf(pos) : pos;
+      const box = $("#scrubread", s.el);
+      box.innerHTML = `<input id="scrubin" type="number" inputmode="numeric" min="0" value="${cur}">
+        <span class="scrub-sub">${mode === "pct" && total ? "% read" : inChapters ? "chapter number" : "page number"}</span>`;
+      const inp = $("#scrubin", s.el);
+      inp.focus(); inp.select();
+      const commit = () => {
+        const v = +inp.value || 0;
+        const p = mode === "pct" && total ? Math.round(v / 100 * total)
+          : kind === "book" && inChapters ? chToPos(v) : v;
+        box.innerHTML = readHTML();
+        wireBig(); setPos(p, false);
+      };
+      inp.onblur = commit;
+      inp.onkeydown = e => { if (e.key === "Enter") inp.blur(); };
+    };
+  };
+  wireBig();
+  paint();      // the track renders with no inline width — fill it before first touch
+  $$(".scrub-chips [data-c]", s.el).forEach(b => b.onclick = () => {
+    setPos(chipDefs[+b.dataset.c][1](pos)); sparks(b);
+  });
+  if ($("#scrubdone", s.el)) $("#scrubdone", s.el).onclick = e => { setPos(total); sparks(e.currentTarget); };
+  $("#scrubsave", s.el).onclick = () => {
+    s.close();
+    o.onSave(pos, { finished: !!(total && pos >= total && o.state !== "finished") });
+  };
+  if ($("#scrubdiscard", s.el)) $("#scrubdiscard", s.el).onclick = () => { s.close(); o.onDiscard && o.onDiscard(); };
+  rdTickTimers();
 }
 function rdEndSession(ses, refresh) {
-  const total = ses.pages || ses.chapters;
-  posSheet({ title: `Where did you get to?`, total, unit: ses.kind === "book" ? "pages" : "chapters",
-    mode: ses.mode, chapters: ses.kind === "book" ? ses.book_chapters : null,
-    cur: ses.start_pos || 0,
-    onSave: async pos => {
+  const isBook = ses.kind === "book";
+  rdScrubber({
+    kind: ses.kind, title: ses.title, cover: ses.cover,
+    total: isBook ? ses.pages : ses.chapters,
+    pages: ses.pages, chapters: isBook ? ses.book_chapters : ses.chapters,
+    toc: ses.toc, mode: ses.mode, state: ses.item_state,
+    cur: Math.max(ses.cur ?? 0, ses.start_pos || 0),
+    session: { started_at: ses.started_at, start_pos: ses.start_pos || 0 },
+    onSave: async (pos, fx) => {
       await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { pos } }).catch(() => {});
-      toast(`Session saved — ${rdElapsed(ses.started_at)}${pos > (ses.start_pos || 0)
-        ? ` · ${pos - (ses.start_pos || 0)} ${ses.kind === "book" ? "pages" : "chapters"}` : ""}`);
+      if (fx.finished)
+        await api(`/${ses.kind}/${ses.item_id}/state`, { body: { state: "finished", progress: pos } }).catch(() => {});
+      const dp = pos - (ses.start_pos || 0);
+      toast(`Nice session — ${rdElapsed(ses.started_at)}${dp > 0 ? ` · ${dp} ${isBook ? "pages" : "chapters"}` : ""}${fx.finished ? " · finished!" : ""}`);
       delete CACHE["/reading"]; delete CACHE["/reading/stats"]; refresh();
-    } });
+    },
+    onDiscard: async () => {
+      await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { discard: true } }).catch(() => {});
+      toast("Session discarded"); refresh();
+    },
+  });
 }
 function paintLive(refresh) {
   const box = $("#rdlive");
@@ -2720,6 +2845,22 @@ function renderReading(d, tab, animate = true) {
     card.onclick = e => {
       const b = e.target.closest(".act button, .punch");
       e.preventDefault();
+      if (!b && e.target.closest(".pbar")) {      // tap the bar = update progress right here
+        rdScrubber({ kind, title: it.title, cover: it.cover,
+          total: kind === "book" ? it.pages : it.chapters,
+          pages: it.pages, chapters: it.chapters, mode: it.mode,
+          cur: it.progress || 0, state: it.state, session: null,
+          onSave: (p, fx) => {
+            delete CACHE["/reading/stats"];
+            const body = fx.finished ? { state: "finished", progress: p } : { progress: p };
+            api(`/${kind}/${it.id}/state`, { body }).catch(() => hard());
+            it.progress = p;
+            if (fx.finished) { it.state = "finished";
+              if (!it.finished_at) it.finished_at = nowStamp(); regroup(it); }
+            soft();
+          } });
+        return;
+      }
       if (!b) { location.hash = kind === "book" ? `#/book/${it.id}` : `#/manga/${it.id}`; return; }
       const a = b.dataset.a;
       const total = kind === "book" ? it.pages : it.chapters;
