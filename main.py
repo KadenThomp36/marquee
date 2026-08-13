@@ -2999,12 +2999,19 @@ async def movie_state(movie_id: int, request: Request, user=Depends(current_user
         if state == "none":
             con.execute("DELETE FROM movie_states WHERE user_id=? AND movie_id=?", (user["id"], movie_id))
         else:
-            watched_at = datetime.now().isoformat() if state == "watched" else None
+            # Only a *first* watch stamps a date. Re-sending state='watched' is what
+            # rating a film you already saw looks like from a client, and it must not
+            # move the date you actually watched it — that's how a 2021 viewing ends up
+            # dated today. An explicit watched_at still wins, for date editing.
+            given = body.get("watched_at")
+            stamp = given or (datetime.now().isoformat() if state == "watched" else None)
             con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating)
                 VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state,
-                watched_at=COALESCE(excluded.watched_at, movie_states.watched_at),
+                watched_at=CASE WHEN ? THEN excluded.watched_at
+                                ELSE COALESCE(movie_states.watched_at, excluded.watched_at) END,
                 rating=COALESCE(?, movie_states.rating)""",
-                (user["id"], movie_id, state, watched_at, body.get("rating"), body.get("rating")))
+                (user["id"], movie_id, state, stamp, body.get("rating"),
+                 1 if given else 0, body.get("rating")))
     return {"ok": True}
 
 
