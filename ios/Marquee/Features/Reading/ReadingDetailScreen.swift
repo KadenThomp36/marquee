@@ -64,7 +64,8 @@ struct ReadingDetailScreen: View {
             }
         }
         .sheet(isPresented: $showingMatches) {
-            RematchSheet(bookID: itemID) { await load() }
+            // From a Hardcover preview `itemID` is the Hardcover id, not ours.
+            RematchSheet(bookID: item?.id ?? itemID) { await load() }
         }
         .sheet(item: $progressTarget) { target in
             ReadingProgressSheet(target: target) { _ in await load() }

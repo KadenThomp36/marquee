@@ -132,9 +132,15 @@ struct ContinueReadingCard: View {
         .opacity(busy ? 0.45 : 1)
         .scaleEffect(busy && !reduceMotion ? 0.88 : 1)
         .animation(.spring(duration: 0.3), value: busy)
-        .accessibilityLabel(live != nil ? "End the session on \(item.displayTitle)"
-                            : plusable ? "Read one more chapter of \(item.displayTitle)"
-                            : "Log progress on \(item.displayTitle)")
+        .accessibilityLabel(actionLabel)
+    }
+
+    /// A plain String, so the label overloads don't have to solve a nested ternary of
+    /// interpolated literals.
+    private var actionLabel: String {
+        if live != nil { return "End the session on \(item.displayTitle)" }
+        if plusable { return "Read one more chapter of \(item.displayTitle)" }
+        return "Log progress on \(item.displayTitle)"
     }
 
     private var accessibilityText: String {

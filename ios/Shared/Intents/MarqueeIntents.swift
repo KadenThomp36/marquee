@@ -171,11 +171,16 @@ struct EndReadingSessionIntent: AppIntent {
     }
 
     /// Spoken units to stored units: percent and chapters become pages for a book;
-    /// a manga is stored in chapters already.
+    /// a manga is stored in chapters already, unless it's tracked in percent.
     static func storedPosition(_ spoken: Int, for live: ActiveSession) -> Int {
         let value = max(0, spoken)
-        guard live.readingKind == .book, let pages = live.pages, pages > 0 else { return value }
-        switch ProgressMode(rawValue: live.mode ?? "") {
+        let mode = ProgressMode(rawValue: live.mode ?? "")
+        if live.readingKind == .manga {
+            guard mode == .pct, let chapters = live.chapters, chapters > 0 else { return value }
+            return min(chapters, Int((Double(min(value, 100)) / 100 * Double(chapters)).rounded()))
+        }
+        guard let pages = live.pages, pages > 0 else { return value }
+        switch mode {
         case .pct:
             return min(pages, Int((Double(min(value, 100)) / 100 * Double(pages)).rounded()))
         case .chapters:
