@@ -978,7 +978,7 @@ function renderHome(d, animate = true) {
     ${railOf("Around the house", d.social, x => watchedCard(x, { by: true }))}
     ${d.reviews && d.reviews.length ? `${railHead("Fresh reviews")}
       <div class="home-revs ${rv}">${d.reviews.slice(0, 4).map(r => `
-        <a class="hrev" href="#/${r.type}/${r.id}">
+        <a class="hrev" href="#/${r.link || `${r.type}/${r.id}`}">
           <img loading="lazy" src="${POSTER(r.poster)}" alt="">
           <div class="hrev-b"><div class="hrev-top">${avatarHTML(r.by, "tiny")}
             <b>${esc(r.by.display_name)}</b>${r.rating ? `<span class="hrev-rate">${I.star}${r.rating}</span>` : ""}</div>

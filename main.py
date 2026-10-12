@@ -2,6 +2,7 @@
 """Marquee — self-hosted episode tracker (TV Time style) for the Thompson homelab."""
 import base64
 import hashlib
+import hmac
 import csv
 import gzip
 import io
@@ -1227,7 +1228,7 @@ async def favorites_add(request: Request, user=Depends(current_user)):
     it = body.get("item_type")
     if it not in ("show", "movie"):
         raise HTTPException(400, "item_type must be show or movie")
-    iid = int(body.get("item_id"))
+    iid = int_or_400(body.get("item_id"), "item_id")
     with db() as con:
         if it == "show" and not con.execute("SELECT 1 FROM shows WHERE id=?", (iid,)).fetchone():
             if not upsert_show(con, iid, fetch_episodes=False):
@@ -1827,7 +1828,7 @@ def get_reviews(item_type: str, item_id: int, user=Depends(current_user)):
 @app.post("/api/reviews/{item_type}/{item_id}")
 async def post_review(item_type: str, item_id: int, request: Request, user=Depends(current_user)):
     body = await request.json()
-    rating = body.get("rating")
+    rating = rating_or_none(body.get("rating"))
     text = (body.get("body") or "").strip()
     if not text and not rating:
         raise HTTPException(400, "a rating or some words, please")
@@ -1848,8 +1849,9 @@ async def post_review(item_type: str, item_id: int, request: Request, user=Depen
 @app.delete("/api/review/{review_id}")
 def delete_review(review_id: int, user=Depends(current_user)):
     with db() as con:
-        con.execute("DELETE FROM reviews WHERE id=? AND user_id=?", (review_id, user["id"]))
-        con.execute("DELETE FROM review_replies WHERE review_id=?", (review_id,))
+        cur = con.execute("DELETE FROM reviews WHERE id=? AND user_id=?", (review_id, user["id"]))
+        if cur.rowcount:            # only the author's own delete takes the thread with it
+            con.execute("DELETE FROM review_replies WHERE review_id=?", (review_id,))
     return {"ok": True}
 
 
@@ -2245,6 +2247,41 @@ def push_test(user=Depends(current_user)):
 
 # ---------------------------------------------------------------- home / watch next
 
+# ---- request validation. Ratings and dates are echoed into other members' screens and
+# parsed by the stats code, so they're checked on the way in, not trusted on the way out.
+def rating_or_none(v, real=False):
+    """None, or a number in (0, 10]. Integers unless the caller keeps halves (books)."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        raise HTTPException(400, "rating must be a number")
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "rating must be a number")
+    if not 0 < n <= 10:
+        raise HTTPException(400, "rating must be between 1 and 10")
+    return n if real else int(round(n))
+
+
+def date_or_none(v, field="date"):
+    """None, or an ISO date / naive datetime string (returned as given)."""
+    if v is None or v == "":
+        return None
+    try:
+        datetime.fromisoformat(str(v))
+    except ValueError:
+        raise HTTPException(400, f"{field} must be an ISO date")
+    return str(v)
+
+
+def int_or_400(v, field="value"):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be a whole number")
+
+
 def today():
     return date.today().isoformat()
 
@@ -2388,18 +2425,29 @@ def dashboard(user=Depends(current_user)):
             out.append(item)
         return out
 
+    # every review type resolves against its own catalog — a book review used to be
+    # looked up in movies, showing whatever film shared its id (or vanishing)
     rev_out = []
-    for r in reviews:
-        title = None
-        with db() as con:
-            tbl = "shows" if r["item_type"] == "show" else "movies"
-            row = con.execute(f"SELECT title, poster FROM {tbl} WHERE id=?", (r["item_id"],)).fetchone()
-        if not row:
-            continue
-        rev_out.append({"type": r["item_type"], "id": r["item_id"], "title": row["title"],
-                        "poster": row["poster"], "rating": r["rating"],
-                        "body": (r["body"] or "")[:180], "updated_at": r["updated_at"],
-                        "by": {"display_name": r["display_name"] or r["username"], "avatar": r["avatar"]}})
+    with db() as con:
+        for r in reviews:
+            t, iid = r["item_type"], r["item_id"]
+            if t == "episode":
+                sid, se, nu = iid // 1000000, (iid % 1000000) // 1000, iid % 1000
+                row = con.execute("SELECT title, poster FROM shows WHERE id=?", (sid,)).fetchone()
+                title = row and f'{row["title"]} · S{se} E{nu}'
+            else:
+                tbl, img = {"show": ("shows", "poster"), "movie": ("movies", "poster"),
+                            "book": ("books", "cover"), "manga": ("manga", "cover")}.get(t, (None, None))
+                row = tbl and con.execute(f"SELECT title, {img} AS poster FROM {tbl} WHERE id=?",
+                                          (iid,)).fetchone()
+                title = row and row["title"]
+            if not row:
+                continue
+            rev_out.append({"type": t, "id": iid, "link": review_link(t, iid), "title": title,
+                            "poster": row["poster"], "rating": r["rating"],
+                            "body": (r["body"] or "")[:180], "updated_at": r["updated_at"],
+                            "by": {"display_name": r["display_name"] or r["username"],
+                                   "avatar": r["avatar"]}})
 
     return {
         "up_next": home_data["watch_next"],
@@ -2832,7 +2880,7 @@ async def mark_episode(show_id: int, request: Request, user=Depends(current_user
     with db() as con:
         if body.get("set_date"):
             # update (or create) the watch's date without toggling
-            wa = body["set_date"]
+            wa = date_or_none(body["set_date"], "set_date")
             exists = con.execute("""SELECT 1 FROM watches WHERE user_id=? AND show_id=?
                 AND season=? AND number=?""", (uid, show_id, season, number)).fetchone()
             if exists:
@@ -2899,7 +2947,7 @@ async def follow(show_id: int, request: Request, user=Depends(current_user)):
                         (1 if body["archived"] else 0, user["id"], show_id))
         elif "rating" in body:
             con.execute("UPDATE follows SET rating=? WHERE user_id=? AND show_id=?",
-                        (body["rating"], user["id"], show_id))
+                        (rating_or_none(body["rating"]), user["id"], show_id))
         else:
             con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
                         (user["id"], show_id, datetime.now().isoformat()))
@@ -3039,6 +3087,11 @@ def watch_providers(item_type: str, item_id: int, user=Depends(current_user)):
 async def movie_state(movie_id: int, request: Request, user=Depends(current_user)):
     body = await request.json()
     state = body.get("state")
+    if state not in ("watched", "watchlist", "none"):
+        raise HTTPException(400, "state must be watched, watchlist or none")
+    rating = rating_or_none(body.get("rating"))
+    date_or_none(body.get("watched_at"), "watched_at")
+    date_or_none(body.get("added_at"), "added_at")
     with db() as con:
         if not con.execute("SELECT 1 FROM movies WHERE id=?", (movie_id,)).fetchone():
             upsert_movie(con, movie_id)
@@ -3056,9 +3109,9 @@ async def movie_state(movie_id: int, request: Request, user=Depends(current_user
                 watched_at=CASE WHEN ? THEN excluded.watched_at
                                 ELSE COALESCE(movie_states.watched_at, excluded.watched_at) END,
                 rating=COALESCE(?, movie_states.rating)""",
-                (user["id"], movie_id, state, stamp, body.get("rating"),
+                (user["id"], movie_id, state, stamp, rating,
                  body.get("added_at") or datetime.now().isoformat(),
-                 1 if given else 0, body.get("rating")))
+                 1 if given else 0, rating))
     return {"ok": True}
 
 
@@ -3454,15 +3507,19 @@ def _update_reading_state(kind, item_id, body, uid):
         if not cur:
             raise HTTPException(404, "not tracked")
         state = body.get("state") or cur["state"]
+        if state not in ("want", "reading", "finished"):
+            raise HTTPException(400, "unknown reading state")
         progress = body.get("progress", cur["progress"])
-        rating = body.get("rating", cur["rating"])
+        if progress is not None:
+            progress = max(0, int_or_400(progress, "progress"))
+        rating = rating_or_none(body["rating"], real=True) if "rating" in body else cur["rating"]
         # explicit dates (the sheet's date fields / the fill-in-dates wizard) win outright
         if "started_at" in body:
-            started = body["started_at"] or None
+            started = date_or_none(body["started_at"], "started_at")
         else:
             started = cur["started_at"] or (now if state in ("reading", "finished") else None)
         if "finished_at" in body:
-            finished = body["finished_at"] or None
+            finished = date_or_none(body["finished_at"], "finished_at")
         else:
             finished = now if (state == "finished" and cur["state"] != "finished") \
                 else (None if state != "finished" else cur["finished_at"])
@@ -3524,7 +3581,7 @@ async def edit_session(sid: int, request: Request, user=Depends(current_user)):
             return {"ok": True, "deleted": True}
         started, ended = s["started_at"], s["ended_at"] or s["started_at"]
         if body.get("date"):
-            nd = body["date"][:10]
+            nd = date_or_none(str(body["date"])[:10])
             started = nd + (started[10:] if len(started) > 10 else "T20:00:00")
             ended = nd + (ended[10:] if len(ended) > 10 else "T20:00:00")
         if "minutes" in body:
@@ -3535,8 +3592,8 @@ async def edit_session(sid: int, request: Request, user=Depends(current_user)):
                 pass
         con.execute("""UPDATE reading_sessions SET started_at=?, ended_at=?,
             start_pos=?, end_pos=? WHERE id=?""",
-            (started, ended, int(body.get("from", s["start_pos"] or 0)),
-             int(body.get("to", s["end_pos"] or 0)), sid))
+            (started, ended, int_or_400(body.get("from", s["start_pos"] or 0), "from"),
+             int_or_400(body.get("to", s["end_pos"] or 0), "to"), sid))
     return {"ok": True}
 
 
@@ -4367,9 +4424,9 @@ def compute_stats(uid):
 
         yearly = con.execute("""SELECT substr(watched_at,1,4) y, COUNT(*) c FROM watches
             WHERE user_id=? GROUP BY y ORDER BY y""", (uid,)).fetchall()
-        heat = con.execute("""SELECT strftime('%Y', watched_at, 'localtime') y,
-              strftime('%w', watched_at, 'localtime') d,
-              strftime('%H', watched_at, 'localtime') h, COUNT(*) c
+        heat = con.execute("""SELECT strftime('%Y', watched_at) y,
+              strftime('%w', watched_at) d,
+              strftime('%H', watched_at) h, COUNT(*) c
             FROM watches WHERE user_id=? GROUP BY y, d, h""", (uid,)).fetchall()
 
         # completion buckets over followed shows
@@ -5122,7 +5179,13 @@ def plex_poll_loop():
 
 @app.post("/api/webhook/plex")
 async def plex_native_webhook(request: Request):
-    """Native Plex webhook (Plex Pass): multipart form with a `payload` JSON field."""
+    """Native Plex webhook (Plex Pass): multipart form with a `payload` JSON field.
+    Same shared secret as the Tautulli hook (`?secret=`) — without it anyone who can
+    reach the server could mark anything watched for any mapped user."""
+    with db() as con:
+        secret = setting(con, "webhook_secret")
+    if not secret or not hmac.compare_digest(request.query_params.get("secret") or "", secret):
+        raise HTTPException(403, "bad secret")
     form = await request.form()
     try:
         p = json.loads(form.get("payload", "{}"))
@@ -5169,7 +5232,7 @@ async def plex_native_webhook(request: Request):
 async def tautulli(request: Request):
     with db() as con:
         secret = setting(con, "webhook_secret")
-    if not secret or request.query_params.get("secret") != secret:
+    if not secret or not hmac.compare_digest(request.query_params.get("secret") or "", secret):
         raise HTTPException(403, "bad secret")
     body = await request.json()
     account = (body.get("user") or "").strip()
