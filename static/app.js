@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261011b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261011c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -65,12 +65,22 @@ async function api(path, opts = {}) {
     opts.body = JSON.stringify(opts.body);
     opts.method = opts.method || "POST";
   }
-  const r = await fetch("/api" + path, opts);
+  let r;
+  try { r = await fetch("/api" + path, opts); }
+  catch (e) {
+    // a write that never reached the server must not look like it worked
+    if (opts.method && opts.method !== "GET") toast(navigator.onLine ? "Couldn’t reach Marquee — not saved" : "You’re offline — not saved");
+    throw e;
+  }
   if (r.status === 401) { ME = null; routes.login(); throw new Error("auth"); }
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = (await r.json()).detail || msg; } catch {}
-    toast(msg); throw new Error(msg);
+    let msg = "";
+    try { msg = (await r.json()).detail || ""; } catch {}
+    if (typeof msg !== "string") msg = "";
+    if (!msg || r.status >= 500) msg = r.status === 502 || r.status === 503
+      ? "Marquee is restarting — try again in a moment" : msg && r.status < 500 ? msg : "Something went wrong on the server";
+    if (!opts.quiet) toast(msg);
+    const err = new Error(msg); err.status = r.status; throw err;
   }
   const data = await r.json();
   // any endpoint that finishes a season/series hands back a celebration — catching it
@@ -93,6 +103,8 @@ function cached(path) {
     },
   };
 }
+// numbers that came from the database go into markup as numbers, never as text
+const num = v => (v == null || v === "" || isNaN(+v)) ? "" : +v;
 const esc = s => (s ?? "").toString().replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function toast(msg) {
@@ -106,7 +118,7 @@ function episodeDoneToast(showId, season, number, title, img) {
   if (!el) { el = document.createElement("div"); el.id = "eptoast"; document.body.appendChild(el); }
   el.classList.remove("show");
   el.innerHTML = `<a class="et-card" href="#/show/${showId}/e/${season}/${number}">
-      <span class="et-art"${img ? ` style="background-image:url('${img}')"` : ""}></span>
+      <span class="et-art"${img ? ` style="background-image:url('${esc(img)}')"` : ""}></span>
       <span class="et-body">
         <span class="et-badge">${I.check}<i>Watched</i></span>
         <span class="et-title">${esc(title || "Episode " + number)}</span>
@@ -125,7 +137,7 @@ const nowStamp = () => { const d = new Date(), p = n => String(n).padStart(2, "0
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; };
 const fmtHours = m => m >= 6000 ? `${(m / 1440).toFixed(1)} days` : `${Math.round(m / 60)} hrs`;
 const sxe = (s, n) => `S${s} · E${n}`;
-const POSTER = p => p || "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 3'%3E%3Crect width='2' height='3' fill='%231f1a13'/%3E%3C/svg%3E";
+const POSTER = p => p ? esc(p) : "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 3'%3E%3Crect width='2' height='3' fill='%231f1a13'/%3E%3C/svg%3E";
 const skRows = n => Array.from({ length: n }, () => `<div class="sk row-sk"></div>`).join("");
 // show a loading skeleton only if the fetch is actually slow — keeps back-navigation
 // (which reads fast, local data) from flashing a skeleton over the previous screen
@@ -152,7 +164,7 @@ function sparks(el) {
 /* ---------- shared: avatar, share, lists, reviews ---------- */
 function avatarHTML(u, cls = "") {
   const name = u.display_name || u.username || "?";
-  if (u.avatar) return `<span class="avatar ${cls}"><img src="${u.avatar}" alt=""></span>`;
+  if (u.avatar) return `<span class="avatar ${cls}"><img src="${esc(u.avatar)}" alt=""></span>`;
   const initial = name.trim()[0].toUpperCase();
   const hue = [...name].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
   return `<span class="avatar ${cls}" style="--ah:${hue}">${initial}</span>`;
@@ -164,7 +176,7 @@ const pickImg = (...cands) => cands.find(Boolean) || "";
 function castStrip(people) {
   if (!people || !people.length) return "";
   return `<div class="cast-strip">${people.map(c => {
-    const inner = `<div class="face">${c.img ? `<img loading="lazy" src="${c.img}" alt="">` : personGlyph()}</div>
+    const inner = `<div class="face">${c.img ? `<img loading="lazy" src="${esc(c.img)}" alt="">` : personGlyph()}</div>
       <div class="cn">${esc(c.name)}</div><div class="cc">${esc(c.character || "")}</div>`;
     return c.id ? `<a class="cast" href="#/person/${c.id}">${inner}</a>`
       : `<div class="cast">${inner}</div>`;
@@ -243,7 +255,9 @@ function sheet(innerHTML, { cls = "" } = {}) {
   el.innerHTML = `<div class="sheet ${cls}">${innerHTML}</div>`;
   document.body.appendChild(el);
   requestAnimationFrame(() => el.classList.add("show"));
-  const close = () => { el.classList.remove("show"); setTimeout(() => el.remove(), 240); };
+  const onKey = e => { if (e.key === "Escape") close(); };
+  const close = () => { removeEventListener("keydown", onKey); el.classList.remove("show"); setTimeout(() => el.remove(), 240); };
+  addEventListener("keydown", onKey);
   el.addEventListener("click", e => { if (e.target === el) close(); });
   return { el, close };
 }
@@ -535,11 +549,11 @@ async function reviewsBlock(itemType, itemId, { watched = true } = {}) {
     if ($("#writerev", wrap)) $("#writerev", wrap).onclick = () => openEditor();
     $$(".rev-edit", wrap).forEach(b => b.onclick = () => openEditor(mine));
     $$(".rev-del", wrap).forEach(b => b.onclick = async () => {
-      if (confirm("Delete your review?")) { await api(`/review/${b.dataset.id}`, { method: "DELETE" }); load(); }
+      if (await ask("Delete your review? Replies to it go too.", "Delete", null) === "primary") { await api(`/review/${b.dataset.id}`, { method: "DELETE" }); load(); }
     });
     $$(".reply-btn", wrap).forEach(b => b.onclick = () => openReplyEditor(+b.dataset.rid));
     $$(".reply-del", wrap).forEach(b => b.onclick = async () => {
-      if (confirm("Delete this reply?")) { await api(`/reply/${b.dataset.id}`, { method: "DELETE" }); load(); }
+      if (await ask("Delete this reply?", "Delete", null) === "primary") { await api(`/reply/${b.dataset.id}`, { method: "DELETE" }); load(); }
     });
     loadExternal();
   };
@@ -555,7 +569,7 @@ async function reviewsBlock(itemType, itemId, { watched = true } = {}) {
         <div class="rev-head"><span class="src-av">${srcGlyph(r.source)}</span>
           <div class="rev-who"><b>${esc(r.author || "someone")}</b>
             <span class="rev-date">${r.date ? fmtDate(r.date) : ""} · via ${esc(r.source)}</span></div>
-          ${r.rating ? `<span class="rev-rating">${I.star} ${r.rating}</span>` : ""}
+          ${r.rating ? `<span class="rev-rating">${I.star} ${num(r.rating)}</span>` : ""}
           ${r.likes ? `<span class="rev-likes">♥ ${r.likes}</span>` : ""}</div>
         ${veil(`<p class="rev-body">${esc(r.body)}</p>`, { watched, cls: "sp-rev", label: "Spoiler" })}
         <button class="read-more" type="button">Read more</button>
@@ -591,7 +605,7 @@ async function reviewsBlock(itemType, itemId, { watched = true } = {}) {
       <div class="rev-head">${avatarHTML(r.author, "sm")}
         <div class="rev-who"><b>${esc(r.author.display_name)}</b>
           <span class="rev-date">${fmtDate((r.updated_at || r.created_at).slice(0, 10))}</span></div>
-        ${r.rating ? `<span class="rev-rating">${I.star} ${r.rating}<small>/10</small></span>` : ""}
+        ${r.rating ? `<span class="rev-rating">${I.star} ${num(r.rating)}<small>/10</small></span>` : ""}
         ${isMine ? `<span class="rev-actions"><button class="rev-edit">${I.edit}</button>
           <button class="rev-del" data-id="${r.id}">${I.trash}</button></span>` : ""}
       </div>
@@ -648,11 +662,21 @@ async function reviewsBlock(itemType, itemId, { watched = true } = {}) {
 /* ---------- router ---------- */
 const routes = {};
 function seg() { return location.hash.replace(/^#\/?/, "").split("/"); }
+/* every navigation gets a number; a screen that awaited the network checks it's still
+   the current one before painting, so a slow show page can't land on top of Movies */
+let ROUTE_SEQ = 0;
+const routeGuard = () => { const n = ROUTE_SEQ; return () => n === ROUTE_SEQ; };
 function parseHash() {
   const p = seg();
   if (!ME) return routes.login();
+  ROUTE_SEQ++;
   $$(".sheetwrap").forEach(el => el.remove());   // navigating away dismisses any open sheet
   $$(".lightbox").forEach(el => el.remove());
+  document.body.style.overflow = "";             // a lightbox closed by Back left the page locked
+  // screen-level handlers are assigned per screen; clear them so Home's punch handler
+  // can't fire on Reading's cards (and the show page's long-press can't outlive it)
+  view.onclick = view.onpointerdown = view.onpointerup = view.onpointermove =
+    view.onpointercancel = view.oncontextmenu = null;
   stopReqPolling();
   window.scrollTo(0, 0);
   navDepth();
@@ -677,6 +701,35 @@ function parseHash() {
     a.classList.toggle("on", a.dataset.r === active));
 }
 window.addEventListener("hashchange", parseHash);
+/* fetch a screen's data: null if the user has moved on (don't paint), or if it failed —
+   in which case the screen says so, with a way back and a retry, instead of leaving a
+   skeleton shimmering forever */
+async function screenData(path, stop) {
+  const live = routeGuard();
+  try {
+    const d = await api(path, { quiet: true });   // the screen itself reports failure
+    if (stop) stop();
+    return live() ? d : null;
+  } catch (e) {
+    if (stop) stop();
+    if (live() && e.message !== "auth") errorScreen(e);
+    return null;
+  }
+}
+function errorScreen(e) {
+  const offline = !navigator.onLine || e instanceof TypeError;
+  view.innerHTML = `<div class="page-head">${crumb("#/", "Watch Next")}</div>
+    <div class="errstate">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 8v5M12 16.5v.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/></svg>
+      <h2>${offline ? "You’re offline" : e.status === 404 ? "Nothing here" : "Couldn’t load this"}</h2>
+      <p>${offline ? "Marquee can’t reach the server right now."
+        : e.status === 404 ? "This page doesn’t exist — it may have been removed."
+        : e.status >= 500 || !e.status ? "Something went wrong on the server — often a hiccup reaching TMDB. Try again in a moment."
+        : esc(e.message)}</p>
+      ${e.status === 404 ? `<a class="btn pri" href="#/">Back to Watch Next</a>` : `<button class="btn pri" id="retry">Try again</button>`}</div>`;
+  if (!$("#retry")) return;
+  $("#retry").onclick = () => parseHash();
+}
 
 /* ---------- artwork gallery ----------
    Tap the cover on a show or film and you get every poster and backdrop TMDB has,
@@ -700,7 +753,7 @@ function lightbox(imgs, start, title) {
     <div class="lb-stage"><img alt=""></div>
     <button class="lb-nav next" aria-label="Next">${I.chevS}</button>
     <div class="lb-strip">${imgs.map((p, n) =>
-      `<button class="lb-th" data-i="${n}"><img loading="lazy" src="${p.thumb}" alt=""></button>`).join("")}</div>`;
+      `<button class="lb-th" data-i="${n}"><img loading="lazy" src="${esc(p.thumb)}" alt=""></button>`).join("")}</div>`;
   document.body.appendChild(el);
   document.body.style.overflow = "hidden";
   const stage = $("img", $(".lb-stage", el));
@@ -821,7 +874,7 @@ routes.login = async (mode = "login") => {
     try {
       ME = await api(isReg ? "/register" : "/login", { body: { username: u, password: p } });
       topbar.hidden = false; tabbar.hidden = false;
-      Object.keys(CACHE).forEach(k => delete CACHE[k]);
+      resetUserState();
       if (!seg()[0]) location.hash = "#/";   // keep a shared deep link through login
       boot();
     } catch (e) {
@@ -985,7 +1038,7 @@ function renderHome(d, animate = true) {
         <a class="hrev" href="#/${r.link || `${r.type}/${r.id}`}">
           <img loading="lazy" src="${POSTER(r.poster)}" alt="">
           <div class="hrev-b"><div class="hrev-top">${avatarHTML(r.by, "tiny")}
-            <b>${esc(r.by.display_name)}</b>${r.rating ? `<span class="hrev-rate">${I.star}${r.rating}</span>` : ""}</div>
+            <b>${esc(r.by.display_name)}</b>${r.rating ? `<span class="hrev-rate">${I.star}${num(r.rating)}</span>` : ""}</div>
             <div class="hrev-t">${esc(r.title)}</div>
             ${r.body ? `<div class="hrev-x">${esc(r.body)}</div>` : ""}</div></a>`).join("")}</div>` : ""}`;
 
@@ -1147,7 +1200,9 @@ function episodeEditor(showId, defaultSeason) {
       <button class="btn ghost" data-v="cancel">Cancel</button></div>`;
     document.body.appendChild(el);
     requestAnimationFrame(() => el.classList.add("show"));
-    const done = v => { el.classList.remove("show"); setTimeout(() => el.remove(), 220); resolve(v); };
+    const onKey = e => { if (e.key === "Escape") done("cancel"); };
+    addEventListener("keydown", onKey);
+    const done = v => { removeEventListener("keydown", onKey); el.classList.remove("show"); setTimeout(() => el.remove(), 220); resolve(v); };
     el.onclick = async e => {
       const b = e.target.closest("[data-v]");
       if (!b && e.target === el) return done(null);
@@ -1176,11 +1231,13 @@ function ask(title, primary, secondary) {
     el.innerHTML = `<div class="sheet">
       <div class="sh-t">${title}</div>
       <button class="btn pri" data-v="primary">${primary}</button>
-      <button class="btn" data-v="secondary">${secondary}</button>
+      ${secondary ? `<button class="btn" data-v="secondary">${secondary}</button>` : ""}
       <button class="btn ghost" data-v="cancel">Cancel</button></div>`;
     document.body.appendChild(el);
     requestAnimationFrame(() => el.classList.add("show"));
-    const done = v => { el.classList.remove("show"); setTimeout(() => el.remove(), 220); resolve(v); };
+    const onKey = e => { if (e.key === "Escape") done("cancel"); };
+    addEventListener("keydown", onKey);
+    const done = v => { removeEventListener("keydown", onKey); el.classList.remove("show"); setTimeout(() => el.remove(), 220); resolve(v); };
     el.onclick = e => {
       const b = e.target.closest("[data-v]");
       if (b) done(b.dataset.v);
@@ -1228,7 +1285,7 @@ async function ratingsPanel(id) {
     const line = es.map((e, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(e.rating).toFixed(1)}`).join(" ");
     const area = `M${X(0).toFixed(1)} ${H - pb} ` + es.map((e, i) => `L${X(i).toFixed(1)} ${Y(e.rating).toFixed(1)}`).join(" ") + ` L${X(N - 1).toFixed(1)} ${H - pb} Z`;
     const r = N <= 24 ? 2.4 : 1.8;
-    const dots = es.map((e, i) => `<circle class="pt ${e.src === "tmdb" ? "tmdb" : ""}" cx="${X(i).toFixed(1)}" cy="${Y(e.rating).toFixed(1)}" r="${r}"><title>E${e.number}${e.title ? " · " + e.title.replace(/"/g, "") : ""} · ${e.rating}${e.votes ? " · " + e.votes.toLocaleString() + " votes" : ""}${e.src === "tmdb" ? " (TMDB)" : ""}</title></circle>`).join("");
+    const dots = es.map((e, i) => `<circle class="pt ${e.src === "tmdb" ? "tmdb" : ""}" cx="${X(i).toFixed(1)}" cy="${Y(e.rating).toFixed(1)}" r="${r}"><title>E${e.number}${e.title ? " · " + esc(e.title) : ""} · ${e.rating}${e.votes ? " · " + e.votes.toLocaleString() + " votes" : ""}${e.src === "tmdb" ? " (TMDB)" : ""}</title></circle>`).join("");
     const peak = es.reduce((m, e, i) => e.rating > es[m].rating ? i : m, 0);
     return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" class="ratspark">${grid}${avgLine}` +
       `<path class="rarea" d="${area}"/><path class="rline" d="${line}"/>${dots}` +
@@ -1292,7 +1349,7 @@ async function watchNow(itemType, id, hostId) {
   const link = d.link || "";
   const prov = p => {
     const inner = `<span class="wn-logo">${p.logo
-        ? `<img loading="lazy" src="${p.logo}" alt="${esc(p.name || "")}">`
+        ? `<img loading="lazy" src="${esc(p.logo)}" alt="${esc(p.name || "")}">`
         : `<span class="wn-ph">${esc((p.name || "?").trim()[0] || "?")}</span>`}</span>
       <span class="wn-name">${esc(p.name || "")}</span>`;
     return link
@@ -1343,8 +1400,8 @@ routes.show = async id => {
       <div class="sk" style="width:136px;aspect-ratio:2/3"></div>
       <div style="flex:1"><div class="sk line-sk" style="max-width:260px;height:26px"></div>
       <div class="sk line-sk" style="max-width:180px;margin-top:12px"></div></div></div></div>${skRows(4)}`);
-  const s = await api(`/show/${id}`);
-  stop();
+  const s = await screenData(`/show/${id}`, stop);
+  if (!s) return;
   s.seasons = s.seasons.filter(se => se.episodes.length);   // hide empty (unproduced) seasons
   const today = nowStamp().slice(0, 10);
   const watchable = s.seasons.flatMap(se => se.episodes)
@@ -1373,7 +1430,7 @@ routes.show = async id => {
   ].filter(Boolean).join("");
   navHere(s.title);
   view.innerHTML = `
-    <div class="backdrop">${s.backdrop ? `<div class="bg" style="background-image:url('${s.backdrop}')"></div>` : ""}
+    <div class="backdrop">${s.backdrop ? `<div class="bg" style="background-image:url('${esc(s.backdrop)}')"></div>` : ""}
       <div class="hero">
         <div class="page-head hero-crumb">${crumb("#/", "Watch Next")}</div>
         <button class="poster-btn" id="artbtn" title="See the artwork">
@@ -1431,7 +1488,7 @@ routes.show = async id => {
         <div class="s-top">${I.chev}
           <h3>${esc(sname)}</h3>
           <span class="prog"><b class="wc">${w}</b>/${eps.length}</span>
-          <button class="all" data-un="${w === eps.length ? 1 : ""}">${w === eps.length ? "unmark all" : "mark all"}</button>
+          <button class="all${w === eps.length ? " un" : ""}" data-un="${w === eps.length ? 1 : ""}">${w === eps.length ? "unmark all" : "mark all"}</button>
         </div>
         <div class="s-bot"><span class="mini"><i style="--p:${eps.length ? Math.round(100 * w / eps.length) : 0}%"></i></span>
           <span class="seas-state" data-reqs="${se.season}"></span></div>
@@ -1447,7 +1504,7 @@ routes.show = async id => {
   function upNextCard(e, isNext) {
     const img = pickImg(e.still, s.info?.season_posters?.[e.season], s.backdrop, s.poster);
     return `<div class="upnext un-slide${e.watched ? " done" : ""}" data-s="${e.season}" data-n="${e.number}">
-      <div class="un-still" style="${img ? `background-image:url('${img}')` : ""}">
+      <div class="un-still" style="${img ? `background-image:url('${esc(img)}')` : ""}">
         <div class="un-holes"></div><div class="un-holes r"></div><div class="un-scrim"></div>
         <span class="un-badge"><i></i>${unBadge(e, isNext)}</span>
       </div>
@@ -1512,7 +1569,7 @@ routes.show = async id => {
       const box = view.querySelector(`.season[data-season="${season}"]`); if (box) patchSeasonHeader(box);
     }
     delete CACHE["/dashboard"];
-    api(`/show/${id}/watch`, { body: { season, number, unwatch: !on } }).catch(() => routes.show(id));
+    api(`/show/${id}/watch`, { body: { season, number, unwatch: !on } }).catch(() => { if (seg()[0] === "show" && seg()[1] === String(id) && !seg()[2]) routes.show(id); });
   }
   ratingsPanel(id);
   watchNow("show", +id, "watch-now");
@@ -1544,6 +1601,7 @@ routes.show = async id => {
     const all = $(".all", box);
     all.dataset.un = w === total ? 1 : "";
     all.textContent = w === total ? "unmark all" : "mark all";
+    all.classList.toggle("un", w === total);
   }
   function patchTotals(delta) {
     watched = Math.max(0, watched + delta);
@@ -1590,7 +1648,7 @@ routes.show = async id => {
         patchSeasonHeader(row.closest(".season"));
         if (on) sparks(row.querySelector(".tick"));
         delete CACHE["/dashboard"];
-        api(`/show/${id}/watch`, { body: { season, number, unwatch: !on } }).catch(() => routes.show(id));
+        api(`/show/${id}/watch`, { body: { season, number, unwatch: !on } }).catch(() => { if (seg()[0] === "show" && seg()[1] === String(id) && !seg()[2]) routes.show(id); });
         syncUpNext();
         s.close();
       }
@@ -1671,7 +1729,7 @@ routes.show = async id => {
   if ($("#arch")) $("#arch").onclick = async () => {
     await api(`/show/${id}/follow`, { body: { archived: false } }); libDirty(); routes.show(id); };
   if ($("#unfollow")) $("#unfollow").onclick = async () => {
-    if (await ask(`Remove ${esc(s.title)} and all its watch history?`, "Remove", "Keep it") !== "primary") return;
+    if (await ask(`Remove ${esc(s.title)} and all its watch history?`, "Remove", null) !== "primary") return;
     await api(`/show/${id}/follow`, { body: { unfollow: true } }); libDirty();
     if (NAV_DEPTH > 0) history.back(); else location.hash = "#/shows";
   };
@@ -1689,13 +1747,17 @@ routes.show = async id => {
     const season = +box.dataset.season;
     if (e.target.closest(".all")) {
       const un = !!$(".all", box).dataset.un;
+      // unmarking throws away every watch date in the season — the server can't undo
+      // that, so ask first (marking is cheap to reverse; it doesn't ask)
+      if (un && await ask(`Unmark all of ${season ? `Season ${season}` : "Specials"}? The dates you watched them are lost.`,
+                          "Unmark all", null) !== "primary") return;
       if (!$(".eps", box)) box.insertAdjacentHTML("beforeend", seasonHTML(seasonsByNum[season], today, id));
       let delta = 0;
       $$(".ep-row", box).forEach(r => { if (!r.classList.contains("future") || un) delta += setRow(r, !un); });
       patchSeasonHeader(box); if (season > 0) patchTotals(delta);
       if (!un) sparks($(".all", box));
       delete CACHE["/dashboard"];
-      api(`/show/${id}/season/${season}/watch`, { body: { unwatch: un } }).catch(() => routes.show(id));
+      api(`/show/${id}/season/${season}/watch`, { body: { unwatch: un } }).catch(() => { if (seg()[0] === "show" && seg()[1] === String(id) && !seg()[2]) routes.show(id); });
       syncUpNext();
       return;
     }
@@ -1727,7 +1789,7 @@ routes.show = async id => {
             patchSeasonHeader(box); patchTotals(delta); sparks(tick);
             delete CACHE["/dashboard"];
             api(`/show/${id}/watch`, { body: { season, number, previous: true } })
-              .catch(() => routes.show(id));
+              .catch(() => { if (seg()[0] === "show" && seg()[1] === String(id) && !seg()[2]) routes.show(id); });
             syncUpNext();
             return;
           }
@@ -1744,7 +1806,7 @@ routes.show = async id => {
       }
       delete CACHE["/dashboard"];
       api(`/show/${id}/watch`, { body: { season, number, unwatch: !on } })
-        .catch(() => routes.show(id));
+        .catch(() => { if (seg()[0] === "show" && seg()[1] === String(id) && !seg()[2]) routes.show(id); });
       syncUpNext();
       return;
     }
@@ -1761,15 +1823,15 @@ routes.show = async id => {
 routes.episode = async (id, season, number) => {
   const stop = deferSkeleton(`<div class="ephero"><div class="sk" style="aspect-ratio:16/8.2;border-radius:0"></div></div>
     <div class="sk line-sk" style="max-width:280px;height:24px"></div>`);
-  const e = await api(`/show/${id}/episode/${season}/${number}`);
-  stop();
+  const e = await screenData(`/show/${id}/episode/${season}/${number}`, stop);
+  if (!e) return;
   navHere(`${sxe(e.season, e.number)} · ${e.show_title}`);
   const dur = e.runtime ? `${e.runtime} min · ` : "";
   const x = e.extra || {};
   view.innerHTML = `
     <div class="ephero">${(() => {
       const img = pickImg(e.still, e.season_poster, e.show_backdrop, e.show_poster);
-      return img ? `<img class="still" src="${img}" alt="">` : `<div class="nostill"></div>`;
+      return img ? `<img class="still" src="${esc(img)}" alt="">` : `<div class="nostill"></div>`;
     })()}</div>
     <div class="epbody reveal">
       ${crumb(`#/show/${id}`, e.show_title)}
@@ -1906,7 +1968,7 @@ function houseLine(kind, it) {
   if (!hh.length) return "";
   const names = ps => ps.length === 1 ? ps[0].name : ps.length === 2 ? `${ps[0].name} & ${ps[1].name}`
     : `${ps[0].name} +${ps.length - 1}`;
-  const star = p => p.rating ? ` · ${I.star}${p.rating}` : "";
+  const star = p => p.rating ? ` · ${I.star}${num(p.rating)}` : "";
   let want, done, on = [];
   if (kind === "movies") {
     want = hh.filter(p => p.state === "watchlist"); done = hh.filter(p => p.state === "watched");
@@ -2384,7 +2446,7 @@ function rdCard(it, kind, section, opts = {}) {
     : ["unread", "Not read", null];
   return `<div class="pcard rdcard" data-id="${it.id}" data-kind="${kind}">
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
-      ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
+      ${it.rating ? `<span class="badge">${num(it.rating)}/10</span>` : ""}
       ${opts.pos && it.series_pos ? `<span class="rd-pos">#${it.series_pos}</span>` : ""}
       <span class="rd-status ${status[0]}">${status[2] || ""}${status[1]}</span>
       ${opts.acts === false ? "" : `<div class="act">${acts}</div>`}
@@ -2439,7 +2501,7 @@ function renderRDetail(d) {
     : (kind === "book" && modeNow === "chapters" && it.chapters && it.pages)
       ? Math.max(0, chConv(b2) - chConv(a)) + " ch" : Math.max(0, b2 - a) + " " + unit;
   view.innerHTML = `
-    <div class="rdt-hero">${it.cover ? `<img class="rdt-bg" src="${it.cover}" alt="">` : ""}
+    <div class="rdt-hero">${it.cover ? `<img class="rdt-bg" src="${esc(it.cover)}" alt="">` : ""}
       <div class="rdt-head">
         <img class="rdt-cover" src="${POSTER(it.cover)}" alt="">
         <div class="rdt-meta reveal">
@@ -2452,7 +2514,7 @@ function renderRDetail(d) {
           <div class="rdt-chips">
             ${total ? `<span class="chip">${total} ${unit}</span>` : ""}
             ${it.volumes ? `<span class="chip">${it.volumes} vols</span>` : ""}
-            ${it.community_rating ? `<span class="chip star">${I.star} ${it.community_rating}</span>` : ""}
+            ${it.community_rating ? `<span class="chip star">${I.star} ${num(it.community_rating)}</span>` : ""}
             ${it.score ? `<span class="chip star">${I.star} ${it.score}</span>` : ""}
             ${genres.slice(0, 3).map(g => `<span class="chip">${esc(g)}</span>`).join("")}
           </div>
@@ -2510,10 +2572,10 @@ function renderRDetail(d) {
             ? `${lp(s.from)} \u2192 ${lp(s.to)}<i> \u00b7 ${lpDelta(s.from, s.to)}</i>` : `at ${lp(s.to)}`}</span></button>`).join("")}</div>` : ""}
       ${(d.household || []).length ? `<div class="sub-h" style="margin-top:22px">Around the house</div><div class="rdt-house">${d.household.map(h => `
         <span class="rdt-hrow">${avatarHTML(h, "tiny")} <b>${esc(h.display_name || h.username)}</b>
-          <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${h.rating}` : ""}</i></span>`).join("")}</div>` : ""}
+          <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${num(h.rating)}` : ""}</i></span>`).join("")}</div>` : ""}
       <div class="act-row" style="margin-top:18px">${kind === "book"
         ? `${d.tracked ? `<button class="chip-btn" id="rdtfix">${I.swap} Wrong book?</button>` : ""}
-           ${it.slug || it.hc_id ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://hardcover.app/books/${it.slug || it.hc_id}">Hardcover</a>` : ""}
+           ${it.slug || it.hc_id ? `<a class="chip-btn" target="_blank" rel="noopener" href="https://hardcover.app/books/${encodeURIComponent(it.slug || it.hc_id)}">Hardcover</a>` : ""}
            <a class="chip-btn" target="_blank" rel="noopener" href="https://www.goodreads.com/search?q=${encodeURIComponent((it.title || "") + " " + (it.author || ""))}"><b>goodreads</b></a>`
         : `<a class="chip-btn" target="_blank" rel="noopener" href="https://anilist.co/manga/${it.id}">AniList</a>`}
         ${d.tracked ? `<button class="chip-btn danger" id="rdtremove">${I.x} Remove</button>` : ""}</div>
@@ -2742,7 +2804,7 @@ function renderBrowse(d) {
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt="">
       ${!isA && x.series_pos ? `<span class="rd-pos">#${x.series_pos}</span>` : ""}
       ${x._added ? `<span class="badge">${I.check}</span>`
-        : x.community_rating ? `<span class="badge">${I.star} ${x.community_rating}</span>` : ""}
+        : x.community_rating ? `<span class="badge">${I.star} ${num(x.community_rating)}</span>` : ""}
       ${x._added ? "" : `<div class="act"><button title="Want to read" data-a="want">${I.bookmark}</button>
         <button title="Start reading now" data-a="reading">${I.eye}</button></div>`}</div>
     <span class="t">${esc(x.title)}</span>
@@ -2751,7 +2813,7 @@ function renderBrowse(d) {
   </div>`;
   view.innerHTML = `${crumb("#/reading", "Books")}
     <div class="brs-hero reveal">
-      ${isA ? `<div class="per-face">${h.image ? `<img src="${h.image}" alt="">` : personGlyph()}</div>`
+      ${isA ? `<div class="per-face">${h.image ? `<img src="${esc(h.image)}" alt="">` : personGlyph()}</div>`
         : `<div class="brs-glyph">${SERIES_ICO}</div>`}
       <div class="brs-body"><div class="brs-kind">${isA ? "Author" : "Series"}</div>
         <h1>${esc(d.name)}</h1>
@@ -3464,7 +3526,7 @@ routes.reading = (tab) => {
 function listCard(l) {
   return `<a class="listcard" href="#/list/${l.id}">
     <div class="lc-covers">${(l.posters.length
-      ? l.posters.slice(0, 4).map(p => `<img loading="lazy" src="${p}" alt="">`).join("")
+      ? l.posters.slice(0, 4).map(p => `<img loading="lazy" src="${esc(p)}" alt="">`).join("")
       : `<div class="lc-empty">${I.bookmark}</div>`)}
       ${l.visibility === "public" ? `<span class="lc-vis">${I.globe}Public</span>`
         : l.visibility === "collab" ? `<span class="lc-vis collab">${I.users}Collab</span>` : ""}</div>
@@ -3582,6 +3644,7 @@ function listAddSheet(listId, onDone) {
     opt.classList.add("busy");
     try {
       await api(`/list/${listId}/item`, { body: { item_type: opt.dataset.t, item_id: +opt.dataset.id } });
+      refreshListSet();
       sparks(opt); toast("Added"); added = true; delete CACHE["/lists"];
       opt.querySelector(".fo-add").innerHTML = I.check;
       onDone && onDone();   // live-update the list behind the sheet so items appear immediately
@@ -3637,7 +3700,8 @@ function listSortSheet(onPick) {
 
 routes.list = async (id, quiet) => {
   if (!quiet) view.innerHTML = `<div class="sk line-sk" style="width:200px;height:26px;margin-bottom:16px"></div>${skRows(4)}`;
-  const l = await api(`/list/${id}`);
+  const l = await screenData(`/list/${id}`);
+  if (!l) return;
   const owner = l.is_owner, canEdit = l.can_edit ?? owner, vis = l.visibility || "private";
   navHere(l.name);
   const crumbHTML = owner || vis === "collab"
@@ -3716,6 +3780,7 @@ routes.list = async (id, quiet) => {
       e.preventDefault(); e.stopPropagation();
       const c = b.closest(".bcard");
       await api(`/list/${id}/item`, { body: { item_type: c.dataset.type, item_id: +c.dataset.id, remove: true } });
+      refreshListSet();
       c.style.opacity = ".3"; c.querySelector(".rmlist").disabled = true;
       delete CACHE["/lists"];
       setTimeout(() => routes.list(id, true), 220);
@@ -3729,7 +3794,7 @@ routes.list = async (id, quiet) => {
   });
   if ($("#dellist")) $("#dellist").onclick = async () => {
     if (confirm(`Delete the list “${l.name}”?`)) {
-      await api(`/list/${id}`, { method: "DELETE" }); delete CACHE["/lists"]; location.hash = "#/lists";
+      await api(`/list/${id}`, { method: "DELETE" }); delete CACHE["/lists"]; refreshListSet(); location.hash = "#/lists";
     }
   };
   if ($("#visseg")) $$(".vs-opt", view).forEach(b => b.onclick = async () => {
@@ -3790,8 +3855,8 @@ routes.movie = async id => {
   const stop = deferSkeleton(`<div class="backdrop"><div class="hero">
     <div class="sk" style="width:136px;aspect-ratio:2/3"></div>
     <div style="flex:1"><div class="sk line-sk" style="max-width:240px;height:26px"></div></div></div></div>`);
-  const m = await api(`/movie/${id}`);
-  stop();
+  const m = await screenData(`/movie/${id}`, stop);
+  if (!m) return;
   const i = m.info || {};
   const chips = [
     i.content_rating && `<span class="chip">${esc(i.content_rating)}</span>`,
@@ -3801,7 +3866,7 @@ routes.movie = async id => {
   ].filter(Boolean).join("");
   navHere(m.title);
   view.innerHTML = `
-    <div class="backdrop">${i.backdrop ? `<div class="bg" style="background-image:url('${i.backdrop}')"></div>` : ""}
+    <div class="backdrop">${i.backdrop ? `<div class="bg" style="background-image:url('${esc(i.backdrop)}')"></div>` : ""}
       <div class="hero">
         <div class="page-head hero-crumb">${crumb("#/movies", "Movies")}</div>
         <button class="poster-btn" id="artbtn" title="See the artwork">
@@ -3857,7 +3922,8 @@ routes.movie = async id => {
 routes.person = async id => {
   view.innerHTML = `<div class="perhero"><div class="sk" style="width:120px;height:120px;border-radius:50%"></div>
     <div style="flex:1"><div class="sk line-sk" style="max-width:220px;height:26px"></div></div></div>${skRows(2)}`;
-  const p = await api(`/person/${id}`);
+  const p = await screenData(`/person/${id}`);
+  if (!p) return;
   navHere(p.name);
   const age = (b, d) => {
     if (!b) return "";
@@ -3876,7 +3942,7 @@ routes.person = async id => {
   view.innerHTML = `
     <div class="page-head">${crumb("#/search", "Search")}</div>
     <div class="perhero reveal">
-      <div class="per-face">${p.img ? `<img src="${p.img}" alt="">` : personGlyph()}</div>
+      <div class="per-face">${p.img ? `<img src="${esc(p.img)}" alt="">` : personGlyph()}</div>
       <div class="per-body"><h1>${esc(p.name)}</h1>
         <div class="per-meta">${meta}</div>
         <div class="actions">
@@ -3904,7 +3970,7 @@ function watchedTile(it, kind) {
     : `${it.watched}${it.aired ? " / " + it.aired : ""} ${it.watched === 1 ? "episode" : "episodes"}`;
   return `<a class="wsc" href="#/${it.type}/${it.id}">
     <span class="wsc-art"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt="">
-      ${it.rating ? `<span class="badge">${it.rating}/10</span>` : ""}
+      ${it.rating ? `<span class="badge">${num(it.rating)}/10</span>` : ""}
       ${kind === "shows" && it.aired && it.watched >= it.aired && it.ended
         ? `<span class="wsc-done" title="Finished">${I.check}</span>` : ""}
       <span data-listmark="${it.type}:${it.id}">${listMark(it.type, it.id)}</span></span>
@@ -4284,7 +4350,9 @@ routes.profile = async (username) => {
         if (bn) bn.innerHTML = bannerLayers(url);
         $(".prof-hero")?.classList.toggle("has-banner", !!url);
       });
-      $("#signout").onclick = async () => { await api("/logout", { body: {} }); ME = null; routes.login(); };
+      $("#signout").onclick = async () => {
+        if (await ask("Sign out of Marquee on this device?", "Sign out", null) !== "primary") return;
+        await api("/logout", { body: {} }).catch(() => {}); ME = null; resetUserState(); routes.login(); };
     }
     wireFavorites(view, me);
     loadWatchedRails(p.username, me, view);
@@ -4453,10 +4521,10 @@ async function refreshBell() {
 routes.inbox = async () => {
   navHere("Notifications");
   view.innerHTML = `<div class="page-head">${crumb("#/", "Watch Next")}</div>
-    <div class="section"><h2>Notifications</h2><div class="rule"></div><span class="cnt" id="ncnt"></span></div>
+    <h1>Notifications <span class="cnt" id="ncnt"></span></h1>
     <div id="nlist">${skRows(3)}</div>`;
-  let data;
-  try { data = await api("/notifications"); } catch { return; }
+  const data = await screenData("/notifications");
+  if (!data) return;
   const host = $("#nlist"); if (!host) return;
   $("#ncnt").textContent = data.items.length || "";
   if (!data.items.length)
@@ -4602,8 +4670,10 @@ routes.search = () => {
     c.refresh(() => seg()[0] === "search" && !q.value.trim(), renderDiscover);
   };
   const runSearch = async () => {
+    const term = q.value.trim();
     box.innerHTML = `<div class="pgrid">${Array.from({ length: 12 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
-    const d = await api(`/search?q=${encodeURIComponent(q.value.trim())}`);
+    const d = await api(`/search?q=${encodeURIComponent(term)}`).catch(() => null);
+    if (!d || q.value.trim() !== term || !q.isConnected) return;   // a newer search (or none) owns the box
     box.innerHTML = d.results.length
       ? `<div class="pgrid reveal">${d.results.map(posterTile).join("")}</div>`
       : `<div class="empty">No matches for “${esc(q.value.trim())}”.</div>`;
@@ -4667,11 +4737,11 @@ function historyChunkHTML(items, type, state) {
       html += `<div class="h-day">${dayLabel(day)}</div>`;
     }
     if (type === "movie") {
-      html += `<a class="h-row" href="#/movies">
+      html += `<a class="h-row" href="#/movie/${it.id}">
         <img loading="lazy" src="${POSTER(it.poster)}" alt="">
         <div class="mid"><div class="t">${esc(it.title)}</div>
           <div class="s">${it.year || ""}${it.runtime ? ` · ${Math.round(it.runtime / 60 * 10) / 10} hrs` : ""}</div></div>
-        ${it.rating ? `<span class="h-rate">${it.rating}<small>/10</small></span>` : ""}</a>`;
+        ${it.rating ? `<span class="h-rate">${num(it.rating)}<small>/10</small></span>` : ""}</a>`;
     } else {
       const n = it.eps.length;
       html += `<a class="h-row" data-k="${it.day}:${it.show_id}" href="#/show/${it.show_id}">
@@ -4694,13 +4764,27 @@ routes.history = (tab = "tv") => {
     </div>
     <div id="hlist" class="hlist">${skRows(8)}</div>
     <div id="hmore"></div>`;
-  $$(".tabs button", view).forEach(b => b.onclick = () => routes.history(b.dataset.t));
+  $$(".tabs button", view).forEach(b => b.onclick = () => {
+    history.replaceState(history.state, "", `#/history/${b.dataset.t}`);   // reload keeps the tab
+    routes.history(b.dataset.t);
+  });
+  // a tab switch re-renders without a navigation — this render's pages must not land in
+  // the next one's list
+  const tok = routes.history._tok = (routes.history._tok || 0) + 1, live = routeGuard();
+  const current = () => tok === routes.history._tok && live();
+  if (routes.history._obs) routes.history._obs.disconnect();
   const state = { mon: null, day: null, cursor: "", done: false, loading: false, first: true };
   const seen = new Map();   // day:show -> element (merge split groups across pages)
   async function loadMore() {
-    if (state.done || state.loading) return;
+    if (state.done || state.loading || !current()) return;
     state.loading = true;
-    const d = await api(`/history?type=${tab}${state.cursor ? "&cursor=" + encodeURIComponent(state.cursor) : ""}`);
+    let d;
+    try { d = await api(`/history?type=${tab}${state.cursor ? "&cursor=" + encodeURIComponent(state.cursor) : ""}`); }
+    catch { if (current()) $("#hmore").innerHTML = `<div class="empty"><button class="btn" id="hretry">Couldn’t load — try again</button></div>`;
+            if ($("#hretry")) $("#hretry").onclick = () => { $("#hmore").innerHTML = ""; loadMore(); };
+            return; }
+    finally { state.loading = false; }
+    if (!current()) return;
     let items = d.items;
     if (tab === "tv") {
       items = items.filter(it => {
@@ -4722,13 +4806,12 @@ routes.history = (tab = "tv") => {
     $("#hlist").insertAdjacentHTML("beforeend", historyChunkHTML(items, tab, state));
     state.cursor = d.cursor;
     state.done = !d.cursor;
-    state.loading = false;
     $("#hmore").innerHTML = state.done
       ? (seen.size || tab === "movie" ? `<div class="empty">That's everything.</div>` : `<div class="empty">Nothing here yet.</div>`)
       : "";
   }
   loadMore();
-  const sentinel = new IntersectionObserver(es => {
+  const sentinel = routes.history._obs = new IntersectionObserver(es => {
     if (es.some(e => e.isIntersecting)) loadMore();
   }, { rootMargin: "600px" });
   sentinel.observe($("#hmore"));
@@ -4803,7 +4886,11 @@ function niceTicks(max, count = 3) {
 function lineChart(labels, vals, { yearMarks = false, series = "watches", labelFmt = null, valFmt = null } = {}) {
   const n = vals.length || 1;
   const max = Math.max(...vals, 1);
-  const W = 720, H = 224, padL = 36, padR = 16, padT = 18, padB = 32;
+  // drawn at roughly the width it'll be shown at: a fixed 720-wide viewBox shrunk onto a
+  // phone took the 10px axis text down to ~4.6px
+  const W = Math.round(Math.max(320, Math.min(720, (view.clientWidth || 720) - 34)));
+  const H = W < 500 ? 196 : 224, padL = 36, padR = 16, padT = 18, padB = 32;
+  const maxLbl = W < 500 ? 6 : 12;
   const iw = W - padL - padR, ih = H - padT - padB;
   const X = i => padL + (n <= 1 ? iw / 2 : iw * i / (n - 1));
   const Y = v => padT + ih * (1 - v / max);
@@ -4815,7 +4902,8 @@ function lineChart(labels, vals, { yearMarks = false, series = "watches", labelF
     + vals.map((v, i) => `L${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(" ")
     + ` L${X(n - 1).toFixed(1)} ${Y(0).toFixed(1)} Z`;
   const lbls = labels.map((m, i) => {
-    const show = yearMarks ? String(m).endsWith("-01") : (n <= 12 || i % Math.ceil(n / 12) === 0 || i === n - 1);
+    const show = yearMarks ? String(m).endsWith("-01") && (W >= 500 || +String(m).slice(2, 4) % 2 === 0 || n <= 48)
+      : (n <= maxLbl || i % Math.ceil(n / maxLbl) === 0 || i === n - 1);
     return show ? `<text class="axis" x="${X(i).toFixed(1)}" y="${H - 10}" text-anchor="middle">${yearMarks ? String(m).slice(0, 4) : m}</text>` : "";
   }).join("");
   const e = n - 1, gid = "ag" + (++_chartSeq);
@@ -4933,7 +5021,7 @@ function rankBars(rows, { face = false, hue = "amber", colors = null, tipUnit = 
     const disp = r.label ?? String(r.v);
     return `<div class="rbar" data-tip-title="${esc(r.name)}" data-tip-val="${esc(disp)}${tipUnit ? " " + esc(tipUnit) : ""}"${c ? ` data-tip-color="${c}"` : ""}>
       <span class="rb-rank"${c ? ` style="color:${c}"` : ""}>${i + 1}</span>
-      ${face ? `<span class="rb-face">${r.img ? `<img loading="lazy" src="${r.img}" alt="">` : personGlyph()}</span>` : ""}
+      ${face ? `<span class="rb-face">${r.img ? `<img loading="lazy" src="${esc(r.img)}" alt="">` : personGlyph()}</span>` : ""}
       <span class="rb-body">
         <span class="rb-top"><span class="rb-name">${esc(r.name)}</span><span class="rb-num">${esc(disp)}</span></span>
         <span class="rb-track"><i style="width:${Math.max(4, Math.round(100 * r.v / max))}%${c ? `;background:${c}` : ""}"></i></span>
@@ -4984,13 +5072,13 @@ function statsSection(d) {
   const months = [];
   for (let i = 23; i >= 0; i--) {
     const dt = new Date(); dt.setDate(1); dt.setMonth(dt.getMonth() - i);
-    months.push(dt.toISOString().slice(0, 7));
+    months.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`);   // local, not UTC
   }
   const byM = Object.fromEntries(d.monthly.map(m => [m.ym, m.count]));
   const mVals = months.map(m => byM[m] || 0);
   const m24 = mVals.reduce((a, b) => a + b, 0);
   const monLabel = ym => { const [y, mo] = ym.split("-"); return MONTHS[+mo - 1] + " " + y; };
-  const peakM = months[mVals.indexOf(Math.max(...mVals))];
+  const peakM = Math.max(...mVals) > 0 ? months[mVals.indexOf(Math.max(...mVals))] : null;   // no watches, no "busiest"
 
   const heatYears = d.heat_years || { all: d.heatmap || [] };
   const hYears = Object.keys(heatYears).filter(y => y !== "all").sort().reverse();
@@ -4998,7 +5086,7 @@ function statsSection(d) {
 
   const totalMin = d.tv_minutes + d.movie_minutes;
   const comp = d.completion || {};
-  const compTotal = Object.values(comp).reduce((a, b) => a + b, 0) || 1;
+  const compN = Object.values(comp).reduce((a, b) => a + b, 0), compTotal = compN || 1;
   const compSegs = [
     { label: "Finished", v: comp.finished || 0, color: "var(--c-green)" },
     { label: "Up to date", v: comp.up_to_date || 0, color: "var(--c-blue)" },
@@ -5055,7 +5143,7 @@ function statsSection(d) {
         ${rankBars(d.top_shows.map(s => ({ name: s.title, v: s.mins, label: fmtHours(s.mins) })), { hue: "amber" })}</div>
       <div class="chart"><h3>Genres</h3><div class="sub">episodes watched, by genre</div>
         ${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })), { colors: CAT_HUES, tipUnit: "episodes" })}</div>
-      <div class="chart wide"><h3>Show shelf</h3><div class="sub">where your ${compTotal} followed shows stand</div>
+      <div class="chart wide"><h3>Show shelf</h3><div class="sub">where your ${compN} followed show${compN === 1 ? "" : "s"} stand</div>
         ${segBar(compSegs)}</div>
       <div class="chart"><h3>Movies by decade</h3><div class="sub">release decade of what you've seen</div>
         ${rankBars((d.movie_decades || []).map(x => ({ name: x.dec + "s", v: x.c })), { hue: "orange", tipUnit: "movies" })}</div>
@@ -5069,7 +5157,7 @@ function statsSection(d) {
       <div class="chart"><h3>All-timers</h3><div class="sub">your highest-rated</div>
         <div class="alltimers">${(d.top_rated || []).map(t => `<div class="at-row">
           <span class="at-name">${esc(t.title)}</span>
-          <span class="at-score" style="color:${rateColor(t.rating)}">${t.rating}<small>/10</small></span></div>`).join("")}</div></div>` : ""}
+          <span class="at-score" style="color:${rateColor(t.rating)}">${num(t.rating)}<small>/10</small></span></div>`).join("")}</div></div>` : ""}
     </div></div>`;
 }
 
@@ -5189,7 +5277,7 @@ function recapSlides(d, me, username) {
     <div class="rs-rank">${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div></div>`);
   if ((d.top_movies || []).length) S.push(`<div class="rs"><div class="rs-cap">Films you loved</div>
     <div class="rs-films">${d.top_movies.slice(0, 5).map(m =>
-      `<div class="rs-film"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>${m.rating ? `<b>${m.rating}/10</b>` : ""}</div>`).join("")}</div></div>`);
+      `<div class="rs-film"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>${m.rating ? `<b>${num(m.rating)}/10</b>` : ""}</div>`).join("")}</div></div>`);
   const rec = [];
   if (d.binge) rec.push(`<div class="rs-rec"><span>Biggest binge</span><b>${d.binge.count} eps</b><i>${fmtDate(d.binge.date)}${d.binge.top ? " · mostly " + esc(d.binge.top) : ""}</i></div>`);
   if (d.first_watch) rec.push(`<div class="rs-rec"><span>Kicked off with</span><b>${esc(d.first_watch.title)}</b><i>${fmtDate(d.first_watch.watched_at)}</i></div>`);
@@ -5287,12 +5375,29 @@ const PLEX_LOGO = `<svg class="plexlogo" viewBox="0 0 24 24" aria-hidden="true">
   <rect x="1.5" y="1.5" width="21" height="21" rx="5" fill="#1a1a1a"/>
   <path d="M8.2 3.5h4.6L17.2 12l-4.4 8.5H8.2L12.6 12z" fill="#e5a00d"/></svg>`;
 
+/* an import runs on the server whether or not Settings is open: keep asking until it's
+   done (to say so), but only write progress into the page while it's on screen */
+function pollImport(elId, missWord, done) {
+  const poll = setInterval(async () => {
+    let s;
+    try { s = await api("/import/status"); } catch { return; }
+    const el = document.getElementById(elId);
+    if (el) el.textContent = `${s.state} — ${s.done || 0}/${s.total || "?"}` +
+      (s.errors?.length ? ` · ${s.errors.length} ${missWord}` : "");
+    if (s.state !== "running") { clearInterval(poll); done(s.state); }
+  }, 2500);
+}
 routes.settings = async () => {
   navHere("Settings");
-  const plex = await api("/plex/status").catch(() => ({}));
-  const oseer = await api("/overseerr/me").catch(() => ({ enabled: false }));
-  const nprefs = (await api("/notifications/prefs").catch(() => ({ prefs: [] }))).prefs;
-  const imdb = await api("/imdb/status").catch(() => null);
+  const live = routeGuard();
+  // independent fetches — in parallel, not one after another
+  const [plex, oseer, np, imdb] = await Promise.all([
+    api("/plex/status").catch(() => ({})),
+    api("/overseerr/me").catch(() => ({ enabled: false })),
+    api("/notifications/prefs").catch(() => ({ prefs: [] })),
+    api("/imdb/status").catch(() => null)]);
+  if (!live()) return;
+  const nprefs = np.prefs;
   const LEADS = [["0", "When it airs"], ["1", "1 day before"], ["3", "3 days before"], ["7", "1 week before"]];
   const notifPanel = `<div class="panel notif-panel"><h3><span class="h3-ic">${I.bell}</span> Notifications</h3>
     <p class="hint">Off by default — switch on only what you want. Alerts appear in your bell inbox, and as push if you enable it below.</p>
@@ -5498,7 +5603,8 @@ routes.settings = async () => {
           $("#plexwait").textContent = "Timed out — try again."; return; }
         try {
           const r = await api(`/plex/pin/${pin.id}`);
-          if (r.linked) { clearInterval(poll); toast(`Plex linked — ${r.username}`); routes.settings(); }
+          if (r.linked) { clearInterval(poll); toast(`Plex linked — ${r.username}`);
+            if (seg()[0] === "settings") routes.settings(); }
         } catch { clearInterval(poll); b.disabled = false; $("#plexwait").textContent = "Link expired — try again."; }
       }, 3000);
     } catch { b.disabled = false; }
@@ -5522,12 +5628,7 @@ routes.settings = async () => {
     const fd = new FormData(); fd.append("file", f);
     await api("/import/tvtime", { method: "POST", body: fd });
     $("#imps").textContent = "Import running…";
-    const poll = setInterval(async () => {
-      const s = await api("/import/status");
-      $("#imps").textContent = `${s.state} — ${s.done || 0}/${s.total || "?"}` +
-        (s.errors?.length ? ` · ${s.errors.length} skipped` : "");
-      if (s.state !== "running") { clearInterval(poll); Object.keys(CACHE).forEach(k => delete CACHE[k]); toast("Import " + s.state); }
-    }, 2500);
+    pollImport("imps", "skipped", st => { Object.keys(CACHE).forEach(k => delete CACHE[k]); toast("TV Time import " + st); });
   };
   $$(".switch-btn[data-feat]", view).forEach(btn => btn.onclick = async () => {
     const on = !btn.classList.contains("on");
@@ -5544,13 +5645,8 @@ routes.settings = async () => {
     const f = $("#grcsv").files[0]; if (!f) return;
     const fd = new FormData(); fd.append("file", f);
     await api("/import/goodreads", { method: "POST", body: fd });
-    $("#grs").textContent = "Matching your library against Open Library…";
-    const poll = setInterval(async () => {
-      const s = await api("/import/status");
-      $("#grs").textContent = `${s.state} — ${s.done || 0}/${s.total || "?"}` +
-        (s.errors?.length ? ` · ${s.errors.length} unmatched` : "");
-      if (s.state !== "running") { clearInterval(poll); delete CACHE["/reading"]; delete CACHE["/reading/stats"]; toast("Goodreads import " + s.state); }
-    }, 2500);
+    $("#grs").textContent = "Matching your library…";
+    pollImport("grs", "unmatched", st => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; toast("Goodreads import " + st); });
   };
   if ($("#mkuser")) $("#mkuser").onclick = async () => {
     const u = $("#nu").value.trim(), p = $("#np").value;
@@ -5633,7 +5729,7 @@ function celeShow(c, done) {
     ...(isShow ? [[c.seasons, c.seasons === 1 ? "season" : "seasons"]] : []),
   ];
   wrap.innerHTML = `
-    ${c.show.backdrop ? `<div class="cele-bg" style="background-image:url(${c.show.backdrop})"></div>` : ""}
+    ${c.show.backdrop ? `<div class="cele-bg" style="background-image:url('${esc(c.show.backdrop)}')"></div>` : ""}
     <div class="cele-rays"></div>
     <div class="cele-card">
       <div class="cele-bulbs">${Array.from({ length: 26 }, (_, i) =>
@@ -5768,6 +5864,14 @@ async function checkBuild() {
   } catch { /* offline — carry on with what we have */ }
   return false;
 }
+/* everything cached about the signed-in person — a shared iPad must not show the next
+   person the last one's list marks, favourites or reading filters */
+function resetUserState() {
+  Object.keys(CACHE).forEach(k => delete CACHE[k]);
+  LISTSET = null; FAVSET = null; _membersCache = null;
+  RD_VIEW = { sort: "recent", author: "", series: "", genre: "", origin: "" }; RD_SEARCH = {};
+  LIBQ = "";
+}
 async function boot() {
   if (location.pathname !== "/")    // shared pretty URL (/list/3 …) → hash route
     history.replaceState(null, "", "/#/" + location.pathname.replace(/^\/+/, ""));
@@ -5778,7 +5882,7 @@ async function boot() {
   applyFeatureNav();
   parseHash();
   refreshBell();
-  setInterval(refreshBell, 60000);
+  clearInterval(boot._bell); boot._bell = setInterval(refreshBell, 60000);   // one, however many logins
   setTimeout(checkRecapPopup, 1400);   // December: auto-present this year's recap once
   setTimeout(checkCelebrations, 900);  // anything finished while the app was closed
   ensureListSet();

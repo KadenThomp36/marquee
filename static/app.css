@@ -24,7 +24,7 @@ html{-webkit-text-size-adjust:100%;scrollbar-color:var(--line-2) transparent;ove
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--body);overflow-x:hidden;overflow-x:clip;
   width:100%;max-width:100vw;min-height:100svh;position:relative}
 #app{max-width:100%;overflow-x:hidden;overflow-x:clip}
-#view{max-width:100%;overflow-x:hidden;overflow-x:clip}
+#view{overflow-x:hidden;overflow-x:clip}   /* width comes from .wrap — a max-width:100% here pushed desktop content full-bleed */
 a{color:inherit;text-decoration:none}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent}
 img{max-width:100%;display:block}
@@ -575,6 +575,8 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .season .all{margin-left:auto;font-size:12px;color:var(--amber);border:1px solid transparent;
   background:var(--amber-soft);padding:6px 12px;border-radius:99px;white-space:nowrap;flex:none}
 .season .all:hover{border-color:var(--amber-dim)}
+.season .all.un{background:none;color:var(--mut);border-color:var(--line-2)}
+.season .all{min-height:36px}
 .eps{border-top:1px solid var(--line);display:none}
 .season.open .eps{display:block}
 .ep-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border-top:1px solid #1d1811;
@@ -614,7 +616,8 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .sheetwrap.show{opacity:1}
 .sheet{background:var(--panel-2);border:1px solid var(--line-2);border-radius:20px 20px 0 0;
   padding:20px 18px calc(18px + env(safe-area-inset-bottom));width:100%;max-width:430px;
-  display:flex;flex-direction:column;gap:9px;transform:translateY(30px);transition:transform .22s cubic-bezier(.2,.9,.3,1)}
+  display:flex;flex-direction:column;gap:9px;transform:translateY(30px);transition:transform .22s cubic-bezier(.2,.9,.3,1);
+  max-height:90dvh;overflow-y:auto;overscroll-behavior:contain}
 .sheetwrap.show .sheet{transform:none}
 .sheet .sh-t{font-weight:700;font-size:15px;margin-bottom:6px;line-height:1.45}
 .sheet .btn{justify-content:center;padding:12px;border-radius:12px}
@@ -2332,3 +2335,21 @@ body.recap-open{overflow:hidden}
 #toast.has-act span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .toast-act{flex:none;padding:7px 14px;border-radius:99px;background:var(--amber-soft);color:var(--amber);
   font-weight:750;font-size:13px;min-height:34px}
+
+/* ── error state for screens that couldn't load ── */
+.errstate{max-width:420px;margin:60px auto;text-align:center;color:var(--ink-2)}
+.errstate svg{width:44px;height:44px;margin:0 auto 14px;color:var(--amber)}
+.errstate h2{font-size:20px;margin:0 0 6px;color:var(--ink)}
+.errstate p{margin:0 0 20px;font-size:14px;color:var(--mut)}
+.home-nudge{text-decoration:none}
+.home-nudge>svg:first-child{width:20px;height:20px;color:var(--amber);flex:none}
+
+/* ── sweep: tap targets, discoverability, mobile chrome ── */
+.rail{scroll-padding-left:18px}
+@media(max-width:700px){.rail{scroll-padding-left:13px}}
+.crumb{min-height:44px;padding:0 10px 0 0}
+.rev-actions button{width:40px;height:40px}
+.reply-del{width:36px;height:36px}
+.lb-x{width:44px;height:44px}
+@media(hover:none){.fav-edit{opacity:1!important}}
+@media(max-width:700px){#topavatar{display:none}.bar .bell{margin-left:auto}}

@@ -32,7 +32,11 @@ self.addEventListener("fetch", e => {
     e.respondWith((async () => {
       try {
         const net = await fetch(req);
-        const c = await caches.open(SHELL); c.put("/", net.clone());
+        // only a real copy of the app becomes the offline shell — not a 502 caught
+        // mid-restart, not an avatar opened directly in the PWA
+        if (net.ok && url.pathname === "/" && (net.headers.get("content-type") || "").includes("text/html")) {
+          const c = await caches.open(SHELL); c.put("/", net.clone());
+        }
         return net;
       } catch {
         return (await caches.match("/")) || (await caches.match(req)) || Response.error();
@@ -45,7 +49,18 @@ self.addEventListener("fetch", e => {
     e.respondWith((async () => {
       const c = await caches.open(ASSETS);
       const hit = await c.match(req);
-      const net = fetch(req).then(r => { if (r && r.ok) c.put(req, r.clone()); return r; }).catch(() => hit);
+      const net = fetch(req).then(r => {
+        if (r && r.ok) {
+          c.put(req, r.clone());
+          // a new ?v= build supersedes the old copies of the same file — drop them, or
+          // the cache grows by a full app every deploy
+          if (url.search) c.keys().then(ks => ks.forEach(k => {
+            const u = new URL(k.url);
+            if (u.pathname === url.pathname && u.search !== url.search) c.delete(k);
+          }));
+        }
+        return r;
+      }).catch(() => hit);
       return hit || net;
     })());
   }
