@@ -22,6 +22,32 @@ public struct ShowCard: Codable, Sendable, Identifiable, Hashable {
     public var nextAir: String?
     public var nextEp: NextEpisode?
 
+    // Library extras. `/api/shows` and the dashboard's watchlist rail send these;
+    // every other source of a card doesn't, so all of them stay optional and an
+    // older server still decodes.
+    /// When you added it — the watchlist sorts newest first.
+    public var addedAt: String?
+    /// Seasons in the catalogue (season > 0).
+    public var seasons: Int?
+    /// Behind on old episodes and nothing watched in a month.
+    public var stale: Bool?
+    /// Minutes of everything aired, and of what you haven't watched of it.
+    public var totalMin: Double?
+    public var leftMin: Double?
+    /// IMDb's score, when the dataset has the show.
+    public var imdb: Double?
+    /// TMDB's score, the fallback.
+    public var vote: Double?
+    public var network: String?
+    public var nEpisodes: Int?
+    /// The first streaming service it's on, from the server's weekly cache.
+    public var prov: StreamingProvider?
+    /// False when the cache has never been asked — `prov == nil` then means
+    /// "unknown", not "nowhere".
+    public var provKnown: Bool?
+    /// Everyone else in the house who follows it.
+    public var household: [HouseholdShow]?
+
     public var displayTitle: String { title ?? "Untitled" }
     public var isEnded: Bool { ShowStatus.isEnded(status) }
     public var progress: Double { aired > 0 ? Double(watched) / Double(aired) : 0 }
@@ -34,10 +60,114 @@ public struct ShowCard: Codable, Sendable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, title, poster, year, status, rating, aired, watched, remaining
+        case seasons, stale, imdb, vote, network, prov, household
         case avgRuntime = "avg_runtime"
         case lastWatched = "last_watched"
         case nextAir = "next_air"
         case nextEp = "next_ep"
+        case addedAt = "added_at"
+        case totalMin = "total_min"
+        case leftMin = "left_min"
+        case nEpisodes = "n_episodes"
+        case provKnown = "prov_known"
+    }
+}
+
+public extension ShowCard {
+    /// Where a watchlist title sits: can you start it tonight, is it still airing,
+    /// or is it not out at all.
+    enum WatchlistGroup: String, CaseIterable, Identifiable, Sendable {
+        case binge, airing, soon
+
+        public var id: String { rawValue }
+        public var title: String {
+            switch self {
+            case .binge: "Ready to binge"
+            case .airing: "Airing now"
+            case .soon: "Coming soon"
+            }
+        }
+    }
+
+    var watchlistGroup: WatchlistGroup {
+        if aired == 0 { return .soon }
+        return nextAir == nil ? .binge : .airing
+    }
+
+    /// Take a freshly marked `show_summary()` without losing the library extras it
+    /// doesn't carry — household, provider, hours.
+    func merged(with summary: ShowCard) -> ShowCard {
+        var out = self
+        out.title = summary.title ?? title
+        out.poster = summary.poster ?? poster
+        out.status = summary.status ?? status
+        out.rating = summary.rating ?? rating
+        out.aired = summary.aired
+        out.watched = summary.watched
+        out.remaining = summary.remaining
+        out.lastWatched = summary.lastWatched ?? lastWatched
+        out.nextAir = summary.nextAir
+        out.nextEp = summary.nextEp
+        out.stale = false
+        if let leftMin, summary.watched > watched {
+            let perEpisode = Double(avgRuntime ?? summary.avgRuntime ?? 0)
+            out.leftMin = max(0, leftMin - perEpisode * Double(summary.watched - watched))
+        }
+        return out
+    }
+}
+
+/// `{"name": "Netflix", "logo": "https://…"}` — one streaming service.
+public struct StreamingProvider: Codable, Sendable, Hashable {
+    public var name: String?
+    public var logo: String?
+}
+
+/// A housemate's relationship with a show on one of your cards.
+public struct HouseholdShow: Codable, Sendable, Hashable, Identifiable {
+    /// First name only, already trimmed server-side.
+    public var name: String?
+    public var username: String?
+    public var avatar: String?
+    /// Episodes they've marked (season > 0). Zero means it's on their watchlist.
+    public var watched: Int?
+    /// `"2:3"` — season and number of the furthest episode they've marked.
+    public var lastEp: String?
+    /// Lenient: rows written before ratings were validated can hold a string.
+    public var rating: FlexInt?
+    public var stopped: Bool?
+
+    public var id: String { username ?? name ?? "?" }
+    public var displayName: String { name ?? username ?? "Someone" }
+    public var person: Person {
+        Person(id: nil, username: username, displayName: name, avatar: avatar,
+               banner: nil, features: nil, isAdmin: nil, isMe: false)
+    }
+    /// `S2 E3`, from `"2:3"`.
+    public var lastEpCode: String? {
+        let parts = (lastEp ?? "").split(separator: ":")
+        guard parts.count == 2 else { return nil }
+        return "S\(parts[0]) E\(parts[1])"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, username, avatar, watched, rating, stopped
+        case lastEp = "last_ep"
+    }
+}
+
+/// `GET /api/shows` — every show you follow, on a shelf. "watchlist" is followed
+/// but not started: the one shelf nothing else in the app shows you.
+public struct ShowShelves: Codable, Sendable, Equatable {
+    public var watching: [ShowCard]
+    public var watchlist: [ShowCard]
+    public var caughtUp: [ShowCard]
+    public var finished: [ShowCard]
+    public var stopped: [ShowCard]
+
+    enum CodingKeys: String, CodingKey {
+        case watching, watchlist, finished, stopped
+        case caughtUp = "caught_up"
     }
 }
 
@@ -232,10 +362,42 @@ public struct FollowRequest: Codable, Sendable, Equatable {
     public var unfollow: Bool?
     public var archived: Bool?
     public var rating: Int?
-    public init(unfollow: Bool? = nil, archived: Bool? = nil, rating: Int? = nil) {
+    /// Handed back by an undo, so a re-added show keeps its place on the watchlist.
+    public var addedAt: String?
+    /// Send `"rating": null`. The server only touches the rating when the key is
+    /// present, so clearing a score has to say so out loud — an omitted nil is
+    /// "leave it alone".
+    public var clearsRating = false
+
+    public init(unfollow: Bool? = nil, archived: Bool? = nil, rating: Int? = nil,
+                addedAt: String? = nil) {
         self.unfollow = unfollow
         self.archived = archived
         self.rating = rating
+        self.addedAt = addedAt
+    }
+
+    public static var clearRating: FollowRequest {
+        var request = FollowRequest()
+        request.clearsRating = true
+        return request
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case unfollow, archived, rating
+        case addedAt = "added_at"
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(unfollow, forKey: .unfollow)
+        try container.encodeIfPresent(archived, forKey: .archived)
+        if clearsRating {
+            try container.encodeNil(forKey: .rating)
+        } else {
+            try container.encodeIfPresent(rating, forKey: .rating)
+        }
+        try container.encodeIfPresent(addedAt, forKey: .addedAt)
     }
 }
 

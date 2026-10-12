@@ -14,9 +14,15 @@ public struct Dashboard: Codable, Sendable, Equatable {
     public var social: [WatchEntry]
     public var reviews: [ReviewTeaser]
     public var counts: DashboardCounts?
+    /// Followed but not started, newest first, with the library extras (hours,
+    /// provider, household). Newer servers only.
+    public var watchlist: [ShowCard]?
+    /// Books and manga in progress, most recently touched first — present only for
+    /// someone with reading switched on. Each carries its `kind`.
+    public var reading: [ReadingItem]?
 
     enum CodingKeys: String, CodingKey {
-        case stale, calendar, recent, social, reviews, counts
+        case stale, calendar, recent, social, reviews, counts, watchlist, reading
         case upNext = "up_next"
     }
 }
@@ -80,6 +86,29 @@ public struct ReviewTeaser: Codable, Sendable, Hashable, Identifiable {
 public struct UpcomingResponse: Codable, Sendable, Equatable {
     public var episodes: [UpcomingEpisode]
     public var movies: [UpcomingMovie]
+    /// Manga doesn't publish dates ahead, so the reading side of Upcoming is "out now
+    /// and you haven't read it". Newer servers, manga users only.
+    public var chapters: [NewChapters]?
+}
+
+/// A series you're reading with chapters out past where you are.
+public struct NewChapters: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    public var title: String?
+    public var cover: String?
+    public var latestCh: Int?
+    public var latestAt: String?
+    public var progress: Int?
+
+    public var displayTitle: String { title ?? "Untitled" }
+    /// How many you're behind.
+    public var behind: Int { max(0, (latestCh ?? 0) - (progress ?? 0)) }
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, cover, progress
+        case latestCh = "latest_ch"
+        case latestAt = "latest_at"
+    }
 }
 
 public struct UpcomingEpisode: Codable, Sendable, Hashable, Identifiable {

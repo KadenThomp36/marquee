@@ -32,6 +32,9 @@ struct UpcomingScreen: View {
                     PageHeading(title: "Upcoming",
                                 subtitle: "The next 90 days")
                         .mqHeadingEffect()
+                    if let chapters = data.value?.chapters, !chapters.isEmpty {
+                        newChapters(chapters)
+                    }
                     if days.isEmpty, data.value != nil {
                         EmptyLine("Nothing scheduled in the next 90 days.")
                     }
@@ -86,6 +89,44 @@ struct UpcomingScreen: View {
             .mqBareNavigationBar()
         }
         .task { await load() }
+    }
+
+    /// Manga doesn't announce dates, so the reading side of Upcoming is what's
+    /// already out and waiting: series with chapters past where you are.
+    private func newChapters(_ chapters: [NewChapters]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("New chapters out")
+                    .font(MarqueeFont.body(17, .bold, relativeTo: .title3))
+                    .foregroundStyle(Color.mqInk)
+                Text("the last two weeks")
+                    .font(.mqCaption)
+                    .foregroundStyle(Color.mqInkMuted)
+            }
+            .padding(.horizontal, MQ.gutter)
+            .accessibilityAddTraits(.isHeader)
+
+            VStack(spacing: 8) {
+                ForEach(chapters) { series in
+                    UpcomingRow(poster: series.cover,
+                                title: series.displayTitle,
+                                subtitle: chapterLine(series),
+                                tag: "MANGA",
+                                route: .manga(series.id))
+                }
+            }
+            .padding(.horizontal, MQ.gutter)
+        }
+    }
+
+    private func chapterLine(_ series: NewChapters) -> String {
+        var parts: [String] = []
+        if let latest = series.latestCh { parts.append("Ch \(latest) out") }
+        if series.behind > 0 {
+            parts.append("\(series.behind) new · you\u{2019}re on \(series.progress ?? 0)")
+        }
+        if let at = series.latestAt, !at.isEmpty { parts.append(MQTime.short(at)) }
+        return parts.joined(separator: " · ")
     }
 
     private func load(force: Bool = false) async {

@@ -73,7 +73,7 @@ The point of a self-hosted tracker is that nothing leaves the house, so:
 - **Live Activity** — an Overseerr download on the Lock Screen and in the Dynamic Island,
   from request to available.
 - **App Intents / Shortcuts** — "what's up next", mark the next episode, start a reading
-  session. Available to Siri and the Shortcuts app.
+  session and end it ("I'm on page 214"). Available to Siri and the Shortcuts app.
 - **Offline queue** — marks made without a connection are queued, superseded correctly if
   you mark the same thing twice, and replayed on reconnect.
 - Background refresh with local notifications for finished downloads.

@@ -20,13 +20,49 @@ public struct MovieCard: Codable, Sendable, Identifiable, Hashable {
     /// Your own 1–10 score.
     public var rating: Int?
 
+    // Library extras from newer servers — optional so older ones still decode.
+    public var addedAt: String?
+    public var imdb: Double?
+    public var vote: Double?
+    /// Content certification: "PG-13", "R".
+    public var cert: String?
+    public var prov: StreamingProvider?
+    public var provKnown: Bool?
+    public var household: [HouseholdFilm]?
+
     public var displayTitle: String { title ?? "Untitled" }
     public var isWatched: Bool { state == "watched" }
 
+    /// Not out yet — the watchlist's "Coming soon" group.
+    public func isUpcoming(today: String) -> Bool {
+        guard let releaseDate, releaseDate.count >= 10 else { return false }
+        return String(releaseDate.prefix(10)) > today
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, title, poster, year, runtime, genres, state, rating
+        case imdb, vote, cert, prov, household
         case releaseDate = "release_date"
         case watchedAt = "watched_at"
+        case addedAt = "added_at"
+        case provKnown = "prov_known"
+    }
+}
+
+/// A housemate's relationship with a film on one of your cards.
+public struct HouseholdFilm: Codable, Sendable, Hashable, Identifiable {
+    public var name: String?
+    public var username: String?
+    public var avatar: String?
+    /// "watched" or "watchlist".
+    public var state: String?
+    public var rating: FlexInt?
+
+    public var id: String { username ?? name ?? "?" }
+    public var displayName: String { name ?? username ?? "Someone" }
+    public var person: Person {
+        Person(id: nil, username: username, displayName: name, avatar: avatar,
+               banner: nil, features: nil, isAdmin: nil, isMe: false)
     }
 }
 
@@ -79,9 +115,22 @@ public struct MovieStateRequest: Codable, Sendable, Equatable {
     /// "watched", "watchlist" or "none".
     public var state: String
     public var rating: Int?
-    public init(state: String, rating: Int? = nil) {
+    /// Only sent by an undo, to put a removed film back exactly as it was.
+    public var watchedAt: String?
+    public var addedAt: String?
+
+    public init(state: String, rating: Int? = nil,
+                watchedAt: String? = nil, addedAt: String? = nil) {
         self.state = state
         self.rating = rating
+        self.watchedAt = watchedAt
+        self.addedAt = addedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state, rating
+        case watchedAt = "watched_at"
+        case addedAt = "added_at"
     }
 }
 

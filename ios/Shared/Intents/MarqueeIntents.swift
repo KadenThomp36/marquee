@@ -109,6 +109,84 @@ struct StartReadingSessionIntent: AppIntent {
     }
 }
 
+/// "End my reading session — I'm on page 214."
+///
+/// The other half of `StartReadingSessionIntent`: without it a session started from
+/// Siri or the Action button could only be ended by opening the app. The position is
+/// in the unit you track the title in — pages, chapters, or percent — and converted to
+/// the stored unit here, exactly as the app's progress sheet does it.
+struct EndReadingSessionIntent: AppIntent {
+    static let title: LocalizedStringResource = "End a Reading Session"
+    static let description = IntentDescription(
+        "Stops the timer on your reading session and logs where you got to.",
+        categoryName: "Reading")
+    static let openAppWhenRun = false
+
+    @Parameter(title: "Where you got to",
+               description: "A page, chapter or percentage — whichever you track this title in.")
+    var position: Int
+
+    @Parameter(title: "Book or series",
+               description: "Leave empty to end whichever session is running.")
+    var item: ReadingEntity?
+
+    init() {}
+    init(position: Int, item: ReadingEntity? = nil) {
+        self.position = position
+        self.item = item
+    }
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("End reading at \(\.$position)") {
+            \.$item
+        }
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard let server = Vault.load() else { throw MarqueeIntentError.notPaired }
+        let client = MarqueeClient(server: server)
+        let active: ActiveSessionsResponse = try await client.get("reading/active")
+        let running = active.sessions.filter { session in
+            guard let item else { return true }
+            return session.itemID == item.id && session.kind == item.kind
+        }
+        // The most recently started, if somehow there are several.
+        guard let live = running.max(by: { $0.startedAt < $1.startedAt }) else {
+            return .result(dialog: "There's no reading session running.")
+        }
+
+        let stored = Self.storedPosition(position, for: live)
+        _ = try await client.post("\(live.readingKind.path)/\(live.itemID)/session/end",
+                                  body: EndSessionRequest(pos: stored), as: Empty.self)
+        MarqueeWidgetRefresh.request()
+
+        let title = live.title ?? "your book"
+        var minutes = 0
+        if let started = MQTime.date(from: live.startedAt) {
+            minutes = max(1, Int(Date().timeIntervalSince(started) / 60))
+        }
+        let duration = minutes > 0 ? " after \(MQTime.clock(minutes: minutes))" : ""
+        return .result(dialog: "Saved \(title)\(duration).")
+    }
+
+    /// Spoken units to stored units: percent and chapters become pages for a book;
+    /// a manga is stored in chapters already.
+    static func storedPosition(_ spoken: Int, for live: ActiveSession) -> Int {
+        let value = max(0, spoken)
+        guard live.readingKind == .book, let pages = live.pages, pages > 0 else { return value }
+        switch ProgressMode(rawValue: live.mode ?? "") {
+        case .pct:
+            return min(pages, Int((Double(min(value, 100)) / 100 * Double(pages)).rounded()))
+        case .chapters:
+            guard let chapters = live.bookChapters, chapters > 0 else { return min(pages, value) }
+            return min(pages, Int((Double(min(value, chapters)) / Double(chapters) * Double(pages)).rounded()))
+        default:
+            return min(pages, value)
+        }
+    }
+}
+
 // MARK: - Entities
 
 /// A show you're part-way through, offered as a Shortcuts parameter and indexed for
@@ -189,6 +267,11 @@ struct MarqueeShortcuts: AppShortcutsProvider {
                               "\(.applicationName) start reading"],
                     shortTitle: "Start Reading",
                     systemImageName: "book")
+        AppShortcut(intent: EndReadingSessionIntent(),
+                    phrases: ["End my reading session in \(.applicationName)",
+                              "\(.applicationName) stop reading"],
+                    shortTitle: "End Reading",
+                    systemImageName: "book.closed")
     }
 }
 

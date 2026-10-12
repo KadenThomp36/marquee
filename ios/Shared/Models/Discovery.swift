@@ -28,7 +28,7 @@ public struct SearchResult: Codable, Sendable, Hashable, Identifiable {
     public var alreadyHave: Bool { followed == true || state != nil }
 
     public var stateLabel: String? {
-        if followed == true { return "following" }
+        if followed == true { return "on watchlist" }
         return state
     }
 }
