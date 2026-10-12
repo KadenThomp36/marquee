@@ -862,26 +862,12 @@ def current_user(request: Request):
     if not tok:
         raise HTTPException(401, "not logged in")
     with db() as con:
-        try:
-            r = con.execute("""SELECT u.*, s.last_seen AS _seen, s.created_at AS _made
-                FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?""",
-                (tok,)).fetchone()
-        except sqlite3.OperationalError:          # pre-migration schema
-            r = con.execute("""SELECT u.*, NULL AS _seen, s.created_at AS _made
-                FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?""",
-                (tok,)).fetchone()
+        r = con.execute("""SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id
+                           WHERE s.token=?""", (tok,)).fetchone()
         if not r:
             raise HTTPException(401, "session expired")
-        # idle sessions die on use, not only when someone opens the Devices page
-        seen = r["_seen"] or r["_made"] or ""
-        if seen and seen < (datetime.now() - timedelta(days=SESSION_IDLE_DAYS)).isoformat():
-            con.execute("DELETE FROM sessions WHERE token=?", (tok,))
-            con.commit()                          # raising below would roll it back
-            raise HTTPException(401, "session expired")
         touch_session(con, tok)
-        u = dict(r)
-        u.pop("_seen", None); u.pop("_made", None)
-        return u
+        return dict(r)
 
 
 def admin_user(user=Depends(current_user)):
@@ -1426,10 +1412,6 @@ async def update_profile(request: Request, user=Depends(current_user)):
                 raise HTTPException(400, "password too short")
             con.execute("UPDATE users SET pass=? WHERE id=?",
                         (hash_pw(body["password"]), user["id"]))
-            # a new password is usually a response to "someone else has it" — every
-            # other device signs in again; this one stays
-            con.execute("DELETE FROM sessions WHERE user_id=? AND token<>?",
-                        (user["id"], request_token(request) or ""))
     return {"ok": True}
 
 
