@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20260812a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261011a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -96,7 +96,7 @@ function cached(path) {
 const esc = s => (s ?? "").toString().replace(/[&<>"']/g, c =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 function toast(msg) {
-  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  const t = $("#toast"); t.textContent = msg; t.classList.remove("has-act"); t.classList.add("show");
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2400);
 }
 // rich "episode watched" toast with cover art → tap to rate & comment
@@ -670,7 +670,7 @@ function parseHash() {
   else if (p[0] === "u") routes.profile(p[1]);
   else if (p[0] === "recap") routes.recap(null, p[1]);
   else (routes[p[0]] || routes.home)(p[1]);
-  const active = { list: "lists", movie: "movies", show: "home", u: "profile",
+  const active = { list: "lists", movie: "library", movies: "library", shows: "library", show: "home", u: "profile",
     recap: "profile", stats: "profile", watched: "profile", book: "reading",
     books: "reading", manga: "reading" }[p[0]] || p[0] || "home";
   $$("#nav a, #tabbar a, .gear, .bell").forEach(a =>
@@ -944,6 +944,13 @@ function refreshPastStrip() {
   up.scrollLeft += up.scrollWidth - before;
   requestAnimationFrame(() => { up.style.scrollSnapType = ""; });
 }
+// a show you've added but not begun — the home-screen door into the Shows watchlist
+function wlCard(s) {
+  return `<a class="wcard" href="#/show/${s.id}">
+    <div class="wc-shot"><img loading="lazy" src="${POSTER(s.poster)}" alt=""></div>
+    <div class="wc-t">${esc(s.title)}</div>
+    <div class="wc-s">${esc(showLibSub(s, "watchlist"))}</div></a>`;
+}
 function calCard(e) {
   return `<a class="wcard" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
     <div class="wc-shot"><img loading="lazy" src="${POSTER(e.poster)}" alt="">
@@ -965,6 +972,7 @@ function renderHome(d, animate = true) {
       <div class="hrail up ${rv}">${pastStrip(d.recent)}${d.up_next.map(x => bigCard(x)).join("")}</div>` : ""}
     ${d.up_next.length ? "" : `<div class="empty">Nothing in the queue — everything is crossed off.</div>`}
     ${railOf("Haven’t watched in a while", d.stale, x => bigCard(x))}
+    ${railOf("Ready to start", d.watchlist, wlCard, "#/shows/watchlist")}
     ${railOf("On the calendar", d.calendar, calCard, "#/upcoming")}
     <div id="home-recs"></div>
     ${railOf("Around the house", d.social, x => watchedCard(x, { by: true }))}
@@ -1078,7 +1086,7 @@ function renderUpcoming(d, animate = true) {
         <div class="s">${sxe(e.season, e.number)} · ${esc(e.title || "TBA")}</div></div>
         <span class="tag">EPISODE</span><span class="go">${I.chevS}</span></a>` })),
     ...d.movies.map(m => ({ date: m.release_date, html: `
-      <a class="up-row" href="#/movies">
+      <a class="up-row" href="#/movie/${m.id}">
         <img loading="lazy" src="${POSTER(m.poster)}" alt="">
         <div class="mid"><div class="t">${esc(m.title)}</div><div class="s">release day</div></div>
         <span class="tag">MOVIE</span><span class="go">${I.chevS}</span></a>` })),
@@ -1785,42 +1793,229 @@ routes.episode = async (id, season, number) => {
   };
 };
 
-/* ---------- movies ---------- */
-function renderMovies(d, tab, animate = true) {
-  navHere("Movies");
-  const grid = arr => arr.length ? `<div class="pgrid ${animate ? "reveal" : ""}">${arr.map(m => `
-    <div class="pcard" data-id="${m.id}">
-      <div class="pshot"><a href="#/movie/${m.id}"><img class="poster" loading="lazy" src="${POSTER(m.poster)}" alt=""></a>
-        ${m.rating ? `<span class="badge">${m.rating}/10</span>` : ""}
-        <span data-listmark="movie:${m.id}">${listMark("movie", m.id)}</span>
-        <div class="act">
-          ${tab === "watchlist" ? `<button title="Mark watched" data-a="watched">${I.check}</button>` : ""}
-          <button title="Remove" data-a="none">${I.x}</button>
-        </div>
-      </div>
-      <a class="t" href="#/movie/${m.id}">${esc(m.title)}</a><div class="y">${m.year || ""}${m.watched_at ? " · " + fmtDate(m.watched_at) : ""}</div>
-    </div>`).join("")}</div>` : `<div class="empty">Nothing here yet — find something in Search.</div>`;
-  view.innerHTML = `<h1>Movies</h1>
-    <div class="tabs">
-      <button data-t="watched" class="${tab === "watched" ? "on" : ""}">Watched · ${d.watched.length}</button>
-      <button data-t="watchlist" class="${tab === "watchlist" ? "on" : ""}">Watchlist · ${d.watchlist.length}</button>
-    </div>${grid(d[tab])}`;
-  $$(".tabs button", view).forEach(b => b.onclick = () => routes.movies(b.dataset.t));
-  ensureListSet().then(() => paintListMarks(view));
-  $$(".pcard .act button", view).forEach(b => b.onclick = async () => {
-    const card = b.closest(".pcard");
-    const idx = d[tab].findIndex(m => m.id === +card.dataset.id);
-    const [m] = d[tab].splice(idx, 1);
-    if (b.dataset.a === "watched") { m.state = "watched"; m.watched_at = nowStamp(); d.watched.unshift(m); sparks(b); }
-    api(`/movie/${card.dataset.id}/state`, { body: { state: b.dataset.a } }).catch(() => routes.movies(tab));
-    renderMovies(d, tab);
-  });
+/* ---------- library: every show and film you've put your hand on ----------
+   One tab, two sides. Movies has always had its watched/watchlist shelves; Shows gets
+   the same treatment — most of all a Watchlist (followed, not started), the one
+   shelf nothing else in the app showed you. */
+const LIB = {
+  shows: {
+    path: "/shows", noun: ["show", "shows"], def: "watchlist",
+    shelves: [["watchlist", "Watchlist"], ["watching", "Watching"], ["caught_up", "Caught up"],
+              ["finished", "Finished"], ["stopped", "Stopped"]],
+    empty: {
+      watchlist: `Shows you add but haven’t started land here. Find one in <a class="tlink" href="#/search">Discover</a>.`,
+      watching: "Nothing in progress — start something from your watchlist.",
+      caught_up: "No shows waiting on new episodes.",
+      finished: "No finished series yet.",
+      stopped: "Nothing you’ve stopped watching.",
+    },
+  },
+  movies: {
+    path: "/movies", noun: ["film", "films"], def: "watched",
+    shelves: [["watched", "Watched"], ["watchlist", "Watchlist"]],
+    empty: {
+      watched: `No films logged yet. Find one in <a class="tlink" href="#/search">Discover</a>.`,
+      watchlist: `Films you want to see land here. Find one in <a class="tlink" href="#/search">Discover</a>.`,
+    },
+  },
+};
+const LIB_SORTS = [["recent", "Recent"], ["title", "Title A–Z"], ["year", "Year"], ["rating", "My rating"]];
+const libPref = (k, d) => { try { return localStorage.getItem("mq.lib." + k) || d; } catch { return d; } };
+const libSave = (k, v) => { try { localStorage.setItem("mq.lib." + k, v); } catch { /* private mode */ } };
+let LIBQ = "";                               // the filter box survives switching shelves
+const libFind = (d, id) => {
+  for (const k of Object.keys(d)) {
+    const i = (d[k] || []).findIndex(x => x.id === +id);
+    if (i > -1) return [k, i];
+  }
+  return [null, -1];
+};
+function libSort(arr, by) {
+  const a = arr.slice();
+  if (by === "title") a.sort((x, y) => stripArticle(x.title).localeCompare(stripArticle(y.title)));
+  else if (by === "year") a.sort((x, y) => (y.year || 0) - (x.year || 0));
+  else if (by === "rating") a.sort((x, y) => (y.rating || 0) - (x.rating || 0));
+  return a;                                  // "recent" is the server's order
 }
-routes.movies = (tab = "watched") => {
-  const c = cached("/movies");
-  if (c.stale) renderMovies(c.stale, tab);
-  else view.innerHTML = `<h1>Movies</h1><div class="pgrid">${Array.from({ length: 12 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
-  c.refresh(() => seg()[0] === "movies", d => renderMovies(d, tab, !c.stale));
+function showLibSub(s, shelf) {
+  const ep = s.next_ep;
+  if (shelf === "watchlist")
+    return s.aired ? [s.year, s.seasons ? `${s.seasons} season${s.seasons === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")
+      : s.next_air ? `Premieres ${fmtDate(s.next_air).replace(/, \d{4}$/, "")}` : String(s.year || "");
+  if (shelf === "caught_up")
+    return s.next_air ? `New ep ${fmtDate(s.next_air).replace(/, \d{4}$/, "")}` : "Up to date";
+  if (shelf === "finished") return `${s.watched} episode${s.watched === 1 ? "" : "s"}`;
+  if (ep) return `${sxe(ep.season, ep.number)}${s.remaining > 1 ? ` · ${s.remaining} left` : ""}`;
+  return `${s.watched} / ${s.aired}`;
+}
+function showLibCard(s, shelf) {
+  const ep = s.next_ep;
+  const pct = s.aired ? Math.round(100 * Math.min(s.watched, s.aired) / s.aired) : 0;
+  const bar = (shelf === "watching" || shelf === "stopped") && s.aired;
+  return `<div class="pcard" data-id="${s.id}">
+    <div class="pshot"><a href="#/show/${s.id}" aria-label="${esc(s.title)}"><img class="poster" loading="lazy" src="${POSTER(s.poster)}" alt=""></a>
+      ${s.rating ? `<span class="badge">${s.rating}/10</span>` : ""}
+      ${s.stale ? `<span class="lib-flag" title="Haven’t watched in a while">Paused</span>` : ""}
+      <span data-listmark="show:${s.id}">${listMark("show", s.id)}</span>
+      ${bar ? `<span class="lib-prog ${shelf === "stopped" ? "stopped" : ""}" style="--p:${pct}%"></span>` : ""}
+      <div class="act">
+        ${ep && (shelf === "watchlist" || shelf === "watching")
+          ? `<button data-a="punch" data-s="${ep.season}" data-n="${ep.number}" title="Mark ${sxe(ep.season, ep.number)} watched"
+               aria-label="Mark ${esc(s.title)} ${sxe(ep.season, ep.number)} watched">${I.check}</button>` : ""}
+        ${shelf === "watchlist" ? `<button data-a="remove" title="Remove from watchlist" aria-label="Remove ${esc(s.title)}">${I.x}</button>` : ""}
+      </div>
+    </div>
+    <a class="t" href="#/show/${s.id}">${esc(s.title)}</a><div class="y">${esc(showLibSub(s, shelf))}</div>
+  </div>`;
+}
+function movieLibCard(m, shelf) {
+  return `<div class="pcard" data-id="${m.id}">
+    <div class="pshot"><a href="#/movie/${m.id}" aria-label="${esc(m.title)}"><img class="poster" loading="lazy" src="${POSTER(m.poster)}" alt=""></a>
+      ${m.rating ? `<span class="badge">${m.rating}/10</span>` : ""}
+      <span data-listmark="movie:${m.id}">${listMark("movie", m.id)}</span>
+      <div class="act">
+        ${shelf === "watchlist" ? `<button data-a="watched" title="Mark watched" aria-label="Mark ${esc(m.title)} watched">${I.check}</button>` : ""}
+        <button data-a="remove" title="Remove" aria-label="Remove ${esc(m.title)}">${I.x}</button>
+      </div>
+    </div>
+    <a class="t" href="#/movie/${m.id}">${esc(m.title)}</a><div class="y">${
+      m.watched_at && shelf === "watched" ? fmtDate(m.watched_at.slice(0, 10)) : (m.year || "")}</div>
+  </div>`;
+}
+const libCountsHTML = (kind, d, shelf) => LIB[kind].shelves
+  .filter(([k]) => k === shelf || k === LIB[kind].def || k === "watching" || (d[k] || []).length)
+  .map(([k, lab]) => `<button data-t="${k}" class="${k === shelf ? "on" : ""}" role="tab"
+     aria-selected="${k === shelf}">${lab} · ${(d[k] || []).length}</button>`).join("");
+function libGridHTML(kind, d, shelf, animate) {
+  const all = d[shelf] || [];
+  const q = LIBQ.trim().toLowerCase();
+  const arr = libSort(q ? all.filter(x => (x.title || "").toLowerCase().includes(q)) : all, libPref("sort", "recent"));
+  if (!all.length) return `<div class="empty">${LIB[kind].empty[shelf]}</div>`;
+  if (!arr.length) return `<div class="empty">Nothing on this shelf matches “${esc(LIBQ.trim())}”.</div>`;
+  const card = kind === "shows" ? showLibCard : movieLibCard;
+  return `<div class="pgrid ${animate ? "reveal" : ""}">${arr.map(x => card(x, shelf)).join("")}</div>`;
+}
+function renderLibrary(kind, d, shelf, animate = true) {
+  navHere(kind === "shows" ? "Shows" : "Movies");
+  const total = Object.values(d).reduce((n, a) => n + (Array.isArray(a) ? a.length : 0), 0);
+  view.innerHTML = `
+    <div class="lib-head"><h1>Library</h1>
+      <div class="libswitch" role="tablist" aria-label="Library">
+        <button data-k="shows" class="${kind === "shows" ? "on" : ""}" role="tab" aria-selected="${kind === "shows"}">Shows</button>
+        <button data-k="movies" class="${kind === "movies" ? "on" : ""}" role="tab" aria-selected="${kind === "movies"}">Movies</button>
+      </div></div>
+    <div class="tabs scroll" role="tablist">${libCountsHTML(kind, d, shelf)}</div>
+    ${total > 8 ? `<div class="lib-tools">
+      <label class="lib-filter"><svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m15.4 15.4 5.2 5.2" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>
+        <input id="libq" type="search" placeholder="Filter your ${LIB[kind].noun[1]}" value="${esc(LIBQ)}" autocomplete="off" enterkeyhint="search"></label>
+      <select id="libsort" aria-label="Sort">${LIB_SORTS.map(([v, l]) =>
+        `<option value="${v}" ${libPref("sort", "recent") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </div>` : ""}
+    <div id="libgrid">${libGridHTML(kind, d, shelf, animate)}</div>`;
+  const regrid = () => { $("#libgrid").innerHTML = libGridHTML(kind, d, shelf, false); paintListMarks(view); };
+  $$(".libswitch button", view).forEach(b => b.onclick = () => {
+    if (b.dataset.k === kind) return;
+    libSave("kind", b.dataset.k);
+    history.replaceState(history.state, "", `#/${b.dataset.k}`);
+    routes[b.dataset.k]();
+  });
+  $$(".tabs button", view).forEach(b => b.onclick = () => {
+    libSave(kind + ".shelf", b.dataset.t);
+    history.replaceState(history.state, "", `#/${kind}/${b.dataset.t}`);
+    renderLibrary(kind, d, b.dataset.t);
+  });
+  if ($("#libq")) $("#libq").oninput = e => { LIBQ = e.target.value; regrid(); };
+  if ($("#libsort")) $("#libsort").onchange = e => { libSave("sort", e.target.value); regrid(); };
+  ensureListSet().then(() => paintListMarks(view));
+  $("#libgrid").onclick = e => {
+    const b = e.target.closest(".act button");
+    if (!b) return;
+    e.preventDefault();
+    const id = +b.closest(".pcard").dataset.id;
+    (kind === "shows" ? libShowAction : libMovieAction)(d, shelf, id, b);
+  };
+}
+/* re-shelve locally, then draw — the server agrees a moment later */
+function libRedraw(kind, d, shelf) {
+  if (seg()[0] === kind) renderLibrary(kind, d, shelf, false);
+}
+function libMovieAction(d, shelf, id, b) {
+  const [k, i] = libFind(d, id);
+  if (i < 0) return;
+  const [m] = d[k].splice(i, 1);
+  delete CACHE["/upcoming"];
+  if (b.dataset.a === "watched") {
+    sparks(b);
+    m.state = "watched"; m.watched_at = nowStamp(); d.watched.unshift(m);
+    api(`/movie/${id}/state`, { body: { state: "watched" } }).catch(() => routes.movies(shelf));
+    toast(`${m.title} — watched`);
+  } else {
+    // removing drops the rating and watch date with it, so the undo puts them back
+    api(`/movie/${id}/state`, { body: { state: "none" } }).catch(() => routes.movies(shelf));
+    undoToast(`Removed ${m.title}`, () => {
+      d[k].splice(i, 0, m); libRedraw("movies", d, shelf);
+      api(`/movie/${id}/state`, { body: { state: m.state || k, watched_at: m.watched_at || undefined,
+        rating: m.rating || undefined, added_at: m.added_at || undefined } }).catch(() => {});
+    });
+  }
+  libRedraw("movies", d, shelf);
+}
+async function libShowAction(d, shelf, id, b) {
+  const [k, i] = libFind(d, id);
+  if (i < 0) return;
+  const s = d[k][i];
+  delete CACHE["/dashboard"]; delete CACHE["/upcoming"];
+  if (b.dataset.a === "remove") {
+    d[k].splice(i, 1);
+    libRedraw("shows", d, shelf);
+    api(`/show/${id}/follow`, { body: { unfollow: true } }).catch(() => routes.shows(shelf));
+    undoToast(`Removed ${s.title}`, () => {
+      d[k].splice(i, 0, s); libRedraw("shows", d, shelf);
+      api(`/show/${id}/follow`, { body: {} }).catch(() => {});
+    });
+    return;
+  }
+  const mS = +b.dataset.s, mN = +b.dataset.n;
+  b.disabled = true; b.classList.add("done"); sparks(b);
+  episodeDoneToast(id, mS, mN, s.next_ep?.title || "", pickImg(s.next_ep?.still, s.poster));
+  try {
+    const r = await api(`/show/${id}/watch`, { body: { season: mS, number: mN } });
+    const ns = { ...s, ...r.show, added_at: s.added_at, seasons: s.seasons, stale: false };
+    d[k].splice(libFind(d, id)[1], 1);
+    const dest = ns.next_ep ? "watching"
+      : isEnded(ns.status) || (ns.status || "").toLowerCase() === "cancelled" ? "finished" : "caught_up";
+    d[dest].unshift(ns);
+    if (dest !== shelf && shelf === "watchlist") toast(`${s.title} moved to Watching`);
+    libRedraw("shows", d, shelf);
+  } catch { b.disabled = false; b.classList.remove("done"); }
+}
+// a toast with one action on it — for anything destructive done in a single tap
+function undoToast(msg, undo) {
+  const t = $("#toast");
+  t.innerHTML = `<span>${esc(msg)}</span><button class="toast-act">Undo</button>`;
+  t.classList.add("show", "has-act");
+  clearTimeout(t._h);
+  const hide = () => { t.classList.remove("show"); setTimeout(() => t.classList.remove("has-act"), 250); };
+  t._h = setTimeout(hide, 5000);
+  $(".toast-act", t).onclick = () => { clearTimeout(t._h); hide(); undo(); };
+}
+function libRoute(kind, shelf) {
+  const L = LIB[kind];
+  if (!L.shelves.some(([k]) => k === shelf)) shelf = libPref(kind + ".shelf", L.def);
+  if (!L.shelves.some(([k]) => k === shelf)) shelf = L.def;
+  libSave("kind", kind);
+  const c = cached(L.path);
+  if (c.stale) renderLibrary(kind, c.stale, shelf);
+  else view.innerHTML = `<div class="lib-head"><h1>Library</h1></div>
+    <div class="pgrid">${Array.from({ length: 12 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
+  c.refresh(() => seg()[0] === kind, d => renderLibrary(kind, d, seg()[1] || shelf, !c.stale));
+}
+routes.shows = shelf => libRoute("shows", shelf);
+routes.movies = shelf => libRoute("movies", shelf);
+routes.library = () => {
+  const kind = libPref("kind", "shows") === "movies" ? "movies" : "shows";
+  history.replaceState(history.state, "", `#/${kind}`);
+  routes[kind]();
 };
 
 /* ---------- reading (books + manga/manhwa/manhua) — per-user opt-in ---------- */
@@ -1833,7 +2028,7 @@ function applyFeatureNav() {
   if (!f.books && !f.manga) return;
   const label = f.books && f.manga ? "Reading" : f.books ? "Books" : "Manga";
   const link = `<a href="#/reading" data-r="reading">${BOOK_ICO}<span>${label}</span></a>`;
-  const moviesPill = $('#nav a[data-r="movies"]');
+  const moviesPill = $('#nav a[data-r="library"]');
   if (moviesPill) moviesPill.insertAdjacentHTML("afterend", link);
   const tabAvatar = $("#tabavatar");
   if (tabAvatar) tabAvatar.insertAdjacentHTML("beforebegin", link);

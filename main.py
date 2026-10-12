@@ -37,7 +37,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20260812a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261011a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2270,9 +2270,11 @@ def home(user=Depends(current_user)):
     out = {"watch_next": [], "stale": [], "up_to_date": [], "not_started": [], "archived": []}
     with db() as con:
         rows = con.execute("""
-          SELECT s.*, f.archived, f.rating,
+          SELECT s.*, f.archived, f.rating, f.added_at,
             (SELECT COUNT(*) FROM episodes e WHERE e.show_id=s.id AND e.season>0
                AND e.air_date IS NOT NULL AND e.air_date<=?) AS aired,
+            (SELECT COUNT(DISTINCT e.season) FROM episodes e WHERE e.show_id=s.id
+               AND e.season>0) AS seasons,
             (SELECT COUNT(*) FROM watches w WHERE w.user_id=? AND w.show_id=s.id AND w.season>0) AS watched,
             (SELECT MAX(w.watched_at) FROM watches w WHERE w.user_id=? AND w.show_id=s.id) AS last_watched,
             (SELECT MIN(e.air_date) FROM episodes e WHERE e.show_id=s.id AND e.season>0
@@ -2295,6 +2297,7 @@ def home(user=Depends(current_user)):
                 "remaining": max(r["aired"] - r["watched"], 0),
                 "last_watched": r["last_watched"], "next_air": r["next_air"],
                 "next_ep": dict(nxt) if nxt else None,
+                "added_at": r["added_at"], "seasons": r["seasons"],
             }
             if r["archived"]:
                 out["archived"].append(item)          # explicitly stopped — stays out of Up Next
@@ -2316,6 +2319,28 @@ def home(user=Depends(current_user)):
     out["up_to_date"].sort(key=lambda x: x["next_air"] or "9999")
     out["not_started"].sort(key=lambda x: x["title"] or "")
     return out
+
+
+@app.get("/api/shows")
+def shows_library(user=Depends(current_user)):
+    """Every show you follow, on a shelf — the TV side of the Library, the way /api/movies
+    is the film side. "watchlist" is followed-but-not-started: the one shelf nothing
+    else in the app shows you."""
+    h = home(user)
+    for it in h["stale"]:
+        it["stale"] = True
+    watching = h["watch_next"] + h["stale"]
+    watching.sort(key=lambda x: x["last_watched"] or "", reverse=True)
+    ended = lambda it: (it["status"] or "").lower() in ENDED_STATUSES
+    watchlist = sorted(h["not_started"], key=lambda x: x["added_at"] or "", reverse=True)
+    return {
+        "watching": watching,
+        "watchlist": watchlist,
+        "caught_up": [it for it in h["up_to_date"] if not ended(it)],
+        "finished": sorted((it for it in h["up_to_date"] if ended(it)),
+                           key=lambda x: x["last_watched"] or "", reverse=True),
+        "stopped": sorted(h["archived"], key=lambda x: x["last_watched"] or "", reverse=True),
+    }
 
 
 @app.get("/api/dashboard")
@@ -2379,6 +2404,8 @@ def dashboard(user=Depends(current_user)):
     return {
         "up_next": home_data["watch_next"],
         "stale": home_data["stale"],
+        "watchlist": sorted(home_data["not_started"], key=lambda x: x["added_at"] or "",
+                            reverse=True)[:16],
         "calendar": calendar,
         "recent": collapse(recent)[:24],
         "social": collapse(social)[:12],
@@ -2884,12 +2911,16 @@ async def follow(show_id: int, request: Request, user=Depends(current_user)):
 @app.get("/api/movies")
 def movies(user=Depends(current_user)):
     with db() as con:
-        rows = con.execute("""SELECT m.*, ms.state, ms.watched_at, ms.rating FROM movies m
-            JOIN movie_states ms ON ms.movie_id=m.id WHERE ms.user_id=?
-            ORDER BY COALESCE(ms.watched_at, m.release_date) DESC""", (user["id"],)).fetchall()
+        rows = con.execute("""SELECT m.id, m.title, m.poster, m.year, m.release_date, m.runtime, m.genres,
+            ms.state, ms.watched_at, ms.rating, ms.added_at FROM movies m
+            JOIN movie_states ms ON ms.movie_id=m.id WHERE ms.user_id=?""", (user["id"],)).fetchall()
     out = {"watched": [], "watchlist": []}
     for r in rows:
         (out["watched"] if r["state"] == "watched" else out["watchlist"]).append(dict(r))
+    # watched: most recently seen first. watchlist: most recently added first — films
+    # saved before added_at existed fall in behind, newest release first.
+    out["watched"].sort(key=lambda m: m["watched_at"] or m["release_date"] or "", reverse=True)
+    out["watchlist"].sort(key=lambda m: (m["added_at"] or "", m["release_date"] or ""), reverse=True)
     return out
 
 
@@ -3020,12 +3051,13 @@ async def movie_state(movie_id: int, request: Request, user=Depends(current_user
             # dated today. An explicit watched_at still wins, for date editing.
             given = body.get("watched_at")
             stamp = given or (datetime.now().isoformat() if state == "watched" else None)
-            con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating)
-                VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state,
+            con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating,added_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state,
                 watched_at=CASE WHEN ? THEN excluded.watched_at
                                 ELSE COALESCE(movie_states.watched_at, excluded.watched_at) END,
                 rating=COALESCE(?, movie_states.rating)""",
                 (user["id"], movie_id, state, stamp, body.get("rating"),
+                 body.get("added_at") or datetime.now().isoformat(),
                  1 if given else 0, body.get("rating")))
     return {"ok": True}
 
@@ -4099,10 +4131,11 @@ async def add(request: Request, user=Depends(current_user)):
                 if not upsert_movie(con, tmdb_id):
                     raise HTTPException(404, "movie not found on TMDB")
             state = body.get("state", "watchlist")
-            con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at)
-                VALUES(?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state""",
-                (user["id"], tmdb_id, state,
-                 datetime.now().isoformat() if state == "watched" else None))
+            now = datetime.now().isoformat()
+            con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,added_at)
+                VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO UPDATE SET state=excluded.state,
+                watched_at=COALESCE(movie_states.watched_at, excluded.watched_at)""",
+                (user["id"], tmdb_id, state, now if state == "watched" else None, now))
     return {"ok": True}
 
 
@@ -5498,6 +5531,7 @@ def startup():
                      "ALTER TABLE movies ADD COLUMN imdb_votes INTEGER",
                      "ALTER TABLE episodes ADD COLUMN imdb_rating REAL",
                      "ALTER TABLE episodes ADD COLUMN imdb_votes INTEGER",
+                     "ALTER TABLE movie_states ADD COLUMN added_at TEXT",
                      "CREATE INDEX IF NOT EXISTS idx_shows_imdb ON shows(imdb_id)",
                      "CREATE INDEX IF NOT EXISTS idx_movies_imdb ON movies(imdb_id)"):
             try:

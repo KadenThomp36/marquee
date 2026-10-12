@@ -696,7 +696,7 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .pcard .y{color:var(--mut);font-size:11px;margin-top:1px}
 .pcard .badge{position:absolute;top:7px;right:7px;background:rgba(15,13,10,.8);
   color:var(--amber);font-size:10.5px;border-radius:99px;padding:3px 8px;font-weight:750;backdrop-filter:blur(4px)}
-.pcard .act{position:absolute;top:7px;left:7px;display:flex;flex-direction:column;gap:6px}
+.pcard .act{position:absolute;top:7px;left:7px;display:flex;gap:6px}
 .pcard .act button{width:32px;height:32px;border-radius:50%;background:rgba(15,13,10,.82);
   border:1px solid var(--line-2);color:var(--ink-2);backdrop-filter:blur(4px);display:grid;place-items:center}
 .pcard .act button svg{width:14px;height:14px}
@@ -2198,3 +2198,42 @@ body.recap-open{overflow:hidden}
    events for the overlay, so the reading big-cards' bar must opt back in) */
 .rdcard .pbar{cursor:pointer}
 .bcard.rdcard .pbar{pointer-events:auto}
+
+/* ── library (shows + movies) ── */
+.lib-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:2px 0 16px}
+.lib-head h1{margin:0}
+.libswitch{display:inline-flex;padding:3px;border-radius:99px;background:var(--panel);
+  box-shadow:inset 0 0 0 1px var(--line)}
+.libswitch button{padding:7px 16px;border-radius:99px;font-weight:700;font-size:13.5px;color:var(--ink-2);
+  transition:background .15s,color .15s;min-height:36px}
+.libswitch button.on{background:var(--panel-2);color:var(--amber);box-shadow:inset 0 0 0 1px var(--line-2)}
+.tabs.scroll{overflow-x:auto;scrollbar-width:none;margin-left:-18px;margin-right:-18px;padding:0 18px;
+  scroll-padding-left:18px}
+.tabs.scroll::-webkit-scrollbar{display:none}
+.tabs.scroll button{flex:none;white-space:nowrap;font-variant-numeric:tabular-nums}
+@media(max-width:700px){.tabs.scroll{margin-left:-13px;margin-right:-13px;padding:0 13px}}
+.lib-tools{display:flex;gap:8px;margin:-4px 0 16px}
+.lib-filter{flex:1;max-width:460px;display:flex;align-items:center;gap:8px;padding:0 13px;border-radius:99px;
+  background:var(--panel);border:1px solid var(--line-2);color:var(--mut);min-height:38px}
+.lib-filter:focus-within{border-color:var(--amber-dim)}
+.lib-filter svg{width:15px;height:15px;flex:none}
+.lib-filter input{flex:1;background:none;border:0;outline:0;color:var(--ink);font:inherit;font-size:16px;
+  padding:7px 0;-webkit-appearance:none;appearance:none}
+.lib-filter input::placeholder{color:var(--mut)}
+.lib-tools select{padding:8px 30px 8px 13px;border-radius:99px;border:1px solid var(--line-2);
+  background:var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='m7 10 5 5 5-5' fill='none' stroke='%23b3a88f' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 9px center/15px;
+  color:var(--ink-2);font-size:13px;font-weight:650;-webkit-appearance:none;appearance:none;flex:none}
+.lib-tools select:focus{outline:none;border-color:var(--amber-dim)}
+.lib-prog{position:absolute;left:7px;right:7px;bottom:7px;height:4px;border-radius:99px;
+  background:rgba(15,13,10,.7);overflow:hidden;pointer-events:none}
+.lib-prog::after{content:"";position:absolute;inset:0;width:var(--p);background:var(--amber);border-radius:inherit}
+.lib-prog.stopped::after{background:var(--c-red)}
+.pshot:has(.lib-prog) .listmark{bottom:17px}
+.lib-flag{position:absolute;top:7px;right:7px;background:rgba(15,13,10,.82);color:var(--ink-2);
+  font-size:10px;font-weight:750;letter-spacing:.04em;border-radius:99px;padding:3px 8px;backdrop-filter:blur(4px)}
+.pshot .badge ~ .lib-flag{top:31px}
+.pcard .act button.done{background:var(--amber);color:#221703;border-color:var(--amber)}
+#toast.has-act{display:flex;align-items:center;gap:14px;padding:8px 8px 8px 18px;text-align:left}
+#toast.has-act span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast-act{flex:none;padding:7px 14px;border-radius:99px;background:var(--amber-soft);color:var(--amber);
+  font-weight:750;font-size:13px}
