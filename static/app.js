@@ -2944,10 +2944,87 @@ function renderReadingStats(d, animate = true) {
   };
   view.innerHTML = `<h1>Reading</h1>${readingTabs("stats", f)}
     <div class="stats-wrap" id="rdstats">
+    ${f.books ? goalCard(d.goal, rv) : ""}
     ${f.books ? block("Books", d.books, "pages") : ""}
     ${f.manga ? block("Manga", d.manga, "chapters") : ""}</div>`;
   $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
+  if ($("#rdgoal")) $("#rdgoal").onclick = () => goalSheet(d.goal, () => {
+    delete CACHE["/reading/stats"]; routes.reading("stats"); });
   wireStats($("#rdstats"));
+}
+
+/* ---------- yearly reading goal (opt-in, books per year) ----------
+   A ring, a count and one encouraging line. Wording is deliberately neutral: there is
+   no "behind" — not-there-yet just says how many are left and the pace that gets there. */
+function goalLine(g) {
+  if (g.done >= g.target) return ["Goal reached", g.done > g.target
+    ? `${g.done - g.target} past it — the rest are a bonus` : "Every book from here is a bonus"];
+  const per = g.per_month ? `about ${g.per_month < 1 ? "one every " + Math.round(1 / g.per_month) + " months"
+    : (g.per_month % 1 ? g.per_month.toFixed(1) : g.per_month) + " a month"} from here` : "";
+  if (g.status === "ahead") return ["Ahead of pace", `${g.left} to go${per ? " · " + per : ""}`];
+  if (g.status === "on_pace") return ["On pace", `${g.left} to go${per ? " · " + per : ""}`];
+  return [`${g.left} to go`, per || "the year’s not over yet"];
+}
+function goalCard(g, rv = "") {
+  if (!g) return "";
+  if (!g.target) return `<button class="rgoal empty ${rv}" id="rdgoal">
+      <svg class="rg-ring" viewBox="0 0 120 120" aria-hidden="true">
+        <circle cx="60" cy="60" r="48" class="rg-track" stroke-dasharray="4 8"/>
+        <path d="M60 46v28M46 60h28" class="rg-plus"/></svg>
+      <span class="rg-txt"><span class="rg-k">${g.year} reading goal</span>
+        <b>Set a yearly goal</b>
+        <i>Optional — how many books you’d like to finish. ${g.done ? `${g.done} so far this year.` : ""}</i></span>
+      <span class="rg-go">${I.chevR}</span></button>`;
+  const C = 2 * Math.PI * 48, pct = Math.min(1, g.done / g.target);
+  const exp = Math.min(1, (g.expected || 0) / g.target), ang = exp * 2 * Math.PI - Math.PI / 2;
+  const [head, sub] = goalLine(g);
+  const met = g.done >= g.target;
+  return `<div class="rgoal ${met ? "met" : ""} ${rv}">
+    <svg class="rg-ring" viewBox="0 0 120 120" role="img"
+      aria-label="${g.done} of ${g.target} books read in ${g.year}">
+      <circle cx="60" cy="60" r="48" class="rg-track"/>
+      <circle cx="60" cy="60" r="48" class="rg-arc" transform="rotate(-90 60 60)"
+        stroke-dasharray="${C.toFixed(1)}" style="--off:${(C * (1 - pct)).toFixed(1)};--c:${C.toFixed(1)}"/>
+      ${!met && exp > 0 && exp < 1 ? `<circle class="rg-pace" r="3.4"
+        cx="${(60 + 48 * Math.cos(ang)).toFixed(1)}" cy="${(60 + 48 * Math.sin(ang)).toFixed(1)}"><title>an even pace is here today</title></circle>` : ""}
+      <text x="60" y="62" class="rg-n">${g.done}</text>
+      <text x="60" y="80" class="rg-of">of ${g.target}</text></svg>
+    <div class="rg-txt"><span class="rg-k">${g.year} reading goal</span>
+      <b>${esc(head)}</b><i>${esc(sub)}</i>
+      <span class="rg-meta">${g.done} of ${g.target} books</span></div>
+    <button class="iconbtn rg-edit" id="rdgoal" aria-label="Edit reading goal">${I.edit}</button></div>`;
+}
+// set / change / clear the goal — shared by the stats screen and Settings
+function goalSheet(g, onSaved) {
+  const cur = (g && g.target) || "";
+  const s = sheet(`<div class="sh-t">${(g && g.year) || new Date().getFullYear()} reading goal</div>
+    <p class="hint" style="margin:0 0 12px">How many books you’d like to finish this year. Just for you —
+      it shows as a ring on your reading stats, and reaching it gets a moment.</p>
+    <div class="rg-chips">${[12, 24, 36, 52].map(n =>
+      `<button type="button" class="lead-chip ${+cur === n ? "on" : ""}" data-n="${n}">${n}</button>`).join("")}</div>
+    <label class="rg-in"><span>Books this year</span>
+      <input type="number" id="rgnum" min="1" max="1000" inputmode="numeric" value="${cur}" placeholder="e.g. 24"></label>
+    <button class="btn pri" id="rgsave">${I.check} Save goal</button>
+    ${cur ? `<button class="btn ghost" id="rgclear">Remove goal</button>` : ""}`, { cls: "rg-sheet" });
+  const inp = $("#rgnum", s.el);
+  $$(".lead-chip", s.el).forEach(b => b.onclick = () => {
+    inp.value = b.dataset.n;
+    $$(".lead-chip", s.el).forEach(x => x.classList.toggle("on", x === b));
+  });
+  inp.oninput = () => $$(".lead-chip", s.el).forEach(x => x.classList.toggle("on", x.dataset.n === inp.value));
+  const save = async books => {
+    const r = await api("/reading/goal", { body: { books } }).catch(() => null);
+    if (!r) return;
+    s.close();
+    toast(r.target ? `Goal set — ${r.target} books in ${r.year}` : "Goal removed");
+    onSaved && onSaved(r);
+  };
+  $("#rgsave", s.el).onclick = () => {
+    const n = parseInt(inp.value, 10);
+    if (!(n >= 1 && n <= 1000)) { toast("Pick a number between 1 and 1000"); inp.focus(); return; }
+    save(n);
+  };
+  if ($("#rgclear", s.el)) $("#rgclear", s.el).onclick = () => save(null);
 }
 routes.reading = (tab) => {
   const f = (ME && ME.features) || {};
@@ -4647,18 +4724,22 @@ function renderRecapLanding(d, me, username, who, yr) {
       </div>`;
     return;
   }
+  const R = d.reading, watched = (d.episodes || 0) + (d.movies || 0) > 0;
   view.innerHTML = `<div class="page-head">${crumb(`#/${who}`, "Profile")}</div>
     <div class="recap-land">
       <div class="rl-glow"></div>
       <div class="rl-kick">Year in Review</div>
       <div class="rl-year">${d.year}</div>
-      <div class="rl-sub">${first} year at the movies &amp; on the couch</div>
+      <div class="rl-sub">${first} year ${!watched && R ? "between the covers"
+        : R ? "at the movies, on the couch &amp; between the covers" : "at the movies &amp; on the couch"}</div>
       ${d.has_data ? `
         <div class="rl-teasenums">
-          <span><b>${fmtHours(d.minutes)}</b>watched</span>
+          ${watched ? `<span><b>${fmtHours(d.minutes)}</b>watched</span>
           <span><b>${(d.episodes || 0).toLocaleString()}</b>episodes</span>
-          <span><b>${d.movies || 0}</b>films</span></div>
-        <button class="btn pri rl-play" id="rcplay">${I.recap} Play the slideshow</button>`
+          <span><b>${d.movies || 0}</b>films</span>` : ""}</div>
+        ${R ? `<div class="rl-teasenums rl-read">${rcReadNums(R).map(([v, l]) =>
+          `<span><b>${v}</b>${l}</span>`).join("")}</div>` : ""}
+        <button class="btn pri rl-play" id="rcplay">${I.recap || ""} Play the slideshow</button>`
         : `<div class="empty" style="padding:22px 0">Nothing tracked in ${d.year}.</div>`}
       ${yrSwitch(d.years, d.year, me, who)}
     </div>`;
@@ -4671,12 +4752,14 @@ function recapSlides(d, me, username) {
   const mS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
   const topShow = (d.top_shows || [])[0];
   const runners = (d.top_shows || []).filter(s => s.poster).slice(1, 5);
+  const R = d.reading, watched = (d.episodes || 0) + (d.movies || 0) > 0;
   const S = [];
   S.push(`<div class="rs intro"><div class="rs-kick">Year in Review</div>
     <div class="rs-year">${d.year}</div>
-    <div class="rs-lead">${whoCap} year on the couch — let's rewind it.</div>
+    <div class="rs-lead">${whoCap} year ${!watched && R ? "between the covers"
+      : R ? "on the couch and between the covers" : "on the couch"} — let's rewind it.</div>
     <div class="rs-hint">tap to begin ›</div></div>`);
-  S.push(`<div class="rs"><div class="rs-cap">By the numbers</div>
+  if (watched) S.push(`<div class="rs"><div class="rs-cap">By the numbers</div>
     <div class="rs-nums">
       <div><b>${fmtHours(d.minutes)}</b><span>watched</span></div>
       <div><b>${(d.episodes || 0).toLocaleString()}</b><span>episodes</span></div>
@@ -4700,20 +4783,83 @@ function recapSlides(d, me, username) {
   if ((d.top_movies || []).length) S.push(`<div class="rs"><div class="rs-cap">Films you loved</div>
     <div class="rs-films">${d.top_movies.slice(0, 5).map(m =>
       `<div class="rs-film"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>${m.rating ? `<b>${m.rating}/10</b>` : ""}</div>`).join("")}</div></div>`);
+  if (R) S.push(...recapReadingSlides(R, me));
   const rec = [];
   if (d.binge) rec.push(`<div class="rs-rec"><span>Biggest binge</span><b>${d.binge.count} eps</b><i>${fmtDate(d.binge.date)}${d.binge.top ? " · mostly " + esc(d.binge.top) : ""}</i></div>`);
   if (d.first_watch) rec.push(`<div class="rs-rec"><span>Kicked off with</span><b>${esc(d.first_watch.title)}</b><i>${fmtDate(d.first_watch.watched_at)}</i></div>`);
   if (d.last_watch) rec.push(`<div class="rs-rec"><span>Most recently</span><b>${esc(d.last_watch.title)}</b><i>${fmtDate(d.last_watch.watched_at)}</i></div>`);
   if (rec.length) S.push(`<div class="rs"><div class="rs-cap">For the record</div><div class="rs-recs">${rec.join("")}</div></div>`);
+  const outro = [];
+  if (watched) outro.push(fmtHours(d.minutes), `${(d.episodes || 0).toLocaleString()} episodes`, `${d.movies || 0} films`);
+  if (R && R.books) outro.push(`${R.books} book${R.books === 1 ? "" : "s"}`);
+  if (R && R.manga) outro.push(`${R.manga} manga`);
   S.push(`<div class="rs outro"><div class="rs-year sm">${d.year}</div>
     <div class="rs-otitle">That's a wrap.</div>
-    <div class="rs-osub">${fmtHours(d.minutes)} · ${(d.episodes || 0).toLocaleString()} episodes · ${d.movies || 0} films</div>
+    <div class="rs-osub">${outro.join(" · ")}</div>
     <button class="btn pri rc-share" id="rcshare">${I.share} Share your ${d.year}</button></div>`);
   return S;
 }
 
+// reading in a recap — the numbers that lead the landing and the reading slide
+function rcReadNums(R) {
+  const n = [];
+  if (R.books || (R.books === 0 && !R.manga)) n.push([R.books, R.books === 1 ? "book" : "books"]);
+  if (R.manga) n.push([R.manga, "manga"]);
+  if (R.pages) n.push([R.pages.toLocaleString(), "pages"]);
+  else if (R.chapters) n.push([R.chapters.toLocaleString(), "chapters"]);
+  if (R.minutes >= 60) n.push([Math.round(R.minutes / 60).toLocaleString(), "hrs reading"]);
+  return n;
+}
+// two slides: the year's shelf (count, a fanned stack of covers, the month curve), then
+// the record book (favourite, author, longest, fastest, busiest month). Server only
+// sends `reading` when the recap's owner has it switched on.
+function recapReadingSlides(R, me) {
+  const S = [], mS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+  const total = (R.books || 0) + (R.manga || 0);
+  const covers = (R.covers || []).slice(0, 7);
+  const mid = (covers.length - 1) / 2;
+  const fan = covers.map((c, i) => {
+    const o = i - mid;
+    return `<img src="${esc(POSTER(c.cover))}" alt="" style="--o:${o};--a:${Math.abs(o)};z-index:${20 - Math.round(Math.abs(o) * 2)}">`;
+  }).join("");
+  const mx = Math.max(...(R.months || [0]), 1);
+  const b = R.books || 0, m = R.manga || 0;
+  const lead = b && m ? `${b} book${b === 1 ? "" : "s"} and ${m} manga series, start to finish`
+    : b ? `book${b === 1 ? "" : "s"} read cover to cover` : `manga series, start to finish`;
+  S.push(`<div class="rs rs-read"><div class="rs-cap">Between the covers</div>
+    ${fan ? `<div class="rs-fan" style="--n:${covers.length}">${fan}</div>` : ""}
+    <div class="rs-bignum">${total || "—"}</div>
+    <div class="rs-lead">${total ? lead : "Pages turned, nothing finished — the best kind of unfinished business"}</div>
+    <div class="rs-nums rs-nums-3">${rcReadNums(R).filter(([, l]) => !/^(books?|manga)$/.test(l)).map(([v, l]) =>
+      `<div><b>${v}</b><span>${l}</span></div>`).join("")}</div>
+    ${(R.months || []).some(v => v) ? `<div class="rs-spark">${R.months.map((v, i) =>
+      `<div class="rs-bcol ${R.busiest_month && MONTHS[i] === R.busiest_month ? "hi" : ""}"><i style="height:${Math.max(4, Math.round(100 * v / mx))}%"></i><span>${mS[i]}</span></div>`).join("")}</div>
+      <div class="rs-foot">Most ${esc(R.unit)} in <b>${esc(R.busiest_month)}</b> · ${R.busiest_month_units.toLocaleString()}</div>` : ""}
+    ${R.goal ? `<div class="rs-goal ${R.goal.done >= R.goal.target ? "met" : ""}">${R.goal.done >= R.goal.target
+      ? `${I.check}<span>Goal of ${R.goal.target} books — reached</span>`
+      : `<span>${R.goal.done} of a ${R.goal.target}-book goal</span>`}</div>` : ""}</div>`);
+  const fav = R.favourite;
+  const rec = [];
+  if (R.top_author) rec.push(`<div class="rs-rec"><span>Most-read author</span><b>${esc(R.top_author.name)}</b>
+    <i>${R.top_author.count} books · ${R.top_author.pages.toLocaleString()} pages</i></div>`);
+  if (R.longest) rec.push(`<div class="rs-rec"><span>Longest book</span><b>${esc(R.longest.title)}</b>
+    <i>${R.longest.pages.toLocaleString()} pages${R.longest.author ? " · " + esc(R.longest.author) : ""}</i></div>`);
+  if (R.fastest) rec.push(`<div class="rs-rec"><span>Fastest finish</span><b>${esc(R.fastest.title)}</b>
+    <i>${R.fastest.days <= 1 ? "in a single day" : `in ${R.fastest.days} days`}${R.fastest.units ? ` · ${R.fastest.units.toLocaleString()} ${R.fastest.kind === "book" ? "pages" : "chapters"}` : ""}</i></div>`);
+  if (fav || rec.length) S.push(`<div class="rs rs-read"><div class="rs-cap">${me ? "Your" : "The"} reading, on the record</div>
+    ${fav ? `<div class="rs-fav"><img src="${esc(POSTER(fav.cover))}" alt="">
+      <div class="rs-fav-t"><span>Favourite read</span><b>${esc(fav.title)}</b>
+        ${fav.author ? `<i>${esc(fav.author)}</i>` : ""}<em>${fav.rating}<small>/10</small></em></div></div>` : ""}
+    ${rec.length ? `<div class="rs-recs">${rec.join("")}</div>` : ""}</div>`);
+  return S;
+}
+
 async function shareRecap(d, me, username) {
-  const text = `${me ? "My" : esc((username || "").split(" ")[0]) + "’s"} ${d.year} on Marquee — ${fmtHours(d.minutes)} watched, ${d.episodes} episodes, ${d.movies} movies.`;
+  const R = d.reading, bits = [];
+  if ((d.episodes || 0) + (d.movies || 0)) bits.push(`${fmtHours(d.minutes)} watched, ${d.episodes} episodes, ${d.movies} movies`);
+  if (R && R.books) bits.push(`${R.books} book${R.books === 1 ? "" : "s"} read`);
+  if (R && R.manga) bits.push(`${R.manga} manga finished`);
+  const text = `${me ? "My" : (username || "").split(" ")[0] + "’s"} ${d.year} on Marquee — ${bits.join(", ")}.`;
   const url = location.origin + "/#/recap/" + d.year;
   try {
     if (navigator.share) await navigator.share({ title: `Marquee ${d.year}`, text, url });
@@ -4803,6 +4949,7 @@ routes.settings = async () => {
   const oseer = await api("/overseerr/me").catch(() => ({ enabled: false }));
   const nprefs = (await api("/notifications/prefs").catch(() => ({ prefs: [] }))).prefs;
   const imdb = await api("/imdb/status").catch(() => null);
+  let rgoal = ME.features?.books ? await api("/reading/goal").catch(() => null) : null;
   const LEADS = [["0", "When it airs"], ["1", "1 day before"], ["3", "3 days before"], ["7", "1 week before"]];
   const notifPanel = `<div class="panel notif-panel"><h3><span class="h3-ic">${I.bell}</span> Notifications</h3>
     <p class="hint">Off by default — switch on only what you want. Alerts appear in your bell inbox, and as push if you enable it below.</p>
@@ -4911,6 +5058,10 @@ routes.settings = async () => {
           <span class="hint">Reads, to-reads, page progress and ratings — search by Open Library, import your Goodreads library below.</span></span>
         <button class="switch-btn ${ME.features?.books ? "on" : ""}" data-feat="books" role="switch"
           aria-checked="${!!ME.features?.books}"><span></span></button></label>
+      <div class="toggle-row rg-row" id="goalrow" ${ME.features?.books ? "" : "hidden"}>
+        <span>Yearly reading goal
+          <span class="hint">Optional — books you’d like to finish this year. Shows as a ring on your reading stats.</span></span>
+        <button class="btn" id="goalbtn">${rgoal && rgoal.target ? `${rgoal.target} books` : "Set goal"}</button></div>
       <label class="toggle-row"><span>Manga · manhwa · manhua
           <span class="hint">Chapter-by-chapter progress via AniList — covers Japanese, Korean and Chinese series.</span></span>
         <button class="switch-btn ${ME.features?.manga ? "on" : ""}" data-feat="manga" role="switch"
@@ -5047,9 +5198,17 @@ routes.settings = async () => {
     ME.features = r.features;
     applyFeatureNav();
     if ($("#grblock")) $("#grblock").hidden = !ME.features.books;
+    if ($("#goalrow")) $("#goalrow").hidden = !ME.features.books;
     delete CACHE["/reading"]; delete CACHE["/reading/stats"];
     toast(on ? `${btn.dataset.feat === "books" ? "Books" : "Manga"} tracking is on — check your menu` : "Turned off");
   });
+  if ($("#goalbtn")) $("#goalbtn").onclick = async () => {
+    rgoal = rgoal || await api("/reading/goal").catch(() => null);
+    goalSheet(rgoal, r => {
+      rgoal = r; delete CACHE["/reading/stats"];
+      $("#goalbtn").textContent = r.target ? `${r.target} books` : "Set goal";
+    });
+  };
   if ($("#grcsv")) $("#grcsv").onchange = async () => {
     const f = $("#grcsv").files[0]; if (!f) return;
     const fd = new FormData(); fd.append("file", f);
@@ -5132,38 +5291,85 @@ const celeOrdinal = n => {
   return n + (s[(v - 20) % 10] || s[v] || s[0]);
 };
 
-function celeShow(c, done) {
+// what a celebration card says — TV (season / series) or reading (book, manga series,
+// the yearly goal). Everything remote is escaped here; celeShow only lays it out.
+function celeParts(c) {
+  if (c.kind === "goal") {
+    const covers = (c.covers || []).slice(0, 5), mid = (covers.length - 1) / 2;
+    return {
+      cls: "series reading goal", rich: true, kicker: "Reading goal",
+      art: covers.length ? `<div class="cele-fan">${covers.map((u, i) =>
+        `<img class="cele-poster" src="${esc(POSTER(u))}" alt="" style="--o:${i - mid};--a:${Math.abs(i - mid)}">`).join("")}</div>`
+        : `<div class="cele-goalnum">${c.count}</div>`,
+      stamp: ["GOAL", "REACHED"],
+      title: `${c.count} books in ${c.year}`,
+      sub: `You set out to read ${c.goal} this year`,
+      stats: [[c.count, c.count === 1 ? "book" : "books"],
+              c.pages ? [c.pages.toLocaleString(), "pages"] : null,
+              c.count > c.goal ? [`+${c.count - c.goal}`, "past it"] : null],
+      nth: "every one of them counted", href: "#/reading/stats", go: "Reading stats",
+    };
+  }
+  if (c.kind === "book" || c.kind === "manga") {
+    const book = c.kind === "book", it = c.item || {};
+    return {
+      cls: `reading ${book ? "" : "series"}`, rich: !book, bg: it.cover,
+      kicker: book ? "Book finished" : "Series complete",
+      art: `<img class="cele-poster" src="${esc(POSTER(it.cover))}" alt="">`,
+      stamp: book ? ["THE", "END"] : ["FINAL", "CHAPTER"],
+      title: it.title || "",
+      sub: [book ? (it.author ? "by " + esc(it.author) : "") : "The complete series",
+            c.days != null ? celeSpan(c.days) : ""].filter(Boolean).join(" · "),
+      stats: [c.units ? [c.units.toLocaleString(), c.unit] : null,
+              !book && c.volumes ? [c.volumes, c.volumes === 1 ? "volume" : "volumes"] : null,
+              c.minutes ? [celeHours(c.minutes), "reading"] : null,     // the span's already in the sub
+              c.rating ? [`${c.rating}<small>/10</small>`, "your rating"] : null],
+      nth: `your ${celeOrdinal(c.nth_this_year)} ${book ? "book" : "series"} finished in ${c.year}`,
+      href: `#/${c.kind}/${it.id}`, go: book ? "See the book" : "See the series",
+    };
+  }
   const isShow = c.kind === "show";
-  const title = c.show.title || "";
+  return {
+    cls: isShow ? "series" : "", rich: isShow, bg: c.show.backdrop,
+    kicker: isShow ? "That’s a wrap" : "Season complete",
+    art: `<img class="cele-poster" src="${POSTER(c.show.poster)}" alt="">`,
+    stamp: [isShow ? "SERIES" : "SEASON", "COMPLETE"],
+    title: c.show.title || "",
+    sub: `${isShow ? "The complete series" : esc(c.season_name || "")}${c.days != null ? ` · ${celeSpan(c.days)}` : ""}`,
+    stats: [[c.episodes, c.episodes === 1 ? "episode" : "episodes"], [celeHours(c.minutes), "watched"],
+            isShow ? [c.seasons, c.seasons === 1 ? "season" : "seasons"] : null],
+    nth: `your ${celeOrdinal(c.nth_this_year)} ${isShow ? "series" : "season"} finished in ${c.year}`,
+    href: `#/show/${c.show.id}`, go: "See the show",
+  };
+}
+
+function celeShow(c, done) {
+  const P = celeParts(c);
   const wrap = document.createElement("div");
-  wrap.className = `cele ${isShow ? "series" : ""}`;
-  const stats = [
-    [c.episodes, c.episodes === 1 ? "episode" : "episodes"],
-    [celeHours(c.minutes), "watched"],
-    ...(isShow ? [[c.seasons, c.seasons === 1 ? "season" : "seasons"]] : []),
-  ];
+  wrap.className = `cele ${P.cls}`;
   wrap.innerHTML = `
-    ${c.show.backdrop ? `<div class="cele-bg" style="background-image:url(${c.show.backdrop})"></div>` : ""}
+    ${P.bg ? `<div class="cele-bg" style="background-image:url('${esc(P.bg)}')"></div>` : ""}
     <div class="cele-rays"></div>
     <div class="cele-card">
       <div class="cele-bulbs">${Array.from({ length: 26 }, (_, i) =>
         `<i style="--i:${i}"></i>`).join("")}</div>
-      <div class="cele-kicker">${isShow ? "That’s a wrap" : "Season complete"}</div>
+      <div class="cele-kicker">${P.kicker}</div>
       <div class="cele-art">
-        <img class="cele-poster" src="${POSTER(c.show.poster)}" alt="">
-        <div class="cele-stamp"><b>${isShow ? "SERIES" : "SEASON"}</b><span>COMPLETE</span></div>
+        ${P.art}
+        <div class="cele-stamp"><b>${P.stamp[0]}</b><span>${P.stamp[1]}</span></div>
       </div>
-      <h2 class="cele-title">${title.split("").map((ch, i) =>
-        `<span style="--i:${i}">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("")}</h2>
-      <div class="cele-sub">${isShow ? "The complete series" : esc(c.season_name || "")}${
-        c.days != null ? ` · ${celeSpan(c.days)}` : ""}</div>
-      <div class="cele-stats">${stats.map(([v, l]) =>
+      <h2 class="cele-title">${(() => {   // letters drop in one by one; words never split
+        let n = 0;
+        return P.title.split(" ").map(w => `<i class="w">${[...w].map(ch =>
+          `<span style="--i:${n++}">${esc(ch)}</span>`).join("")}</i>${(n++, "")}`).join(" ");
+      })()}</h2>
+      <div class="cele-sub">${P.sub}</div>
+      <div class="cele-stats">${P.stats.filter(Boolean).map(([v, l]) =>
         `<span><b>${v}</b>${l}</span>`).join("")}</div>
-      <div class="cele-nth">your ${celeOrdinal(c.nth_this_year)} ${isShow ? "series" : "season"}
-        finished in ${c.year}</div>
+      <div class="cele-nth">${P.nth}</div>
       <div class="cele-acts">
         <button class="btn pri" data-a="ok">Nice</button>
-        <a class="btn" href="#/show/${c.show.id}" data-a="go">See the show</a>
+        <a class="btn" href="${P.href}" data-a="go">${P.go}</a>
       </div>
       <div class="cele-timer"></div>
     </div>
@@ -5171,7 +5377,7 @@ function celeShow(c, done) {
   document.body.appendChild(wrap);
   document.body.style.overflow = "hidden";
 
-  const stopConfetti = REDUCED() ? () => {} : celeConfetti($(".cele-confetti", wrap), isShow);
+  const stopConfetti = REDUCED() ? () => {} : celeConfetti($(".cele-confetti", wrap), P.rich);
   if (!REDUCED()) {
     setTimeout(() => { hapticTick(); wrap.classList.add("stamped"); }, 620);
     setTimeout(hapticTick, 760);
