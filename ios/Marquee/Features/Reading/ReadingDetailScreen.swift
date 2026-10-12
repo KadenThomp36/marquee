@@ -13,7 +13,10 @@ struct ReadingDetailScreen: View {
     var isHardcoverPreview = false
 
     @Environment(Session.self) private var session
-    @State private var gate = SpoilerGate(earned: true)
+    /// ReviewsSection and SpoilerCover read this from the environment, so it has to be
+    /// injected below — without it SwiftUI traps the moment the reviews render, which
+    /// is why opening any book crashed. Earned once you've finished it, like the web.
+    @State private var gate = SpoilerGate()
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.dismiss) private var dismiss
 
@@ -56,6 +59,8 @@ struct ReadingDetailScreen: View {
         }
         .navigationTitle(item?.displayTitle ?? (kind == .book ? "Book" : "Manga"))
         .navigationBarTitleDisplayMode(.inline)
+        .environment(gate)
+        .onChange(of: state?.state) { _, value in gate.earned = value == ReadingState.finished.rawValue }
         .task { await load() }
         .sheet(item: $editingSession) { entry in
             SessionEditorSheet(entry: entry, kind: kind, mode: mode, total: total,
