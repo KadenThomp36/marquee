@@ -187,7 +187,9 @@ _tmdb_lock = threading.Lock()
 
 def tmdb(path, **params):
     with db() as con:
-        token = setting(con, "tmdb_token") or os.environ.get("TMDB_TOKEN", "")
+        token = (setting(con, "tmdb_token") or os.environ.get("TMDB_TOKEN", "")).strip()
+    if not token:
+        return None        # not configured yet: "no data", not a 500 on every page
     with _tmdb_lock:
         time.sleep(0.02)
     for attempt in range(4):
@@ -199,6 +201,11 @@ def tmdb(path, **params):
             if r.status_code == 429:
                 time.sleep(2 + attempt * 2)
                 continue
+            if 400 <= r.status_code < 500:
+                # a bad/missing token or a bad request won't fix itself on retry —
+                # answer "nothing" now instead of 500ing the page after 6 seconds
+                log.warning("tmdb %s -> %s", path, r.status_code)
+                return None
             r.raise_for_status()
             return r.json()
         except httpx.HTTPError:
@@ -679,10 +686,16 @@ def al_media_row(m):
 
 
 def upsert_show(con, tmdb_id, fetch_episodes=True):
-    """Fetch a show + all episodes from TMDB into the catalog."""
+    """Fetch a show + all episodes from TMDB into the catalog. Every network call
+    happens before the first write: sqlite holds the write lock from the first INSERT
+    to commit, and a show with 20 seasons used to keep everyone else's writes waiting
+    on 20 TMDB round-trips."""
     d = tmdb(f"/tv/{tmdb_id}", append_to_response="credits,content_ratings,external_ids")
     if not d:
         return None
+    season_data = [sd for sd in (tmdb(f"/tv/{tmdb_id}/season/{s['season_number']}")
+                                 for s in d.get("seasons", []))
+                   if sd] if fetch_episodes else []
     ratings = {c["iso_3166_1"]: c["rating"] for c in
                (d.get("content_ratings") or {}).get("results", []) if c.get("rating")}
     details = {
@@ -716,10 +729,7 @@ def upsert_show(con, tmdb_id, fetch_episodes=True):
          (d.get("episode_run_time") or [30])[0] if d.get("episode_run_time") else 30,
          datetime.now().isoformat(), json.dumps(details)))
     if fetch_episodes:
-        for s in d.get("seasons", []):
-            sd = tmdb(f"/tv/{tmdb_id}/season/{s['season_number']}")
-            if not sd:
-                continue
+        for sd in season_data:
             for e in sd.get("episodes", []):
                 # canonical TMDB data always wins; a matching custom placeholder
                 # is converted to a tmdb row (watches keyed by number are unaffected)
@@ -735,20 +745,39 @@ def upsert_show(con, tmdb_id, fetch_episodes=True):
 
 
 def movie_details_json(d):
-    """Compact JSON of the richer bits we keep for stats (studios/countries/people)."""
+    """Everything we keep about a film, in ONE shape: what the film page shows
+    (overview, backdrop, certification…) and what the stats read (studios, countries,
+    people). There used to be two shapes written by two code paths, each overwriting
+    the other — so films added from search had blank pages, and films opened first
+    never counted towards studios."""
     credits = d.get("credits") or {}
     crew = credits.get("crew") or []
+    cert = None
+    for rd in (d.get("release_dates") or {}).get("results", []):
+        if rd.get("iso_3166_1") == "US":
+            for x in rd.get("release_dates", []):
+                if x.get("certification"):
+                    cert = x["certification"]
     return json.dumps({
+        "overview": d.get("overview"), "tagline": d.get("tagline"),
+        "vote": round(d.get("vote_average") or 0, 1), "votes": d.get("vote_count"),
+        "backdrop": img(d.get("backdrop_path"), "w780"), "runtime": d.get("runtime"),
+        "genres": [g["name"] for g in d.get("genres", [])],
+        "content_rating": cert, "imdb_id": d.get("imdb_id"),
         "companies": [c["name"] for c in (d.get("production_companies") or [])][:4],
         "countries": [c["iso_3166_1"] for c in (d.get("production_countries") or []) if c.get("iso_3166_1")],
         "directors": [c["name"] for c in crew if c.get("job") == "Director"][:3],
-        "cast": [{"id": c["id"], "name": c["name"], "img": img(c.get("profile_path"), "w185")}
-                 for c in (credits.get("cast") or [])[:10]],
+        "cast": [{"id": c["id"], "name": c["name"], "character": c.get("character"),
+                  "img": img(c.get("profile_path"), "w185")}
+                 for c in (credits.get("cast") or [])[:14]],
     })
 
 
+MOVIE_FULL_DETAILS = "%\"overview\"%"     # LIKE pattern: a row in the unified shape
+
+
 def upsert_movie(con, tmdb_id):
-    d = tmdb(f"/movie/{tmdb_id}", append_to_response="credits")
+    d = tmdb(f"/movie/{tmdb_id}", append_to_response="credits,release_dates")
     if not d:
         return None
     con.execute("""INSERT INTO movies(id,title,poster,year,release_date,runtime,genres,details)
@@ -770,10 +799,11 @@ def backfill_movie_details(con, ids, cap=8):
     if not (setting(con, "tmdb_token") or os.environ.get("TMDB_TOKEN")):
         return
     todo = [i for i in ids if con.execute(
-        "SELECT 1 FROM movies WHERE id=? AND details IS NULL", (i,)).fetchone()]
+        """SELECT 1 FROM movies WHERE id=? AND (details IS NULL OR details NOT LIKE ?
+           OR details NOT LIKE '%"companies"%')""", (i, MOVIE_FULL_DETAILS)).fetchone()]
     for mid in todo[:cap]:
         try:
-            d = tmdb(f"/movie/{mid}", append_to_response="credits")
+            d = tmdb(f"/movie/{mid}", append_to_response="credits,release_dates")
             if d:
                 con.execute("UPDATE movies SET details=? WHERE id=?", (movie_details_json(d), mid))
         except Exception:
@@ -807,9 +837,17 @@ def request_token(request: Request):
     return request.cookies.get("sid")
 
 
+_last_touch = {}
+
+
 def touch_session(con, tok):
-    """Stamp last_seen so Settings can show "this iPhone, 2 minutes ago". Cheap
-    enough per request; harmless on a schema that predates the column."""
+    """Stamp last_seen so Settings can show "this iPhone, 2 minutes ago". At most once
+    a minute per token: a write on every request turned every page load into a
+    write-lock contender. Harmless on a schema that predates the column."""
+    now = time.time()
+    if now - _last_touch.get(tok, 0) < 60:
+        return
+    _last_touch[tok] = now
     try:
         con.execute("UPDATE sessions SET last_seen=? WHERE token=?",
                     (datetime.now().isoformat(), tok))
@@ -822,12 +860,26 @@ def current_user(request: Request):
     if not tok:
         raise HTTPException(401, "not logged in")
     with db() as con:
-        r = con.execute("""SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id
-                           WHERE s.token=?""", (tok,)).fetchone()
+        try:
+            r = con.execute("""SELECT u.*, s.last_seen AS _seen, s.created_at AS _made
+                FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?""",
+                (tok,)).fetchone()
+        except sqlite3.OperationalError:          # pre-migration schema
+            r = con.execute("""SELECT u.*, NULL AS _seen, s.created_at AS _made
+                FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?""",
+                (tok,)).fetchone()
         if not r:
             raise HTTPException(401, "session expired")
+        # idle sessions die on use, not only when someone opens the Devices page
+        seen = r["_seen"] or r["_made"] or ""
+        if seen and seen < (datetime.now() - timedelta(days=SESSION_IDLE_DAYS)).isoformat():
+            con.execute("DELETE FROM sessions WHERE token=?", (tok,))
+            con.commit()                          # raising below would roll it back
+            raise HTTPException(401, "session expired")
         touch_session(con, tok)
-        return dict(r)
+        u = dict(r)
+        u.pop("_seen", None); u.pop("_made", None)
+        return u
 
 
 def admin_user(user=Depends(current_user)):
@@ -850,14 +902,29 @@ def new_session(con, user_id, device_name=None):
     return tok
 
 
+LOGIN_MAX_FAILS = 10        # per client address, per 10 minutes
+_login_fails = {}
+
+
+def _client_ip(request):
+    fwd = request.headers.get("x-forwarded-for") or ""
+    return (fwd.split(",")[0].strip() or (request.client.host if request.client else "")) or "?"
+
+
 @app.post("/api/login")
 async def login(request: Request, response: Response):
     body = await request.json()
+    ip, now = _client_ip(request), time.time()
+    fails = [t for t in _login_fails.get(ip, []) if now - t < 600]
+    if len(fails) >= LOGIN_MAX_FAILS:
+        raise HTTPException(429, "too many attempts — wait a few minutes")
     with db() as con:
         u = con.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE",
-                        (body.get("username", "").strip(),)).fetchone()
-        if not u or not check_pw(body.get("password", ""), u["pass"]):
+                        (str(body.get("username") or "").strip(),)).fetchone()
+        if not u or not check_pw(str(body.get("password") or ""), u["pass"]):
+            _login_fails[ip] = fails + [now]
             raise HTTPException(401, "wrong username or password")
+        _login_fails.pop(ip, None)
         # A browser re-logging in overwrites its sid cookie, so whatever row the old
         # cookie pointed at can never be presented again. Historically it was left
         # behind anyway — one "Web browser" corpse in the devices list per re-login.
@@ -951,7 +1018,10 @@ async def pair_claim(request: Request):
             # which would swallow the one message the pairing screen needs to show
             _pair_failed()
             raise HTTPException(410, "that code isn't valid any more — generate a new one")
-        con.execute("UPDATE pair_codes SET used_at=? WHERE code=?", (now.isoformat(), code))
+        # claim atomically: two phones racing the same code can't both win
+        if con.execute("UPDATE pair_codes SET used_at=? WHERE code=? AND used_at IS NULL",
+                       (now.isoformat(), code)).rowcount != 1:
+            raise HTTPException(410, "that code isn't valid any more — generate a new one")
         u = con.execute("SELECT * FROM users WHERE id=?", (r["user_id"],)).fetchone()
         if not u:
             raise HTTPException(410, "that account no longer exists")
@@ -1280,6 +1350,10 @@ async def update_profile(request: Request, user=Depends(current_user)):
                 raise HTTPException(400, "password too short")
             con.execute("UPDATE users SET pass=? WHERE id=?",
                         (hash_pw(body["password"]), user["id"]))
+            # a new password is usually a response to "someone else has it" — every
+            # other device signs in again; this one stays
+            con.execute("DELETE FROM sessions WHERE user_id=? AND token<>?",
+                        (user["id"], request_token(request) or ""))
     return {"ok": True}
 
 
@@ -2313,11 +2387,15 @@ def home(user=Depends(current_user)):
             (SELECT COUNT(DISTINCT e.season) FROM episodes e WHERE e.show_id=s.id
                AND e.season>0) AS seasons,
             (SELECT COUNT(*) FROM watches w WHERE w.user_id=? AND w.show_id=s.id AND w.season>0) AS watched,
+            (SELECT COUNT(*) FROM watches w JOIN episodes e ON e.show_id=w.show_id
+               AND e.season=w.season AND e.number=w.number
+             WHERE w.user_id=? AND w.show_id=s.id AND w.season>0
+               AND e.air_date IS NOT NULL AND e.air_date<=?) AS watched_aired,
             (SELECT MAX(w.watched_at) FROM watches w WHERE w.user_id=? AND w.show_id=s.id) AS last_watched,
             (SELECT MIN(e.air_date) FROM episodes e WHERE e.show_id=s.id AND e.season>0
                AND e.air_date>?) AS next_air
           FROM follows f JOIN shows s ON s.id=f.show_id WHERE f.user_id=?""",
-          (t, uid, uid, t, uid)).fetchall()
+          (t, uid, uid, t, uid, t, uid)).fetchall()
         stale_cut = (datetime.now() - timedelta(days=STALE_DAYS)).isoformat()
         fresh_cut = (date.today() - timedelta(days=STALE_DAYS)).isoformat()  # "recently aired"
         for r in rows:
@@ -2330,8 +2408,10 @@ def home(user=Depends(current_user)):
             item = {
                 "id": r["id"], "title": r["title"], "poster": r["poster"], "year": r["year"],
                 "status": r["status"], "rating": r["rating"], "avg_runtime": r["avg_runtime"],
-                "aired": r["aired"], "watched": min(r["watched"], r["aired"]),
-                "remaining": max(r["aired"] - r["watched"], 0),
+                # progress counts only watches of aired episodes — a watch of a
+                # since-renumbered or unaired episode used to eat into "remaining"
+                "aired": r["aired"], "watched": r["watched_aired"],
+                "remaining": max(r["aired"] - r["watched_aired"], 0),
                 "last_watched": r["last_watched"], "next_air": r["next_air"],
                 "next_ep": dict(nxt) if nxt else None,
                 "added_at": r["added_at"], "seasons": r["seasons"],
@@ -2528,12 +2608,15 @@ def show_summary(con, uid, show_id):
       SELECT s.*, f.archived, f.rating,
         (SELECT COUNT(*) FROM episodes e WHERE e.show_id=s.id AND e.season>0
            AND e.air_date IS NOT NULL AND e.air_date<=?) AS aired,
-        (SELECT COUNT(*) FROM watches w WHERE w.user_id=? AND w.show_id=s.id AND w.season>0) AS watched,
+        (SELECT COUNT(*) FROM watches w JOIN episodes e ON e.show_id=w.show_id
+           AND e.season=w.season AND e.number=w.number
+         WHERE w.user_id=? AND w.show_id=s.id AND w.season>0
+           AND e.air_date IS NOT NULL AND e.air_date<=?) AS watched,
         (SELECT MAX(w.watched_at) FROM watches w WHERE w.user_id=? AND w.show_id=s.id) AS last_watched,
         (SELECT MIN(e.air_date) FROM episodes e WHERE e.show_id=s.id AND e.season>0
            AND e.air_date>?) AS next_air
       FROM shows s LEFT JOIN follows f ON f.show_id=s.id AND f.user_id=?
-      WHERE s.id=?""", (t, uid, uid, t, uid, show_id)).fetchone()
+      WHERE s.id=?""", (t, uid, t, uid, t, uid, show_id)).fetchone()
     if not r:
         return None
     nxt = con.execute("""
@@ -2731,19 +2814,25 @@ async def delete_custom_episode(show_id: int, request: Request, user=Depends(adm
     return {"ok": True, "deleted": bool(r.rowcount)}
 
 
+_ratings_tried = {}
+
+
 @app.get("/api/show/{show_id}/ratings")
 def show_ratings(show_id: int, user=Depends(current_user)):
     """Per-episode TMDB ratings + per-season averages, for the sparklines."""
     with db() as con:
         have = con.execute("""SELECT COUNT(*) c FROM episodes WHERE show_id=? AND season>0
             AND rating IS NOT NULL""", (show_id,)).fetchone()["c"]
-        total = con.execute("SELECT COUNT(*) c FROM episodes WHERE show_id=? AND season>0",
-                            (show_id,)).fetchone()["c"]
+        # unaired episodes can't have ratings — counting them kept an announced season
+        # (or an obscure show) under the bar, refetching every season on every view
+        total = con.execute("""SELECT COUNT(*) c FROM episodes WHERE show_id=? AND season>0
+            AND air_date IS NOT NULL AND air_date<=?""", (show_id, today())).fetchone()["c"]
         seasons = [r["season"] for r in con.execute(
             "SELECT DISTINCT season FROM episodes WHERE show_id=? AND season>0 ORDER BY season",
             (show_id,))]
     # lazy-fetch ratings from TMDB if we don't have them (older data / never fetched)
-    if total and have < total * 0.5:
+    if total and have < total * 0.5 and time.time() - _ratings_tried.get(show_id, 0) > 86400:
+        _ratings_tried[show_id] = time.time()
         for sn in seasons:
             sd = tmdb(f"/tv/{show_id}/season/{sn}")
             if not sd:
@@ -2927,6 +3016,9 @@ async def mark_season(show_id: int, season: int, request: Request, user=Depends(
             return {"ok": True, "show": show_summary(con, uid, show_id)}
         eps = con.execute("""SELECT number FROM episodes WHERE show_id=? AND season=?
             AND air_date IS NOT NULL AND air_date<=?""", (show_id, season, today())).fetchall()
+        # same as marking one episode: watching it means you follow it
+        con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
+                    (uid, show_id, now))
         con.executemany("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
             VALUES(?,?,?,?,?)""", [(uid, show_id, season, e["number"], now) for e in eps])
         made = record_milestones(con, uid, show_id)
@@ -2977,36 +3069,12 @@ def movie_detail(movie_id: int, user=Depends(current_user)):
     uid = user["id"]
     with db() as con:
         m = con.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
-        need_details = not m or "details" not in m.keys() or not m["details"]
+        need_details = (not m or "details" not in m.keys() or not m["details"]
+                        or '"overview"' not in m["details"] or '"companies"' not in m["details"])
     if need_details:
-        d = tmdb(f"/movie/{movie_id}", append_to_response="credits,release_dates")
-        if not d:
-            raise HTTPException(404, "movie not found on TMDB")
-        cert = None
-        for rd in (d.get("release_dates") or {}).get("results", []):
-            if rd.get("iso_3166_1") == "US":
-                for x in rd.get("release_dates", []):
-                    if x.get("certification"):
-                        cert = x["certification"]
-        details = {
-            "overview": d.get("overview"), "tagline": d.get("tagline"),
-            "vote": round(d.get("vote_average") or 0, 1), "votes": d.get("vote_count"),
-            "backdrop": img(d.get("backdrop_path"), "w780"), "runtime": d.get("runtime"),
-            "genres": [g["name"] for g in d.get("genres", [])],
-            "content_rating": cert, "imdb_id": d.get("imdb_id"),
-            "directors": [c["name"] for c in (d.get("credits") or {}).get("crew", [])
-                          if c.get("job") == "Director"][:3],
-            "cast": [{"id": c["id"], "name": c["name"], "character": c.get("character"),
-                      "img": img(c.get("profile_path"), "w185")}
-                     for c in ((d.get("credits") or {}).get("cast") or [])[:14]],
-        }
         with db() as con:
-            try:
-                con.execute("ALTER TABLE movies ADD COLUMN details TEXT")
-            except sqlite3.OperationalError:
-                pass
-            upsert_movie(con, movie_id)
-            con.execute("UPDATE movies SET details=? WHERE id=?", (json.dumps(details), movie_id))
+            if not upsert_movie(con, movie_id) and not m:
+                raise HTTPException(404, "movie not found on TMDB")
             m = con.execute("SELECT * FROM movies WHERE id=?", (movie_id,)).fetchone()
     info = {}
     try:
@@ -3400,8 +3468,25 @@ def upsert_book(con, item):
     return con.execute("SELECT id FROM books WHERE olid=?", (item["olid"],)).fetchone()["id"]
 
 
+def _scrub_book_item(body):
+    """A client-described book, reduced to values that are safe to store in the shared
+    catalog: numbers are numbers, URLs are https, slugs are slugs."""
+    num = lambda v: int(v) if isinstance(v, (int, float)) or (isinstance(v, str) and v.isdigit()) else None
+    url = lambda v: v if isinstance(v, str) and v.startswith("https://") and '"' not in v and "<" not in v else None
+    txt = lambda v, n=300: str(v)[:n] if v else None
+    slug = body.get("slug")
+    return {"hc_id": num(body.get("hc_id")), "olid": txt(body.get("olid"), 40),
+            "title": txt(body.get("title")) or "Untitled", "author": txt(body.get("author")),
+            "cover": url(body.get("cover")), "year": num(body.get("year")),
+            "pages": num(body.get("pages")), "series": txt(body.get("series")),
+            "rating": rating_or_none(body.get("rating"), real=True) if body.get("rating") else None,
+            "genres": txt(body.get("genres"), 400),
+            "slug": slug if isinstance(slug, str) and re.fullmatch(r"[a-z0-9-]{1,120}", slug) else None,
+            "desc": txt(body.get("desc"), 4000)}
+
+
 @app.post("/api/books/migrate_hardcover")
-def migrate_hardcover(user=Depends(current_user)):
+def migrate_hardcover(user=Depends(admin_user)):
     """One-time: match every existing (Open Library) book to Hardcover and adopt its
     id, series, community rating, cover, pages. Keeps the internal book id (states
     stay linked). Paced for Hardcover's rate limit."""
@@ -3440,9 +3525,22 @@ async def books_add(request: Request, user=Depends(current_user)):
     if not (body.get("hc_id") or body.get("olid")):
         raise HTTPException(400, "missing book id")
     state = body.get("state") or "want"
+    if state not in ("want", "reading", "finished"):
+        raise HTTPException(400, "unknown reading state")
+    # the books row is shared by the whole household, so its metadata comes from
+    # Hardcover itself — never from whatever this request body claims the cover is
+    item = None
+    if body.get("hc_id"):
+        try:
+            item = hc_book_by_id(int_or_400(body["hc_id"], "hc_id"))
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — Hardcover down: fall back to a scrubbed body
+            item = None
+    item = item or _scrub_book_item(body)
     now = datetime.now().isoformat()
     with db() as con:
-        bid = upsert_book(con, body)
+        bid = upsert_book(con, item)
         prog = (body.get("pages") or 0) if state == "finished" else 0
         con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,updated_at,started_at)
             VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
@@ -3850,8 +3948,12 @@ async def book_rematch(book_id: int, request: Request, user=Depends(current_user
     body = await request.json() if await request.body() else {}
     with db() as con:
         b = con.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+        mine = con.execute("SELECT 1 FROM book_states WHERE user_id=? AND book_id=?",
+                           (user["id"], book_id)).fetchone()
     if not b:
         raise HTTPException(404, "unknown book")
+    if not mine:                 # the row is shared — only someone reading it may re-point it
+        raise HTTPException(403, "that book isn't on your shelf")
     if body.get("hc_id"):
         it = hc_book_by_id(int(body["hc_id"]))
     else:
@@ -4740,12 +4842,20 @@ def history(user=Depends(current_user), type: str = "tv", cursor: str = ""):
                    FROM movie_states ms JOIN movies m ON m.id=ms.movie_id
                    WHERE ms.user_id=? AND ms.state='watched' AND ms.watched_at IS NOT NULL"""
             params = [uid]
+            # cursor is "watched_at|id": films logged in the same instant (an import)
+            # would otherwise straddle a page edge and vanish
             if cursor:
-                q += " AND ms.watched_at < ?"
-                params.append(cursor)
-            q += " ORDER BY ms.watched_at DESC LIMIT 120"
+                at, _, mid = cursor.partition("|")
+                if mid.isdigit():
+                    q += " AND (ms.watched_at, m.id) < (?, ?)"
+                    params += [at, int(mid)]
+                else:
+                    q += " AND ms.watched_at < ?"
+                    params.append(at)
+            q += " ORDER BY ms.watched_at DESC, m.id DESC LIMIT 120"
             rows = [dict(r) for r in con.execute(q, params)]
-            return {"items": rows, "cursor": rows[-1]["watched_at"] if len(rows) == 120 else None}
+            return {"items": rows, "cursor": f'{rows[-1]["watched_at"]}|{rows[-1]["id"]}'
+                    if len(rows) == 120 else None}
 
         q = """SELECT w.show_id, w.season, w.number, w.watched_at, s.title, s.poster,
                  e.title AS ep_title, COALESCE(e.runtime, s.avg_runtime, 30) runtime
@@ -4753,10 +4863,17 @@ def history(user=Depends(current_user), type: str = "tv", cursor: str = ""):
                LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
                WHERE w.user_id=?"""
         params = [uid]
-        if cursor:
+        # "watched_at|show|season|number" when paging inside one huge day: a bulk mark
+        # stamps hundreds of rows with the same instant, and a bare timestamp cursor
+        # skipped every one of them past the page edge
+        parts = cursor.split("|")
+        if len(parts) == 4 and all(x.lstrip("-").isdigit() for x in parts[1:]):
+            q += " AND (w.watched_at, w.show_id, w.season, w.number) < (?, ?, ?, ?)"
+            params += [parts[0], *map(int, parts[1:])]
+        elif cursor:
             q += " AND w.watched_at < ?"
             params.append(cursor)
-        q += " ORDER BY w.watched_at DESC LIMIT 600"
+        q += " ORDER BY w.watched_at DESC, w.show_id DESC, w.season DESC, w.number DESC LIMIT 600"
         rows = con.execute(q, params).fetchall()
     hit_limit = len(rows) == 600
     last_day = rows[-1]["watched_at"][:10] if rows else None
@@ -4779,7 +4896,9 @@ def history(user=Depends(current_user), type: str = "tv", cursor: str = ""):
     items = [groups[k] for k in order]
     next_cursor = None
     if hit_limit:
-        next_cursor = rows[-1]["watched_at"] if single_day else last_day + "T23:59:59.999999"
+        last = rows[-1]
+        next_cursor = (f'{last["watched_at"]}|{last["show_id"]}|{last["season"]}|{last["number"]}'
+                       if single_day else last_day + "T23:59:59.999999")
     return {"items": items, "cursor": next_cursor}
 
 
@@ -4802,61 +4921,71 @@ def _import_tvtime(uid, zbytes):
                 if r["type"] == "show" and r["tvdb_id"]:
                     acts[int(r["tvdb_id"])] = r
         st["total"] = len(movies_j) + len(shows_j)
-        with db() as con:
-            for m in movies_j:
+        def import_movie(con, m):
+            found = None
+            imdb = m["id"].get("imdb")
+            if imdb and imdb != "-1":
+                r = tmdb(f"/find/{imdb}", external_source="imdb_id")
+                if r and r.get("movie_results"):
+                    found = r["movie_results"][0]
+            if not found and m.get("title"):
+                r = tmdb("/search/movie", query=m["title"])
+                cands = (r or {}).get("results") or []
+                exact = [c for c in cands if (c.get("title") or "").lower() == m["title"].lower()]
+                found = max(exact or cands, key=lambda c: c.get("vote_count", 0)) if cands else None
+            if not found:
+                st["errors"].append(f"movie not matched: {m.get('title')}")
+                return
+            upsert_movie(con, found["id"])
+            w = utc_to_local((m.get("watched_at") or "").rstrip("Z").split(".")[0] or None)
+            con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating)
+                VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO NOTHING""",
+                (uid, found["id"], "watched" if m.get("is_watched") else "watchlist", w,
+                 m.get("rating")))
+
+        def import_show(con, sh):
+            tvdb = sh["id"].get("tvdb")
+            meta = acts.get(tvdb, {})
+            found = None
+            if tvdb:
+                r = tmdb(f"/find/{tvdb}", external_source="tvdb_id")
+                if r and r.get("tv_results"):
+                    found = r["tv_results"][0]
+            if not found and meta.get("title"):
+                r = tmdb("/search/tv", query=meta["title"])
+                if r and r.get("results"):
+                    found = r["results"][0]
+            if not found:
+                st["errors"].append(f"show not matched: {meta.get('title') or tvdb}")
+                return
+            sid = found["id"]
+            if not con.execute("SELECT 1 FROM shows WHERE id=?", (sid,)).fetchone():
+                upsert_show(con, sid)
+            archived = 1 if meta.get("status") == "stopped" else 0
+            con.execute("""INSERT OR IGNORE INTO follows(user_id,show_id,added_at,archived,rating)
+                VALUES(?,?,?,?,?)""", (uid, sid, datetime.now().isoformat(), archived,
+                                       int(meta["rating"]) if meta.get("rating") else None))
+            rows = []
+            for se in sh.get("seasons", []):
+                for e in se.get("episodes", []):
+                    if e.get("is_watched"):
+                        w = utc_to_local((e.get("watched_at") or "").rstrip("Z").split(".")[0]) \
+                            or datetime.now().isoformat()
+                        rows.append((uid, sid, se["number"], e["number"], w))
+            con.executemany("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
+                VALUES(?,?,?,?,?)""", rows)
+
+        # one item at a time, each committed: a single unmatched title or TMDB hiccup
+        # 20 minutes in used to roll back the entire import
+        for fn_, items in ((import_movie, movies_j), (import_show, shows_j)):
+            for it in items:
                 st["done"] += 1
-                found = None
-                imdb = m["id"].get("imdb")
-                if imdb and imdb != "-1":
-                    r = tmdb(f"/find/{imdb}", external_source="imdb_id")
-                    if r and r.get("movie_results"):
-                        found = r["movie_results"][0]
-                if not found and m.get("title"):
-                    r = tmdb("/search/movie", query=m["title"])
-                    cands = (r or {}).get("results") or []
-                    exact = [c for c in cands if (c.get("title") or "").lower() == m["title"].lower()]
-                    found = max(exact or cands, key=lambda c: c.get("vote_count", 0)) if cands else None
-                if not found:
-                    st["errors"].append(f"movie not matched: {m.get('title')}")
-                    continue
-                upsert_movie(con, found["id"])
-                w = utc_to_local((m.get("watched_at") or "").rstrip("Z").split(".")[0] or None)
-                con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at,rating)
-                    VALUES(?,?,?,?,?) ON CONFLICT(user_id,movie_id) DO NOTHING""",
-                    (uid, found["id"], "watched" if m.get("is_watched") else "watchlist", w,
-                     m.get("rating")))
-            for sh in shows_j:
-                st["done"] += 1
-                tvdb = sh["id"].get("tvdb")
-                meta = acts.get(tvdb, {})
-                found = None
-                if tvdb:
-                    r = tmdb(f"/find/{tvdb}", external_source="tvdb_id")
-                    if r and r.get("tv_results"):
-                        found = r["tv_results"][0]
-                if not found and meta.get("title"):
-                    r = tmdb("/search/tv", query=meta["title"])
-                    if r and r.get("results"):
-                        found = r["results"][0]
-                if not found:
-                    st["errors"].append(f"show not matched: {meta.get('title') or tvdb}")
-                    continue
-                sid = found["id"]
-                if not con.execute("SELECT 1 FROM shows WHERE id=?", (sid,)).fetchone():
-                    upsert_show(con, sid)
-                archived = 1 if meta.get("status") == "stopped" else 0
-                con.execute("""INSERT OR IGNORE INTO follows(user_id,show_id,added_at,archived,rating)
-                    VALUES(?,?,?,?,?)""", (uid, sid, datetime.now().isoformat(), archived,
-                                           int(meta["rating"]) if meta.get("rating") else None))
-                rows = []
-                for se in sh.get("seasons", []):
-                    for e in se.get("episodes", []):
-                        if e.get("is_watched"):
-                            w = utc_to_local((e.get("watched_at") or "").rstrip("Z").split(".")[0]) \
-                                or datetime.now().isoformat()
-                            rows.append((uid, sid, se["number"], e["number"], w))
-                con.executemany("""INSERT OR IGNORE INTO watches(user_id,show_id,season,number,watched_at)
-                    VALUES(?,?,?,?,?)""", rows)
+                try:
+                    with db() as con:
+                        fn_(con, it)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("tvtime import item failed: %s", e)
+                    st["errors"].append(f"skipped one item: {e}")
         st["state"] = "done"
     except Exception as e:  # noqa: BLE001
         log.exception("tvtime import failed")
@@ -5075,14 +5204,14 @@ def plex_tmdb_id(rating_key, token):
     try:
         d = plex_get(f"/library/metadata/{rating_key}", token, includeGuids=1)
         guids = (d["MediaContainer"]["Metadata"][0].get("Guid") or [])
-        for g in guids:
-            mm = re.match(r"tmdb://(\d+)", g.get("id", ""))
-            if mm:
-                _plex_meta_cache[rating_key] = int(mm.group(1))
-                return _plex_meta_cache[rating_key]
     except Exception:  # noqa: BLE001
-        pass
-    _plex_meta_cache[rating_key] = None
+        return None           # transient (Plex asleep, timeout) — ask again next time
+    for g in guids:
+        mm = re.match(r"tmdb://(\d+)", g.get("id", ""))
+        if mm:
+            _plex_meta_cache[rating_key] = int(mm.group(1))
+            return _plex_meta_cache[rating_key]
+    _plex_meta_cache[rating_key] = None   # Plex answered: this item has no TMDB match
     return None
 
 
@@ -5090,7 +5219,8 @@ def record_plex_watch(con, uid, mtype, tmdb_id, season, number, watched_at=None)
     """Returns True only when this creates a *genuinely new* watch (so callers can notify)."""
     now = watched_at or datetime.now().isoformat()
     if mtype == "movie" and tmdb_id:
-        upsert_movie(con, tmdb_id)
+        if not con.execute("SELECT 1 FROM movies WHERE id=?", (tmdb_id,)).fetchone():
+            upsert_movie(con, tmdb_id)
         prev = con.execute("SELECT state FROM movie_states WHERE user_id=? AND movie_id=?",
                            (uid, tmdb_id)).fetchone()
         con.execute("""INSERT INTO movie_states(user_id,movie_id,state,watched_at)
@@ -5128,12 +5258,18 @@ def plex_poll_once():
     new_watches = []
     with db() as con:
         for e in entries:
-            newest = max(newest, int(e.get("viewedAt") or 0))
             uname = (amap.get(e.get("accountID")) or "").lower()
             uid = users_by_plex.get(uname)
             if not uid:
+                newest = max(newest, int(e.get("viewedAt") or 0))
                 continue
             when = datetime.fromtimestamp(int(e["viewedAt"])).isoformat() if e.get("viewedAt") else None
+            key = e.get("ratingKey") if e.get("type") == "movie" else (
+                e.get("grandparentRatingKey") or (e.get("grandparentKey") or "").rsplit("/", 1)[-1])
+            if key and e.get("type") in ("movie", "episode") \
+                    and plex_tmdb_id(key, token) is None and key not in _plex_meta_cache:
+                break     # Plex didn't answer for this one — stop here, retry it next poll
+            newest = max(newest, int(e.get("viewedAt") or 0))
             if e.get("type") == "movie":
                 tid = plex_tmdb_id(e.get("ratingKey"), token)
                 if record_plex_watch(con, uid, "movie", tid, None, None, when):
@@ -5595,6 +5731,8 @@ def startup():
                      "ALTER TABLE episodes ADD COLUMN imdb_rating REAL",
                      "ALTER TABLE episodes ADD COLUMN imdb_votes INTEGER",
                      "ALTER TABLE movie_states ADD COLUMN added_at TEXT",
+                     "CREATE INDEX IF NOT EXISTS idx_watches_time ON watches(watched_at)",
+                     "CREATE INDEX IF NOT EXISTS idx_watches_show ON watches(show_id, season, number)",
                      "CREATE INDEX IF NOT EXISTS idx_shows_imdb ON shows(imdb_id)",
                      "CREATE INDEX IF NOT EXISTS idx_movies_imdb ON movies(imdb_id)"):
             try:
