@@ -392,28 +392,47 @@ struct ReadingDetailScreen: View {
         }
     }
 
+    /// A finish date only exists once it's finished — the server clears it for every
+    /// other state, and showing one on a book you're mid-way through (a DatePicker
+    /// can't be empty, so it used to show today) read as "finished today".
     private var dates: some View {
-        HStack(spacing: 14) {
+        HStack(alignment: .top, spacing: 14) {
             dateField("Started", value: state?.startedAt) { stamp in
                 await save(ReadingStateRequest(startedAt: stamp))
             }
-            dateField("Finished", value: state?.finishedAt) { stamp in
-                await save(ReadingStateRequest(finishedAt: stamp))
+            if state?.readingState == .finished {
+                dateField("Finished", value: state?.finishedAt) { stamp in
+                    await save(ReadingStateRequest(finishedAt: stamp))
+                }
             }
         }
     }
 
+    @ViewBuilder
     private func dateField(_ label: String, value: String?,
                            save: @escaping (String) async -> Void) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).mqEyebrowStyle()
-            DatePicker(label, selection: Binding(
-                get: { MQTime.date(from: value) ?? Date() },
-                set: { date in Task { await save(MQTime.today(date)) } }),
-                       in: ...Date(), displayedComponents: .date)
-                .datePickerStyle(.compact)
-                .labelsHidden()
-                .tint(Color.mqBrass)
+            if let date = MQTime.date(from: value) {
+                DatePicker(label, selection: Binding(
+                    get: { date },
+                    set: { picked in Task { await save(MQTime.today(picked)) } }),
+                           in: ...Date(), displayedComponents: .date)
+                    .datePickerStyle(.compact)
+                    .labelsHidden()
+                    .tint(Color.mqBrass)
+            } else {
+                // no date yet: say so, rather than a picker pretending it's today.
+                // Tapping records today, which the picker then lets you adjust.
+                Button {
+                    Task { await save(MQTime.today(Date())) }
+                } label: {
+                    Label("Add date", systemImage: "calendar.badge.plus")
+                        .font(.mqSub)
+                }
+                .buttonStyle(.mqChip)
+                .accessibilityLabel("Add \(label.lowercased()) date")
+            }
         }
     }
 

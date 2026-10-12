@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261011f";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261012a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2668,7 +2668,7 @@ function renderRDetail(d) {
       <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(st.rating)}</span></div>
       <div class="rdw-dates">
         <label>Started<input type="date" id="rdstart" value="${(st.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
-        <label>Finished<input type="date" id="rdfin" value="${(st.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label></div>`
+        ${st.state === "finished" ? `<label>Finished<input type="date" id="rdfin" value="${(st.finished_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>` : ""}</div>`
       : `
       <div class="act-main">
         <button class="btn pri" data-add="reading">${PLAY_ICO} Start reading</button>
@@ -2789,7 +2789,7 @@ function renderRDetail(d) {
     };
     $("#rdstart").onchange = () => { st.started_at = $("#rdstart").value || null;
       post({ started_at: st.started_at }); };
-    $("#rdfin").onchange = () => { st.finished_at = $("#rdfin").value || null;
+    if ($("#rdfin")) $("#rdfin").onchange = () => { st.finished_at = $("#rdfin").value || null;
       post({ finished_at: st.finished_at }); };
     if ($("#sesstart")) $("#sesstart").onclick = async () => {
       await api(`/${kind}/${it.id}/session/start`, { body: {} }).catch(() => {});

@@ -38,7 +38,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261011f"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261012a"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -4090,7 +4090,9 @@ def _update_reading_state(kind, item_id, body, uid):
         else:
             started = cur["started_at"] or (now if state in ("reading", "finished") else None)
         if "finished_at" in body:
-            finished = date_or_none(body["finished_at"], "finished_at")
+            # a finish date only means something on a finished title — an old iOS date
+            # picker could send one for a book still being read
+            finished = date_or_none(body["finished_at"], "finished_at") if state == "finished" else None
         else:
             finished = now if (state == "finished" and cur["state"] != "finished") \
                 else (None if state != "finished" else cur["finished_at"])
