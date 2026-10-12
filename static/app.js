@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261011e";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261011f";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -6234,7 +6234,7 @@ const REDUCED = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 async function checkCelebrations() {
   if (!ME || document.hidden) return;
   try {
-    const d = await api("/celebrations");
+    const d = await api("/celebrations?reading=1");
     if (d.celebrations && d.celebrations.length) celebrate(d.celebrations);
   } catch { /* offline — they keep until next time */ }
 }

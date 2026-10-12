@@ -38,7 +38,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261011e"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261011f"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -3127,10 +3127,16 @@ def _milestone_payload(con, m):
                      "backdrop": s["backdrop"], "year": s["year"], "status": s["status"]}}
 
 
-def pending_celebrations(con, uid, ids=None, limit=3):
-    q = """SELECT * FROM milestones WHERE user_id=? AND seen_at IS NULL
+TV_MILESTONES = ("season", "show")
+
+
+def pending_celebrations(con, uid, ids=None, limit=3, kinds=None):
+    # `kinds` narrows the queue in SQL (not after the LIMIT) so a client that only
+    # understands TV moments never has them starved by unread book ones
+    kq = f" AND kind IN ({','.join('?' * len(kinds))})" if kinds else ""
+    q = f"""SELECT * FROM milestones WHERE user_id=? AND seen_at IS NULL{kq}
            ORDER BY created_at, id LIMIT ?"""
-    args = (uid, limit)
+    args = (uid, *(kinds or ()), limit)
     if ids:
         marks = ",".join("?" * len(ids))
         q = f"SELECT * FROM milestones WHERE user_id=? AND id IN ({marks}) ORDER BY id"
@@ -3149,7 +3155,7 @@ def pending_celebrations(con, uid, ids=None, limit=3):
 
 
 @app.get("/api/celebrations")
-def celebrations(user=Depends(current_user)):
+def celebrations(user=Depends(current_user), reading: int = 0):
     """What's waiting to be celebrated. Also re-checks anything watched in the last
     week, so a completion that arrived by some path that didn't record a milestone
     (an import, a direct DB fix) still gets its moment."""
@@ -3160,7 +3166,10 @@ def celebrations(user=Depends(current_user)):
             (uid, (datetime.now() - timedelta(days=7)).isoformat())).fetchall()
         for r in recent:
             record_milestones(con, uid, r["show_id"])
-        return {"celebrations": pending_celebrations(con, uid)}
+        # book/manga/goal moments have a different shape; only clients that ask for
+        # them (?reading=1 — the web app) get them. The iOS app's decoder expects
+        # TV-shaped celebrations and would drop the whole queue on one book.
+        return {"celebrations": pending_celebrations(con, uid, kinds=None if reading else TV_MILESTONES)}
 
 
 @app.post("/api/celebrations/seen")
