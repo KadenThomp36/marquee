@@ -60,7 +60,10 @@ struct SearchScreen: View {
             }
             .scrollEdgeEffectStyle(.soft, for: .top)
             .mqTopEdgeBlur()
-            .mqBareNavigationBar()
+            // Not mqBareNavigationBar: .searchable's navigationBarDrawer lives IN the
+            // navigation bar, so hiding the bar hid the search field with it. An
+            // untitled bar is there only to hold the field.
+            .mqUntitledNavigationBar()
         }
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
                     prompt: Text(searchPrompt))
