@@ -6050,6 +6050,21 @@ def plex_tmdb_id(rating_key, token):
     return None
 
 
+def show_alias(con, tmdb_id):
+    """A household can track a series under a different entry than the one Plex
+    resolves to — One Pace's custom edit vs TMDB's own listing of the same fan
+    project. The alias map in settings pins the resolved id onto the tracked one,
+    so a re-matched Plex library can't quietly grow a duplicate show. Applied by
+    the poller and the webhook both."""
+    if not tmdb_id:
+        return tmdb_id
+    try:
+        aliases = json.loads(setting(con, "show_aliases") or "{}")
+    except ValueError:
+        aliases = {}
+    return int(aliases.get(str(tmdb_id)) or tmdb_id)
+
+
 def record_plex_watch(con, uid, mtype, tmdb_id, season, number, watched_at=None):
     """Returns True only when this creates a *genuinely new* watch (so callers can notify)."""
     now = watched_at or datetime.now().isoformat()
@@ -6064,6 +6079,7 @@ def record_plex_watch(con, uid, mtype, tmdb_id, season, number, watched_at=None)
             (uid, tmdb_id, "watched", now))
         return not (prev and prev["state"] == "watched")
     if mtype == "episode" and tmdb_id and number:
+        tmdb_id = show_alias(con, tmdb_id)
         if not con.execute("SELECT 1 FROM shows WHERE id=?", (tmdb_id,)).fetchone():
             upsert_show(con, tmdb_id)
         con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
@@ -6241,6 +6257,7 @@ async def tautulli(request: Request):
                 tmdb_id = r["results"][0]["id"] if r and r.get("results") else None
             if not tmdb_id or not number:
                 return {"ok": False, "reason": "episode not matched"}
+            tmdb_id = show_alias(con, tmdb_id)
             if not con.execute("SELECT 1 FROM shows WHERE id=?", (tmdb_id,)).fetchone():
                 upsert_show(con, tmdb_id)
             con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
