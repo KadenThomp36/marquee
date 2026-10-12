@@ -1,0 +1,5 @@
+// Code signing for every target. The team ID isn't in the repo (it's public):
+// copy Signing.local.xcconfig.example to Signing.local.xcconfig and fill it in.
+// The include is optional, so a fresh clone still generates and opens — Xcode just
+// asks you to pick a team.
+#include? "Signing.local.xcconfig"

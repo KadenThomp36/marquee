@@ -1,6 +1,6 @@
 # Marquee for iOS
 
-A native SwiftUI client for [Marquee](https://github.com/KadenThomp36/marquee), the
+A native SwiftUI client for Marquee, the
 self-hosted household media tracker. Same product, same Midnight Marquee identity —
 near-black grounds, brass amber, Limelight over Archivo, poster art given room — with
 the parts of a phone the web app can't reach.
@@ -23,12 +23,19 @@ from the Devices panel in your existing web UI.
 
 ## Building
 
+From `ios/` in the [marquee](https://github.com/KadenThomp36/marquee) repo — the server,
+the web app and this client live and version together:
+
 ```sh
+cd ios
+cp Config/Signing.local.xcconfig.example Config/Signing.local.xcconfig   # once: your team ID
 xcodegen generate
 open Marquee.xcodeproj
 ```
 
 `Marquee.xcodeproj` is generated and gitignored; `project.yml` is the source of truth.
+The signing team lives in `Config/Signing.local.xcconfig`, which is gitignored — skip
+that step and Xcode asks you to pick a team instead.
 
 ## What the server needs
 

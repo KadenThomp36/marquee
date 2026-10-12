@@ -4,6 +4,10 @@ Self-hosted household media tracker (TV / movies / anime). A TV-Time replacement
 for Kaden's household, running in a Proxmox LXC
 (published via Tailscale Funnel).
 
+## Layout
+- `main.py`, `static/` — the server and the PWA (deploy paths rely on these staying at the root)
+- `ios/` — the native SwiftUI client (XcodeGen; see `ios/README.md`). Builds on a Mac only.
+
 ## Stack
 - **Backend:** single-file FastAPI + stdlib `sqlite3` (WAL) — `main.py`
 - **Frontend:** vanilla-JS SPA (hash routing, no framework) — `static/app.js` + `static/app.css`

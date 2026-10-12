@@ -9,3 +9,6 @@ Marquee.xcodeproj/
 xcuserdata/
 DerivedData/
 __pycache__/
+
+# Your Apple team ID — see Config/Signing.local.xcconfig.example.
+Config/Signing.local.xcconfig
