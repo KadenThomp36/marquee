@@ -1843,6 +1843,51 @@ body.recap-open{overflow:hidden}
 .rs-otitle{font-size:26px;font-weight:800;color:var(--ink)}
 .rs-osub{color:var(--ink-2);font-size:13.5px}
 .recap-show .rc-share{position:relative;z-index:4;margin-top:10px}
+
+/* ── recap: the reading slides ──
+   A fanned hand of the year's covers over a big Limelight count, then a record card
+   led by the favourite read. Same story-slide grammar as the TV slides. */
+.rl-teasenums.rl-read{margin-top:-8px}
+.rl-teasenums.rl-read b{color:var(--amber-2)}
+.rl-teasenums:empty{display:none}
+.rs-read{gap:14px}
+.rs-fan{position:relative;width:100%;height:170px;margin:0 0 6px}
+.rs-fan img{position:absolute;left:calc(50% - 44px + var(--o)*min(34px,8.2vw));bottom:calc(var(--a)*-7px + 8px);
+  width:88px;aspect-ratio:2/3;object-fit:cover;border-radius:7px;background:var(--panel-2);
+  box-shadow:0 14px 30px rgba(0,0,0,.6),0 0 0 1px rgba(240,181,68,.18);
+  transform:rotate(calc(var(--o)*4.5deg));transform-origin:50% 150%;
+  animation:rsFan .62s cubic-bezier(.2,1.1,.3,1) both;animation-delay:calc(.08s + var(--a)*.07s)}
+@keyframes rsFan{from{opacity:0;transform:translateY(40px) rotate(0)}}
+.rs-bignum{font-family:var(--disp);font-size:clamp(78px,26vw,128px);line-height:.82;color:var(--amber-2);
+  text-shadow:0 0 46px rgba(240,181,68,.35);font-variant-numeric:tabular-nums}
+.rs-read .rs-lead{color:var(--ink-2);font-size:14.5px;margin-top:-4px}
+.rs-nums.rs-nums-3{grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px;
+  padding:14px 6px;border-block:1px solid var(--line)}
+.rs-nums-3 b{font-size:clamp(26px,8vw,36px);font-variant-numeric:tabular-nums}
+.rs-nums-3 span{font-size:10.5px}
+.rs-spark{display:flex;align-items:flex-end;gap:5px;height:64px;width:100%;padding:0 4px}
+.rs-spark .rs-bcol i{max-width:16px;opacity:.42;border-radius:3px 3px 1px 1px}
+.rs-spark .rs-bcol.hi i{opacity:1;box-shadow:0 0 14px rgba(240,181,68,.45)}
+.rs-spark .rs-bcol span{font-size:9.5px}
+.rs-spark .rs-bcol.hi span{color:var(--amber-2);font-weight:700}
+.rs-read .rs-foot{margin-top:-6px}
+.rs-goal{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:99px;
+  font-size:12.5px;color:var(--ink-2);background:var(--panel);box-shadow:inset 0 0 0 1px var(--line-2)}
+.rs-goal.met{color:var(--amber-2);background:var(--amber-soft);box-shadow:inset 0 0 0 1px var(--amber-dim)}
+.rs-goal svg{width:14px;height:14px}
+.rs-fav{display:flex;align-items:center;gap:16px;width:100%;text-align:left;padding:14px;
+  border-radius:var(--r);background:linear-gradient(135deg,rgba(240,181,68,.13),rgba(240,181,68,.02) 70%);
+  box-shadow:inset 0 0 0 1px rgba(240,181,68,.28)}
+.rs-fav img{width:84px;aspect-ratio:2/3;object-fit:cover;border-radius:8px;flex:none;
+  box-shadow:0 12px 26px rgba(0,0,0,.55)}
+.rs-fav-t{display:flex;flex-direction:column;gap:3px;min-width:0}
+.rs-fav-t span{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--amber);font-weight:700}
+.rs-fav-t b{font-size:19px;line-height:1.2;color:var(--ink);text-wrap:balance}
+.rs-fav-t i{font-style:normal;color:var(--mut);font-size:12.5px}
+.rs-fav-t em{font-style:normal;font-family:var(--disp);font-size:30px;color:var(--amber-2);line-height:1;margin-top:4px}
+.rs-fav-t em small{font-family:var(--body);font-size:12px;color:var(--mut);margin-left:3px}
+.rs-read .rs-rec{text-align:left}
+@media(prefers-reduced-motion:reduce){.rs-fan img{animation:none}}
 @media(prefers-reduced-motion:reduce){
   .rsx-slide.on{animation:none}.rs-hint{animation:none}.recap-show{transition:none}.rsx-seg.cur i{transition:none}}
 
@@ -1968,6 +2013,21 @@ body.recap-open{overflow:hidden}
   transparent 5deg 14deg,rgba(240,181,68,.16) 14deg 19deg,transparent 19deg 30deg)}
 .cele.series .cele-card{box-shadow:0 30px 80px rgba(0,0,0,.65),inset 0 0 0 1px rgba(240,181,68,.4),
   0 0 110px rgba(176,64,79,.3)}
+.cele-title .w{display:inline-block;white-space:nowrap;font-style:normal}
+.cele-stats b small{font-size:11px;color:var(--mut);margin-left:1px}
+/* reading: a book gets "THE END" across its cover; a finished manga series and the
+   yearly goal get the velvet. The goal fans this year's last few covers like a hand. */
+.cele.reading .cele-bg{filter:blur(40px) brightness(.3) saturate(1.4)}
+.cele.reading .cele-stamp{top:64%}
+.cele-fan{position:relative;width:250px;height:170px;margin:0 auto}
+.cele-fan .cele-poster{position:absolute;width:96px;left:calc(50% - 48px + var(--o)*38px);top:calc(var(--a)*9px);
+  transform-origin:50% 130%}
+.cele.in .cele-fan .cele-poster{transform:rotate(calc(var(--o)*8deg));
+  transition-delay:calc(.1s + var(--a)*.08s)}
+.cele.goal .cele-stamp{top:60%;z-index:9}
+.cele-goalnum{font-family:var(--disp);font-size:96px;line-height:1;color:var(--amber-2);
+  text-shadow:0 0 50px rgba(240,181,68,.45);padding:10px 40px}
+.cele.goal .cele-title{font-size:30px}
 @media(max-width:700px){
   .cele-poster{width:124px}
   .cele-title{font-size:22px}
@@ -1980,7 +2040,55 @@ body.recap-open{overflow:hidden}
     animation:none!important;transform:none!important;opacity:1;filter:none}
   .cele-timer{animation-duration:4.2s}
   .cele-bulbs i{animation:none;opacity:.7}
+  /* still frames, still composed: the stamp stays centred, the goal's hand stays fanned */
+  .cele .cele-stamp{transform:translate(-50%,-50%) rotate(-11deg)!important}
+  .cele-fan .cele-poster{transform:rotate(calc(var(--o)*8deg))!important}
 }
+
+/* ── yearly reading goal ring (reading stats) ──
+   A single amber arc on a hairline track; the small ink dot marks where an even pace
+   would be today, so the ring reads as "where you are vs. the year" without a verdict. */
+.rgoal{position:relative;display:flex;align-items:center;gap:18px;width:100%;margin:6px 0 18px;
+  padding:16px 18px;border-radius:var(--r);text-align:left;overflow:hidden;
+  background:radial-gradient(120% 140% at 0 0,rgba(240,181,68,.12),transparent 55%),var(--panel);
+  border:1px solid var(--line)}
+.rgoal.met{border-color:var(--amber-dim);
+  background:radial-gradient(120% 140% at 0 0,rgba(240,181,68,.22),transparent 60%),var(--panel)}
+.rg-ring{width:104px;height:104px;flex:none;overflow:visible}
+.rg-track{fill:none;stroke:var(--line-2);stroke-width:9}
+.rgoal.empty .rg-track{stroke-width:3;stroke-linecap:round}
+.rg-arc{fill:none;stroke:var(--amber);stroke-width:9;stroke-linecap:round;
+  stroke-dashoffset:var(--off);filter:drop-shadow(0 0 6px rgba(240,181,68,.35))}
+.rgoal.reveal .rg-arc{animation:rgArc 1.1s cubic-bezier(.3,.9,.3,1) .1s both}
+@keyframes rgArc{from{stroke-dashoffset:var(--c)}}
+.rgoal.met .rg-arc{stroke:var(--amber-2)}
+.rg-pace{fill:var(--ink);stroke:var(--panel);stroke-width:2}
+.rg-n{font:800 30px var(--body);fill:var(--ink);text-anchor:middle;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.rg-of{font:650 11px var(--body);fill:var(--mut);text-anchor:middle;letter-spacing:.06em}
+.rg-txt{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.rg-k{font-size:10.5px;font-weight:750;letter-spacing:.14em;text-transform:uppercase;color:var(--amber)}
+.rg-txt b{font-size:20px;font-weight:800;color:var(--ink);letter-spacing:-.01em;line-height:1.15}
+.rgoal.met .rg-txt b{color:var(--amber-2)}
+.rg-txt i{font-style:normal;font-size:13px;color:var(--ink-2);line-height:1.35}
+.rg-meta{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums;margin-top:3px}
+.rg-edit{position:absolute;top:10px;right:10px;width:34px;height:34px;border-color:transparent}
+.rg-edit svg{width:16px;height:16px}
+.rgoal.empty{cursor:pointer;border-style:dashed;border-color:var(--line-2);transition:border-color .15s}
+.rgoal.empty:hover{border-color:var(--amber-dim)}
+.rgoal.empty .rg-ring{width:64px;height:64px}
+.rgoal.empty .rg-txt b{font-size:16.5px}
+.rg-plus{stroke:var(--amber);stroke-width:5;stroke-linecap:round}
+.rg-go{color:var(--mut)}.rg-go svg{width:18px;height:18px}
+.rg-sheet .rg-chips{display:flex;gap:8px;margin-bottom:12px}
+.rg-sheet .rg-chips .lead-chip{flex:1;font-variant-numeric:tabular-nums}
+.rg-sheet .rg-in{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--ink-2);margin-bottom:14px}
+.rg-sheet .rg-in input{padding:12px 14px;border-radius:11px;border:1px solid var(--line-2);background:var(--panel);
+  color:var(--ink);font:inherit;font-size:16px;font-variant-numeric:tabular-nums}
+.rg-sheet .btn{width:100%;display:flex;gap:7px;align-items:center}
+.rg-sheet .btn svg{width:16px;height:16px}
+.rg-sheet .btn + .btn{margin-top:6px}
+.toggle-row.rg-row .btn{flex:none;white-space:nowrap}
+@media(prefers-reduced-motion:reduce){.rgoal.reveal .rg-arc{animation:none}}
 
 /* ── IMDb ratings ──
    The chip carries IMDb's own badge plus its vote count, so a 500k-vote 9.9 reads

@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS reading_sessions(
   id INTEGER PRIMARY KEY, user_id INTEGER, kind TEXT, item_id INTEGER,
   started_at TEXT, ended_at TEXT, start_pos INTEGER, end_pos INTEGER);
 CREATE INDEX IF NOT EXISTS idx_rsessions_user ON reading_sessions(user_id, ended_at);
+CREATE TABLE IF NOT EXISTS reading_goals(
+  user_id INTEGER, year INTEGER, books INTEGER, updated_at TEXT, PRIMARY KEY(user_id, year));
 """
 
 
@@ -2972,13 +2974,129 @@ def record_milestones(con, uid, show_id, seen=False):
 def clear_milestones(con, uid, show_id, season=None):
     """Un-watching resets the achievement, so finishing it again celebrates again."""
     if season is None:
-        con.execute("DELETE FROM milestones WHERE user_id=? AND show_id=?", (uid, show_id))
+        con.execute("""DELETE FROM milestones WHERE user_id=? AND show_id=?
+            AND kind IN ('season','show')""", (uid, show_id))
     else:
         con.execute("""DELETE FROM milestones WHERE user_id=? AND show_id=?
-            AND (kind='show' OR season=?)""", (uid, show_id, season))
+            AND (kind='show' OR (kind='season' AND season=?))""", (uid, show_id, season))
+
+
+# Reading shares the table: kind 'book' / 'manga' keep the item id in show_id (season 0);
+# kind 'goal' keeps the year in show_id and the target in season, so raising the goal
+# mid-year and hitting the new number earns its own moment.
+READING_MILESTONES = ("book", "manga", "goal")
+
+
+def _live_finish(finished):
+    """A finish dated today-ish is a live one. Anything older is a backfill (the dates
+    wizard, a fixed-up shelf) and gets recorded silently — no confetti for 2019."""
+    if not finished:
+        return True
+    try:
+        return (date.today() - date.fromisoformat(finished[:10])).days <= 2
+    except ValueError:
+        return False
+
+
+def _books_finished_in(con, uid, year):
+    return con.execute("""SELECT COUNT(*) c FROM book_states WHERE user_id=?
+        AND state='finished' AND substr(finished_at,1,4)=?""", (uid, str(year))).fetchone()["c"]
+
+
+def record_goal_milestone(con, uid, seen=False):
+    """This year's goal, once the finished-books count reaches it. Fires once per target."""
+    yr = date.today().year
+    g = con.execute("SELECT books FROM reading_goals WHERE user_id=? AND year=?",
+                    (uid, yr)).fetchone()
+    if not g or not g["books"] or _books_finished_in(con, uid, yr) < g["books"]:
+        return []
+    now = datetime.now().isoformat()
+    cur = con.execute("""INSERT OR IGNORE INTO milestones(user_id,kind,show_id,season,
+        created_at,seen_at) VALUES(?,'goal',?,?,?,?)""",
+        (uid, yr, g["books"], now, now if seen else None))
+    return [cur.lastrowid] if cur.rowcount else []
+
+
+def record_reading_milestones(con, uid, kind, item_id, again=False):
+    """A book / a manga series just became finished. `again` (a real state transition)
+    replaces any earlier milestone, so a re-read gets its own moment; without it this is
+    an idempotent safety net. Manga only counts when the whole run is over and read —
+    catching up on a series that's still publishing isn't the end of it."""
+    tbl, col, items = (("book_states", "book_id", "books") if kind == "book"
+                       else ("manga_states", "manga_id", "manga"))
+    st = con.execute(f"""SELECT s.state, s.progress, s.finished_at, i.* FROM {tbl} s
+        JOIN {items} i ON i.id=s.{col} WHERE s.user_id=? AND s.{col}=?""",
+        (uid, item_id)).fetchone()
+    if not st or st["state"] != "finished":
+        return []
+    if kind == "manga" and not ((st["status"] or "").upper() == "FINISHED" and st["chapters"]
+                                and (st["progress"] or 0) >= st["chapters"]):
+        return []
+    seen = not _live_finish(st["finished_at"])
+    now = datetime.now().isoformat()
+    if again:
+        con.execute("DELETE FROM milestones WHERE user_id=? AND kind=? AND show_id=?",
+                    (uid, kind, item_id))
+    cur = con.execute("""INSERT OR IGNORE INTO milestones(user_id,kind,show_id,season,
+        created_at,seen_at) VALUES(?,?,?,0,?,?)""",
+        (uid, kind, item_id, now, now if seen else None))
+    made = [cur.lastrowid] if cur.rowcount and not seen else []
+    if kind == "book":
+        made += record_goal_milestone(con, uid, seen=seen)
+    return made
+
+
+def _reading_milestone_payload(con, m):
+    uid, yr = m["user_id"], date.today().year
+    if m["kind"] == "goal":
+        fins = con.execute("""SELECT b.cover, b.pages FROM book_states s
+            JOIN books b ON b.id=s.book_id WHERE s.user_id=? AND s.state='finished'
+            AND substr(s.finished_at,1,4)=? ORDER BY s.finished_at DESC""",
+            (uid, str(m["show_id"]))).fetchall()
+        if len(fins) < m["season"]:
+            return None
+        return {"id": m["id"], "kind": "goal", "year": m["show_id"], "goal": m["season"],
+                "count": len(fins), "pages": sum(r["pages"] or 0 for r in fins),
+                "covers": [r["cover"] for r in fins if r["cover"]][:5]}
+    book = m["kind"] == "book"
+    tbl, col, items = (("book_states", "book_id", "books") if book
+                       else ("manga_states", "manga_id", "manga"))
+    r = con.execute(f"""SELECT s.state, s.progress, s.rating AS user_rating, s.started_at,
+        s.finished_at, i.* FROM {tbl} s JOIN {items} i ON i.id=s.{col}
+        WHERE s.user_id=? AND s.{col}=?""", (uid, m["show_id"])).fetchone()
+    if not r or r["state"] != "finished":
+        return None
+    days = None
+    try:
+        if r["started_at"] and r["finished_at"]:
+            days = max(0, (date.fromisoformat(r["finished_at"][:10])
+                           - date.fromisoformat(r["started_at"][:10])).days)
+    except ValueError:
+        pass
+    mins = 0.0
+    for s in con.execute("""SELECT started_at, ended_at FROM reading_sessions WHERE user_id=?
+            AND kind=? AND item_id=? AND ended_at IS NOT NULL""", (uid, m["kind"], m["show_id"])):
+        try:
+            mins += max(0.0, (datetime.fromisoformat(s["ended_at"])
+                              - datetime.fromisoformat(s["started_at"])).total_seconds() / 60)
+        except (ValueError, TypeError):
+            pass
+    fa = r["finished_at"] or ""
+    nth = con.execute(f"""SELECT COUNT(*) c FROM {tbl} WHERE user_id=? AND state='finished'
+        AND substr(finished_at,1,4)=? AND finished_at<=?""", (uid, fa[:4], fa)).fetchone()["c"]
+    return {"id": m["id"], "kind": m["kind"], "year": int(fa[:4]) if fa[:4].isdigit() else yr,
+            "nth_this_year": max(1, nth), "days": days, "minutes": round(mins),
+            "units": (r["pages"] if book else r["chapters"]) or r["progress"] or 0,
+            "unit": "pages" if book else "chapters",
+            "volumes": None if book else r["volumes"], "rating": r["user_rating"],
+            "item": {"id": r["id"], "title": r["title"], "cover": r["cover"],
+                     "author": r["author"] if book else None,
+                     "origin": None if book else r["origin"]}}
 
 
 def _milestone_payload(con, m):
+    if m["kind"] in READING_MILESTONES:
+        return _reading_milestone_payload(con, m)
     s = con.execute("SELECT * FROM shows WHERE id=?", (m["show_id"],)).fetchone()
     if not s:
         return None
@@ -3017,7 +3135,17 @@ def pending_celebrations(con, uid, ids=None, limit=3):
         marks = ",".join("?" * len(ids))
         q = f"SELECT * FROM milestones WHERE user_id=? AND id IN ({marks}) ORDER BY id"
         args = (uid, *ids)
-    return [p for p in (_milestone_payload(con, m) for m in con.execute(q, args)) if p]
+    out = []
+    for m in con.execute(q, args).fetchall():
+        p = _milestone_payload(con, m)
+        if p:
+            out.append(p)
+        elif m["kind"] in READING_MILESTONES:
+            # un-finished (or removed) before the app got to show it — retire it so a
+            # stale row can't sit at the head of the queue
+            con.execute("UPDATE milestones SET seen_at=? WHERE id=?",
+                        (datetime.now().isoformat(), m["id"]))
+    return out
 
 
 @app.get("/api/celebrations")
@@ -3942,6 +4070,7 @@ READING_STATES = ("want", "reading", "finished", "paused", "dnf")
 
 
 def _update_reading_state(kind, item_id, body, uid):
+    """Apply a shelf edit. Returns any celebrations it earned (a finish, the yearly goal)."""
     tbl, col = ("book_states", "book_id") if kind == "book" else ("manga_states", "manga_id")
     now = datetime.now().isoformat()
     with db() as con:
@@ -3950,7 +4079,9 @@ def _update_reading_state(kind, item_id, body, uid):
             # a session left running on a title you've removed would stay "live" forever
             con.execute("""DELETE FROM reading_sessions WHERE user_id=? AND kind=? AND item_id=?
                 AND ended_at IS NULL""", (uid, kind, item_id))
-            return
+            con.execute("DELETE FROM milestones WHERE user_id=? AND kind=? AND show_id=?",
+                        (uid, kind, item_id))
+            return []
         cur = con.execute(f"SELECT * FROM {tbl} WHERE user_id=? AND {col}=?",
                           (uid, item_id)).fetchone()
         if not cur:
@@ -3982,18 +4113,23 @@ def _update_reading_state(kind, item_id, body, uid):
             con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,
                 ended_at,start_pos,end_pos) VALUES(?,?,?,?,?,?,?)""",
                 (uid, kind, item_id, now, now, cur["progress"] or 0, progress or 0))
+        # just finished → the moment (a backdated finish is recorded silently)
+        made = []
+        if state == "finished" and cur["state"] != "finished":
+            made = record_reading_milestones(con, uid, kind, item_id, again=True)
+        elif kind == "manga" and state == "finished" and (progress or 0) != (cur["progress"] or 0):
+            made = record_reading_milestones(con, uid, kind, item_id)   # caught the last chapter
+        return pending_celebrations(con, uid, made) if made else []
 
 
 @app.post("/api/book/{book_id}/state")
 async def book_state(book_id: int, request: Request, user=Depends(current_user)):
-    _update_reading_state("book", book_id, await request.json(), user["id"])
-    return {"ok": True}
+    return {"ok": True, "celebrate": _update_reading_state("book", book_id, await request.json(), user["id"])}
 
 
 @app.post("/api/manga/{manga_id}/state")
 async def manga_state(manga_id: int, request: Request, user=Depends(current_user)):
-    _update_reading_state("manga", manga_id, await request.json(), user["id"])
-    return {"ok": True}
+    return {"ok": True, "celebrate": _update_reading_state("manga", manga_id, await request.json(), user["id"])}
 
 
 # --- full detail pages (shelf items AND search-result previews) -------------------
@@ -4521,7 +4657,11 @@ async def session_end(kind: str, item_id: int, request: Request, user=Depends(cu
         # bump shelf progress directly (the session row IS the history entry)
         con.execute(f"""UPDATE {tbl} SET progress=?, updated_at=? WHERE user_id=? AND {col}=?
             AND (progress IS NULL OR progress<?)""", (pos, now, uid, item_id, pos))
-    return {"ok": True, "pos": pos}
+        # a session on something already marked finished can complete it (a manga series
+        # read through to its final chapter) — idempotent, so nothing fires twice
+        made = record_reading_milestones(con, uid, kind, item_id)
+        return {"ok": True, "pos": pos,
+                "celebrate": pending_celebrations(con, uid, made) if made else []}
 
 
 @app.get("/api/reading/active")
@@ -4706,10 +4846,71 @@ def compute_reading_stats(uid, kinds=("book", "manga")):
             "rating_hist": rating_hist,
         }
 
+    with db() as con:
+        goal = reading_goal(con, uid) if "book" in kinds else None
     return {"books": crunch("book", "book_states", "books", "book_id", "pages")
             if "book" in kinds else None,
             "manga": crunch("manga", "manga_states", "manga", "manga_id", "chapters")
-            if "manga" in kinds else None}
+            if "manga" in kinds else None,
+            "goal": goal}
+
+
+# --- yearly reading goal (opt-in: books per year) ----------------------------------
+
+def reading_goal(con, uid, year=None):
+    """Goal + progress for a year. `expected` is where an even pace would be today; the
+    status is only ever encouraging — 'building' is the gentlest word for not-there-yet."""
+    t = date.today()
+    yr = year or t.year
+    done = _books_finished_in(con, uid, yr)
+    g = con.execute("SELECT books FROM reading_goals WHERE user_id=? AND year=?",
+                    (uid, yr)).fetchone()
+    target = g["books"] if g and g["books"] else None
+    if not target:
+        return {"year": yr, "target": None, "done": done}
+    span = (date(yr + 1, 1, 1) - date(yr, 1, 1)).days
+    elapsed = span if yr < t.year else 0 if yr > t.year else (t - date(yr, 1, 1)).days + 1
+    expected = target * elapsed / span
+    left = max(0, target - done)
+    days_left = max(1, span - elapsed)
+    status = ("reached" if done >= target else "ahead" if done >= expected + 1
+              else "on_pace" if done >= int(expected) else "building")
+    return {"year": yr, "target": target, "done": done, "left": left,
+            "expected": round(expected, 1), "status": status,
+            "per_month": round(left / (days_left / 30.44), 1) if left and yr == t.year else None}
+
+
+@app.get("/api/reading/goal")
+def get_reading_goal(user=Depends(current_user)):
+    with db() as con:
+        return reading_goal(con, user["id"])
+
+
+@app.post("/api/reading/goal")
+async def set_reading_goal(request: Request, user=Depends(current_user)):
+    """{"books": n} sets this year's goal; 0 / null clears it."""
+    body = await request.json()
+    raw = body.get("books")
+    if raw in (None, "", 0, "0"):
+        n = None
+    else:
+        try:
+            n = int(raw)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "books must be a whole number")
+        if not 1 <= n <= 1000:
+            raise HTTPException(400, "pick a goal between 1 and 1000 books")
+    uid, yr = user["id"], date.today().year
+    with db() as con:
+        if n is None:
+            con.execute("DELETE FROM reading_goals WHERE user_id=? AND year=?", (uid, yr))
+        else:
+            con.execute("""INSERT INTO reading_goals(user_id,year,books,updated_at) VALUES(?,?,?,?)
+                ON CONFLICT(user_id,year) DO UPDATE SET books=excluded.books,
+                  updated_at=excluded.updated_at""", (uid, yr, n, datetime.now().isoformat()))
+            # a goal you've already passed isn't news — mark it met without the fanfare
+            record_goal_milestone(con, uid, seen=True)
+        return reading_goal(con, uid)
 
 
 # ---------------------------------------------------------------- search + add
@@ -5172,6 +5373,107 @@ def stats_advanced_public(username: str, user=Depends(current_user)):
 
 # ------------------------------------------------- year in review (shareable recap)
 
+def _reading_kinds(con, uid):
+    """Which reading shelves this member has switched on — their flags, not the viewer's."""
+    u = con.execute("SELECT features FROM users WHERE id=?", (uid,)).fetchone()
+    try:
+        f = json.loads(u["features"]) if u and u["features"] else {}
+    except (ValueError, TypeError):
+        f = {}
+    return [k for k, flag in (("book", "books"), ("manga", "manga")) if f.get(flag)]
+
+
+def recap_reading(con, uid, year):
+    """The reading half of a recap, or None when it's off (or there's nothing to tell).
+    Pages come from the session log; a finish with no sessions at all (imports, the
+    dates wizard) counts its whole length in the month it was finished."""
+    kinds = _reading_kinds(con, uid)
+    if not kinds:
+        return None
+    y = str(year)
+    lo, hi = f"{y}-01-01", f"{y}-12-31T23:59:59.999999"
+    mo_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    out = {"books": None, "manga": None, "pages": None, "chapters": None}
+    fins_all, minutes, units_by_kind = [], 0.0, {}
+    for kind in kinds:
+        book = kind == "book"
+        tbl, col, items = (("book_states", "book_id", "books") if book
+                           else ("manga_states", "manga_id", "manga"))
+        extra = "i.author, i.pages AS total" if book else "NULL AS author, i.chapters AS total"
+        fins = [dict(r, kind=kind) for r in con.execute(f"""SELECT s.rating AS user_rating,
+              s.started_at, s.finished_at, i.id, i.title, i.cover, {extra}
+            FROM {tbl} s JOIN {items} i ON i.id=s.{col}
+            WHERE s.user_id=? AND s.state='finished' AND s.finished_at>=? AND s.finished_at<=?
+            ORDER BY s.finished_at""", (uid, lo, hi))]
+        months = [0] * 12
+        for s in con.execute("""SELECT started_at, ended_at, start_pos, end_pos FROM reading_sessions
+                WHERE user_id=? AND kind=? AND ended_at IS NOT NULL
+                AND started_at>=? AND started_at<=?""", (uid, kind, lo, hi)):
+            if (s["started_at"] or "")[5:7].isdigit():
+                months[int(s["started_at"][5:7]) - 1] += max(0, (s["end_pos"] or 0) - (s["start_pos"] or 0))
+            try:
+                minutes += max(0.0, (datetime.fromisoformat(s["ended_at"])
+                                     - datetime.fromisoformat(s["started_at"])).total_seconds() / 60)
+            except (ValueError, TypeError):
+                pass
+        logged = {r["item_id"] for r in con.execute(
+            "SELECT DISTINCT item_id FROM reading_sessions WHERE user_id=? AND kind=?", (uid, kind))}
+        for r in fins:
+            if r["id"] not in logged and r["total"] and r["finished_at"][5:7].isdigit():
+                months[int(r["finished_at"][5:7]) - 1] += r["total"]
+        out["books" if book else "manga"] = len(fins)
+        out["pages" if book else "chapters"] = sum(months)
+        units_by_kind[kind] = months
+        fins_all += fins
+    if not fins_all and not any(sum(v) for v in units_by_kind.values()):
+        return None
+    books = [r for r in fins_all if r["kind"] == "book"]
+    authors = {}
+    for r in books:
+        if r["author"]:
+            a = authors.setdefault(r["author"], {"name": r["author"], "count": 0, "pages": 0})
+            a["count"] += 1
+            a["pages"] += r["total"] or 0
+    top_author = max(authors.values(), key=lambda a: (a["count"], a["pages"]), default=None)
+    longest = max((r for r in books if r["total"]), key=lambda r: r["total"], default=None)
+    fastest = None
+    for r in books or fins_all:
+        try:
+            d = (date.fromisoformat(r["finished_at"][:10]) - date.fromisoformat(r["started_at"][:10])).days
+        except (ValueError, TypeError):
+            continue
+        if d >= 0 and (not fastest or d < fastest["days"]):
+            fastest = {"title": r["title"], "cover": r["cover"], "kind": r["kind"],
+                       "days": d, "units": r["total"]}
+    rated = [r for r in fins_all if r["user_rating"]]
+    fav = max(rated, key=lambda r: (r["user_rating"], r["finished_at"]), default=None)
+    # the busiest month is told in whichever unit leads: pages if there are any, else chapters
+    unit_kind = next((k for k in ("book", "manga") if sum(units_by_kind.get(k) or [0])), None)
+    months = units_by_kind.get(unit_kind) or [0] * 12
+    busiest = max(range(12), key=lambda i: months[i]) if any(months) else None
+
+    def pick(r, **extra):
+        return {"title": r["title"], "cover": r["cover"], "kind": r["kind"], "id": r["id"],
+                "author": r["author"], **extra} if r else None
+
+    goal = reading_goal(con, uid, year) if "book" in kinds else None
+    out.update({
+        "minutes": round(minutes),
+        "covers": [{"title": r["title"], "cover": r["cover"], "kind": r["kind"]}
+                   for r in reversed(fins_all) if r["cover"]][:9],
+        "top_author": {k: top_author[k] for k in ("name", "count", "pages")}
+                      if top_author and top_author["count"] > 1 else None,
+        "longest": pick(longest, pages=longest["total"]) if longest else None,
+        "fastest": fastest,
+        "favourite": pick(fav, rating=fav["user_rating"]) if fav else None,
+        "months": months, "unit": "pages" if unit_kind == "book" else "chapters",
+        "busiest_month": mo_names[busiest] if busiest is not None else None,
+        "busiest_month_units": months[busiest] if busiest is not None else 0,
+        "goal": goal if goal and goal.get("target") else None,
+    })
+    return out
+
+
 def compute_recap(con, uid, year):
     y = str(year)
     lo, hi = f"{y}-01-01", f"{y}-12-31T23:59:59.999999"
@@ -5220,9 +5522,11 @@ def compute_recap(con, uid, year):
     mo_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     busiest = max(range(12), key=lambda i: months[i]) if any(months) else None
     genres = sorted(({"name": k, "count": v} for k, v in gcount.items()), key=lambda x: -x["count"])[:5]
+    reading = recap_reading(con, uid, year)
     return {
         "year": year,
-        "has_data": (eps["c"] + mov["c"]) > 0,
+        "has_data": (eps["c"] + mov["c"]) > 0 or bool(reading),
+        "reading": reading,
         "episodes": eps["c"], "movies": mov["c"],
         "minutes": eps["m"] + mov["m"], "tv_minutes": eps["m"], "movie_minutes": mov["m"],
         "top_shows": [dict(r) for r in top_shows],
@@ -5253,6 +5557,12 @@ def available_recap_years(con, uid):
                              f"WHERE user_id=? AND watched_at IS NOT NULL{cond}", (uid,)):
             if r["y"] and r["y"].isdigit():
                 years.add(int(r["y"]))
+    for kind in _reading_kinds(con, uid):      # a year spent reading counts too
+        tbl = "book_states" if kind == "book" else "manga_states"
+        rows = con.execute(f"""SELECT substr(finished_at,1,4) y FROM {tbl}
+            WHERE user_id=? AND state='finished' UNION SELECT substr(started_at,1,4) FROM
+            reading_sessions WHERE user_id=? AND kind=?""", (uid, uid, kind)).fetchall()
+        years.update(int(r["y"]) for r in rows if r["y"] and r["y"].isdigit())
     return sorted((y for y in years if recap_year_unlocked(y)), reverse=True)
 
 
@@ -5595,6 +5905,8 @@ def _import_goodreads(uid, raw):
                       updated_at=excluded.updated_at""",
                     (uid, bid, state, item.get("pages") if state == "finished" else 0,
                      gr_rating, None, date_read if state == "finished" else None, now))
+        with db() as con:     # an import that crosses the goal marks it met, quietly
+            record_goal_milestone(con, uid, seen=True)
         st["state"] = "done"
     except Exception as e:  # noqa: BLE001
         st["state"] = "failed"
