@@ -839,6 +839,8 @@ a.wn-prov:hover .wn-name{color:var(--amber-2)}
 .rdt-ser i{font-style:normal;color:var(--mut);font-variant-numeric:tabular-nums}
 .rdt-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .rdt-body{padding-top:20px;max-width:760px}
+/* favorite / list / share — one quiet row above the shelf controls */
+.rdt-acts{margin:0 0 14px}
 .rdt-bar{height:7px;border-radius:99px;background:var(--panel-2);overflow:hidden;margin:2px 0 10px}
 .rdt-bar i{display:block;height:100%;background:var(--amber);border-radius:99px;
   transition:width .3s cubic-bezier(.2,.9,.3,1)}
@@ -1558,6 +1560,10 @@ a.h-row:hover{border-color:var(--line-2)}
 .headrow .hp{background:var(--panel);padding:13px 6px}
 .hp-v{font-weight:800;font-size:20px;color:var(--amber);font-variant-numeric:tabular-nums;line-height:1.1}
 .hp-l{color:var(--mut);font-size:10px;letter-spacing:.13em;text-transform:uppercase;margin-top:4px;font-weight:700}
+/* the reading band: a quieter second row so watch + read read as one identity */
+.headrow .hp-rd{background:var(--panel-2);padding:10px 6px 11px}
+.headrow .hp-rd.wide{grid-column:span 2}
+.hp-rd .hp-v{font-size:17px;color:var(--amber-2)}
 
 /* favorites shelf */
 .fav-shelf{margin-bottom:22px}

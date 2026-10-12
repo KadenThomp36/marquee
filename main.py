@@ -1162,7 +1162,7 @@ def me(user=Depends(current_user)):
     return {**user_public(u), "is_admin": bool(user["is_admin"])}
 
 
-def headline_counts(con, uid):
+def headline_counts(con, uid, feats=None):
     """Cheap identity numbers for the profile hero (no full stats needed)."""
     eps = con.execute("SELECT COUNT(*) c FROM watches WHERE user_id=?", (uid,)).fetchone()["c"]
     shows = con.execute("SELECT COUNT(*) c FROM follows WHERE user_id=?", (uid,)).fetchone()["c"]
@@ -1175,12 +1175,53 @@ def headline_counts(con, uid):
     mvm = con.execute("""SELECT COALESCE(SUM(COALESCE(m.runtime,110)),0) m FROM movie_states ms
         JOIN movies m ON m.id=ms.movie_id WHERE ms.user_id=? AND ms.state='watched'""",
         (uid,)).fetchone()["m"]
-    return {"episodes": eps, "shows": shows, "movies": movs, "hours": round((tvm + mvm) / 60)}
+    out = {"episodes": eps, "shows": shows, "movies": movs, "hours": round((tvm + mvm) / 60)}
+    # reading joins the hero only for members who switched it on — a household of
+    # watchers shouldn't see a row of zeros for a feature they never use
+    for kind, unit in (("book", "pages"), ("manga", "chapters")):
+        if not (feats or {}).get(READ_FEATURE[kind]):
+            continue
+        r = con.execute(f"""SELECT COALESCE(SUM(s.state='finished'),0) fin,
+                COALESCE(SUM(CASE WHEN s.state='finished'
+                                  THEN MAX(COALESCE(s.progress,0), COALESCE(i.{unit},0))
+                                  WHEN s.state='reading' THEN COALESCE(s.progress,0) END),0) units
+            FROM {kind}_states s JOIN {READ_TABLES[kind]} i ON i.id=s.{kind}_id
+            WHERE s.user_id=?""", (uid,)).fetchone()
+        out[READ_FEATURE[kind]], out[unit] = r["fin"], r["units"]
+    return out
+
+
+def user_feats(u):
+    """A member's opt-in feature flags (reading: {"books": 1, "manga": 1})."""
+    return user_public(u)["features"]
+
+
+# the reading catalogs — favorites, lists and the profile rails resolve book/manga
+# item_types against these (their art lives in `cover`, not `poster`)
+READ_TABLES = {"book": "books", "manga": "manga"}
+READ_FEATURE = {"book": "books", "manga": "manga"}
+
+
+def ensure_read_item(con, item_type, item_id):
+    """Make sure a book/manga row exists before something points at it. Books only
+    come into the catalog through /api/books/add (a Hardcover match), so an unknown
+    id is a 404; manga ids are AniList ids, so a preview can be pulled in on demand."""
+    if item_type not in READ_TABLES:
+        return
+    if con.execute(f"SELECT 1 FROM {READ_TABLES[item_type]} WHERE id=?", (item_id,)).fetchone():
+        return
+    if item_type == "book" or not upsert_manga(con, item_id):
+        raise HTTPException(404, f"unknown {item_type}")
 
 
 def fav_row(con, r):
-    tbl = "shows" if r["item_type"] == "show" else "movies"
-    s = con.execute(f"SELECT id,title,poster,year FROM {tbl} WHERE id=?", (r["item_id"],)).fetchone()
+    t = r["item_type"]
+    if t in READ_TABLES:
+        s = con.execute(f"SELECT id,title,cover AS poster,year FROM {READ_TABLES[t]} WHERE id=?",
+                        (r["item_id"],)).fetchone()
+    else:
+        tbl = "shows" if t == "show" else "movies"
+        s = con.execute(f"SELECT id,title,poster,year FROM {tbl} WHERE id=?", (r["item_id"],)).fetchone()
     if not s:
         return None
     return {"type": r["item_type"], "id": s["id"], "title": s["title"],
@@ -1206,7 +1247,7 @@ def profile_payload(con, u, viewer_id):
     return {**user_public(u), "is_admin": bool(u["is_admin"]),
             "member_since": (u["created_at"] if "created_at" in u.keys() else None),
             "is_me": is_me,
-            "headline": headline_counts(con, u["id"]),
+            "headline": headline_counts(con, u["id"], user_feats(u)),
             "favorites": get_favorites(con, u["id"]),
             "recap_years": available_recap_years(con, u["id"]),
             "recap_soon": recap_soon, "recap_year": cy}
@@ -1248,14 +1289,34 @@ def watched_grid(username: str, kind: str, limit: int = 24, offset: int = 0,
                  user=Depends(current_user)):
     """What someone has actually watched, newest first — shows and films kept apart.
     Feeds both the profile rails and the full grid behind "Show all"."""
-    if kind not in ("shows", "movies"):
-        raise HTTPException(400, "kind must be shows or movies")
+    if kind not in ("shows", "movies", "books", "manga"):
+        raise HTTPException(400, "kind must be shows, movies, books or manga")
     limit = max(1, min(limit, 120))
+    offset = max(0, offset)
     with db() as con:
         u = con.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone() \
             if username in ("me", "") else resolve_member(con, username)
         uid = u["id"]
-        if kind == "movies":
+        if kind in ("books", "manga"):
+            # finished reads, newest first — only for members who keep a reading shelf
+            ik = "book" if kind == "books" else "manga"
+            if not user_feats(u).get(kind):
+                total, rows = 0, []
+            else:
+                extra = "i.author, i.pages AS total" if ik == "book" else "i.origin, i.chapters AS total"
+                total = con.execute(f"""SELECT COUNT(*) c FROM {ik}_states
+                    WHERE user_id=? AND state='finished'""", (uid,)).fetchone()["c"]
+                rows = con.execute(f"""SELECT i.id, i.title, i.cover, i.year, {extra},
+                        s.rating AS user_rating, s.finished_at
+                    FROM {ik}_states s JOIN {kind} i ON i.id=s.{ik}_id
+                    WHERE s.user_id=? AND s.state='finished'
+                    ORDER BY COALESCE(s.finished_at,'') DESC, i.title LIMIT ? OFFSET ?""",
+                    (uid, limit, offset)).fetchall()
+            items = [{"type": ik, "id": r["id"], "title": r["title"], "poster": r["cover"],
+                      "year": r["year"], "rating": r["user_rating"], "total": r["total"],
+                      "by": r["author"] if ik == "book" else r["origin"],
+                      "watched_at": r["finished_at"]} for r in rows]
+        elif kind == "movies":
             total = con.execute("""SELECT COUNT(*) c FROM movie_states
                 WHERE user_id=? AND state='watched'""", (uid,)).fetchone()["c"]
             rows = con.execute("""SELECT m.id, m.title, m.poster, m.year, ms.rating, ms.watched_at
@@ -1296,10 +1357,11 @@ def favorites_list(user=Depends(current_user)):
 async def favorites_add(request: Request, user=Depends(current_user)):
     body = await request.json()
     it = body.get("item_type")
-    if it not in ("show", "movie"):
-        raise HTTPException(400, "item_type must be show or movie")
+    if it not in ("show", "movie", "book", "manga"):
+        raise HTTPException(400, "item_type must be show, movie, book or manga")
     iid = int_or_400(body.get("item_id"), "item_id")
     with db() as con:
+        ensure_read_item(con, it, iid)
         if it == "show" and not con.execute("SELECT 1 FROM shows WHERE id=?", (iid,)).fetchone():
             if not upsert_show(con, iid, fetch_episodes=False):
                 raise HTTPException(404, "not found on TMDB")
@@ -1453,6 +1515,8 @@ def serve_banner(fn: str):
 def list_item_row(con, it, uid=None):
     """One list item. When uid is given, include the viewer's watch progress + dates so
     the list can show progress bars, an 'ended' badge, and offer watch-based sorting."""
+    if it["item_type"] in READ_TABLES:
+        return list_read_row(con, it, uid)
     if it["item_type"] == "show":
         s = con.execute("SELECT id,title,poster,year,status FROM shows WHERE id=?", (it["item_id"],)).fetchone()
         if not s:
@@ -1482,6 +1546,32 @@ def list_item_row(con, it, uid=None):
         row.update({"total": 1, "watched": 1 if seen else 0,
                     "first_watched": st["watched_at"] if seen else None,
                     "last_watched": st["watched_at"] if seen else None})
+    return row
+
+
+def list_read_row(con, it, uid=None):
+    """A book / manga on a list. Progress speaks the same fields as a show (total /
+    watched / first / last) so the list's sorts and bars work unchanged; `state` and
+    `unit` let the card say "Reading" / "Finished" in reading terms."""
+    kind = it["item_type"]
+    unit = "pages" if kind == "book" else "chapters"
+    s = con.execute(f"SELECT id,title,cover,year,{unit} AS total FROM {READ_TABLES[kind]} WHERE id=?",
+                    (it["item_id"],)).fetchone()
+    if not s:
+        return None
+    row = {"type": kind, "id": s["id"], "title": s["title"], "poster": s["cover"],
+           "year": s["year"], "added_at": it["added_at"], "unit": unit}
+    if uid is not None:
+        st = con.execute(f"""SELECT state, progress, started_at, finished_at, updated_at
+            FROM {kind}_states WHERE user_id=? AND {kind}_id=?""", (uid, s["id"])).fetchone()
+        state = st["state"] if st else None
+        total = s["total"] or 0
+        done = state == "finished"
+        row.update({"state": state, "total": total,
+                    "watched": (total or 1) if done else ((st["progress"] or 0) if st else 0),
+                    "first_watched": st["started_at"] if st else None,
+                    "last_watched": (st["finished_at"] if done else
+                                     st["updated_at"] if state == "reading" else None) if st else None})
     return row
 
 
@@ -1529,8 +1619,12 @@ def list_card(con, r):
         WHERE list_id=? ORDER BY added_at DESC LIMIT 4""", (r["id"],)).fetchall()
     posters = []
     for c in covers:
-        tbl = "shows" if c["item_type"] == "show" else "movies"
-        p = con.execute(f"SELECT poster FROM {tbl} WHERE id=?", (c["item_id"],)).fetchone()
+        if c["item_type"] in READ_TABLES:
+            p = con.execute(f"SELECT cover AS poster FROM {READ_TABLES[c['item_type']]} WHERE id=?",
+                            (c["item_id"],)).fetchone()
+        else:
+            tbl = "shows" if c["item_type"] == "show" else "movies"
+            p = con.execute(f"SELECT poster FROM {tbl} WHERE id=?", (c["item_id"],)).fetchone()
         if p and p["poster"]:
             posters.append(p["poster"])
     return {"id": r["id"], "name": r["name"], "is_default": bool(r["is_default"]),
@@ -1701,7 +1795,9 @@ def get_list(list_id: int, user=Depends(current_user)):
 @app.post("/api/list/{list_id}/item")
 async def list_item_toggle(list_id: int, request: Request, user=Depends(current_user)):
     body = await request.json()
-    it_type, it_id = body["item_type"], int(body["item_id"])
+    it_type, it_id = body.get("item_type"), int_or_400(body.get("item_id"), "item_id")
+    if it_type not in ("show", "movie", "book", "manga"):
+        raise HTTPException(400, "item_type must be show, movie, book or manga")
     with db() as con:
         l = con.execute("SELECT user_id, visibility FROM lists WHERE id=?", (list_id,)).fetchone()
         if not l:
@@ -1714,6 +1810,7 @@ async def list_item_toggle(list_id: int, request: Request, user=Depends(current_
             con.execute("DELETE FROM list_items WHERE list_id=? AND item_type=? AND item_id=?",
                         (list_id, it_type, it_id))
         else:
+            ensure_read_item(con, it_type, it_id)
             if it_type == "show" and not con.execute("SELECT 1 FROM shows WHERE id=?", (it_id,)).fetchone():
                 upsert_show(con, it_id)
             elif it_type == "movie" and not con.execute("SELECT 1 FROM movies WHERE id=?", (it_id,)).fetchone():
@@ -2046,11 +2143,14 @@ def notify_new_review(item_type, item_id, actor):
             rows = con.execute("SELECT DISTINCT user_id FROM watches WHERE show_id=? AND season=? AND number=?",
                                (sh, se, nu)).fetchall()
         elif item_type in ("book", "manga"):
-            rows = con.execute(f"SELECT DISTINCT user_id FROM {item_type}_states WHERE {item_type}_id=?",
-                               (item_id,)).fetchall()
+            # people who've actually opened it — a "want to read" shelf spot is a
+            # wish, and a review would spoil the thing they haven't started
+            rows = con.execute(f"""SELECT DISTINCT user_id FROM {item_type}_states
+                WHERE {item_type}_id=? AND state IN ('reading','finished')""", (item_id,)).fetchall()
         else:
             rows = con.execute("SELECT DISTINCT user_id FROM watches WHERE show_id=?", (item_id,)).fetchall()
-        link, title = review_link(item_type, item_id), f"{_actor_name(actor)} reviewed something you watched"
+        verb = "read" if item_type in ("book", "manga") else "watched"
+        link, title = review_link(item_type, item_id), f"{_actor_name(actor)} reviewed something you {verb}"
         for r in rows:
             if r["user_id"] != actor["id"]:
                 push_notif(con, r["user_id"], "comment", title, "", link)
@@ -2610,12 +2710,16 @@ def dashboard(user=Depends(current_user)):
           FROM watches w JOIN users u ON u.id=w.user_id JOIN shows s ON s.id=w.show_id
           LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
           WHERE w.user_id<>? ORDER BY w.watched_at DESC LIMIT 40""", (uid,)).fetchall()
-        # recent shared reviews across the household
-        reviews = con.execute("""
+        # recent shared reviews across the household — reading is opt-in, so book /
+        # manga reviews only reach members who switched that shelf on
+        feats = user_feats(user)
+        hidden = [t for t, f in READ_FEATURE.items() if not feats.get(f)] or [""]
+        reviews = con.execute(f"""
           SELECT r.item_type, r.item_id, r.rating, r.body, r.updated_at,
                  u.username, u.display_name, u.avatar
           FROM reviews r JOIN users u ON u.id=r.user_id
-          ORDER BY r.updated_at DESC LIMIT 8""").fetchall()
+          WHERE r.item_type NOT IN ({",".join("?" * len(hidden))})
+          ORDER BY r.updated_at DESC LIMIT 8""", hidden).fetchall()
 
     def collapse(rows):
         out, seen = [], {}
@@ -3699,28 +3803,37 @@ def manga_search(q: str, user=Depends(current_user)):
     return {"results": rows[:20]}
 
 
+def upsert_manga(con, mid):
+    """Pull one AniList manga into the shared catalog (or refresh it). Returns the
+    al_media_row, or None when AniList doesn't know the id."""
+    d = anilist("query($id:Int){Media(id:$id,type:MANGA){" + AL_MEDIA_FIELDS + "}}", {"id": mid})
+    m = (d or {}).get("Media")
+    if not m:
+        return None
+    row = al_media_row(m)
+    con.execute("""INSERT INTO manga(id,title,cover,chapters,volumes,status,origin,year,details)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,
+          cover=excluded.cover, chapters=excluded.chapters, volumes=excluded.volumes,
+          status=excluded.status, origin=excluded.origin, year=excluded.year,
+          details=excluded.details""",
+        (row["id"], row["title"], row["cover"], row["chapters"], row["volumes"],
+         row["status"], row["origin"], row["year"],
+         json.dumps({"genres": row["genres"], "score": row["score"], "desc": row["desc"]})))
+    return row
+
+
 @app.post("/api/manga/add")
 async def manga_add(request: Request, user=Depends(current_user)):
     body = await request.json()
     mid = int(body.get("id") or 0)
     if not mid:
         raise HTTPException(400, "missing id")
-    d = anilist("query($id:Int){Media(id:$id,type:MANGA){" + AL_MEDIA_FIELDS + "}}", {"id": mid})
-    m = (d or {}).get("Media")
-    if not m:
-        raise HTTPException(404, "not found on AniList")
-    row = al_media_row(m)
     state = body.get("state") or "want"
     now = datetime.now().isoformat()
     with db() as con:
-        con.execute("""INSERT INTO manga(id,title,cover,chapters,volumes,status,origin,year,details)
-            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,
-              cover=excluded.cover, chapters=excluded.chapters, volumes=excluded.volumes,
-              status=excluded.status, origin=excluded.origin, year=excluded.year,
-              details=excluded.details""",
-            (row["id"], row["title"], row["cover"], row["chapters"], row["volumes"],
-             row["status"], row["origin"], row["year"],
-             json.dumps({"genres": row["genres"], "score": row["score"], "desc": row["desc"]})))
+        row = upsert_manga(con, mid)
+        if not row:
+            raise HTTPException(404, "not found on AniList")
         prog = (row["chapters"] or 0) if state == "finished" else 0
         con.execute("""INSERT INTO manga_states(user_id,manga_id,state,progress,updated_at,started_at)
             VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,manga_id) DO UPDATE SET
@@ -4232,9 +4345,26 @@ def reading_active(user=Depends(current_user)):
 
 @app.get("/api/reading/stats")
 def reading_stats(user=Depends(current_user)):
+    return compute_reading_stats(user["id"])
+
+
+@app.get("/api/profile/{username}/reading/stats")
+def reading_stats_public(username: str, user=Depends(current_user)):
+    """A member's reading numbers for their profile — same audience as their watch
+    stats, but only the shelves they keep (404 when they don't read in Marquee)."""
+    with db() as con:
+        u = resolve_member(con, username)
+    feats = user_feats(u)
+    kinds = [k for k, f in READ_FEATURE.items() if feats.get(f)]
+    if not kinds:
+        raise HTTPException(404, "no reading shelf")
+    return compute_reading_stats(u["id"], kinds)
+
+
+def compute_reading_stats(uid, kinds=("book", "manga")):
     """The in-depth numbers: totals / paces / streaks / clocks across timeframes,
-    from the session log (timed sessions + zero-duration checkpoints)."""
-    uid = user["id"]
+    from the session log (timed sessions + zero-duration checkpoints). Kinds left
+    out of `kinds` come back as None."""
     t = date.today()
 
     def mins(a, b):
@@ -4372,8 +4502,10 @@ def reading_stats(user=Depends(current_user)):
             "rating_hist": rating_hist,
         }
 
-    return {"books": crunch("book", "book_states", "books", "book_id", "pages"),
-            "manga": crunch("manga", "manga_states", "manga", "manga_id", "chapters")}
+    return {"books": crunch("book", "book_states", "books", "book_id", "pages")
+            if "book" in kinds else None,
+            "manga": crunch("manga", "manga_states", "manga", "manga_id", "chapters")
+            if "manga" in kinds else None}
 
 
 # ---------------------------------------------------------------- search + add
@@ -4968,6 +5100,62 @@ def recap_public(username: str, year: int, user=Depends(current_user)):
 
 # ---------------------------------------------------------------- history
 
+READ_HISTORY_PAGE = 300
+
+
+def reading_history(con, user, cursor=""):
+    """The Reading tab of History: the session log (timed sessions + progress
+    checkpoints) folded into one row per book per day — earliest start position →
+    latest end position, minutes summed. Cursor is "started_at|session id", so a
+    burst of checkpoints stamped in the same instant can't straddle a page edge;
+    a day+item split across pages comes back as two groups the client merges."""
+    feats = user_feats(user)
+    kinds = [k for k, f in READ_FEATURE.items() if feats.get(f)]
+    if not kinds:
+        return {"items": [], "cursor": None}
+    q = f"""SELECT rs.id, rs.kind, rs.item_id, rs.started_at, rs.ended_at, rs.start_pos, rs.end_pos,
+              COALESCE(b.title, m.title) AS title, COALESCE(b.cover, m.cover) AS cover,
+              b.author, COALESCE(b.pages, m.chapters) AS total
+            FROM reading_sessions rs
+            LEFT JOIN books b ON rs.kind='book' AND b.id=rs.item_id
+            LEFT JOIN manga m ON rs.kind='manga' AND m.id=rs.item_id
+            WHERE rs.user_id=? AND rs.ended_at IS NOT NULL
+              AND rs.kind IN ({",".join("?" * len(kinds))})
+              AND COALESCE(b.id, m.id) IS NOT NULL"""
+    params = [user["id"], *kinds]
+    at, _, sid = cursor.partition("|")
+    if sid.isdigit():
+        q += " AND (rs.started_at, rs.id) < (?, ?)"
+        params += [at, int(sid)]
+    elif at:
+        q += " AND rs.started_at < ?"
+        params.append(at)
+    q += f" ORDER BY rs.started_at DESC, rs.id DESC LIMIT {READ_HISTORY_PAGE}"
+    rows = con.execute(q, params).fetchall()
+    groups, order = {}, []
+    for r in rows:                 # newest first: the first row seen holds the day's end
+        day = r["started_at"][:10]
+        key = (day, r["kind"], r["item_id"])
+        try:
+            mins = max(0.0, (datetime.fromisoformat(r["ended_at"])
+                             - datetime.fromisoformat(r["started_at"])).total_seconds() / 60)
+        except (ValueError, TypeError):
+            mins = 0.0
+        if key not in groups:
+            groups[key] = {"day": day, "kind": r["kind"], "id": r["item_id"], "title": r["title"],
+                           "cover": r["cover"], "author": r["author"], "total": r["total"],
+                           "to": r["end_pos"] or 0, "minutes": 0.0, "sessions": 0,
+                           "last_at": r["ended_at"]}
+            order.append(key)
+        g = groups[key]
+        g["from"] = r["start_pos"] or 0          # keeps walking back to the day's first
+        g["minutes"] += mins if mins >= 1 else 0  # checkpoints are instant — not reading time
+        g["sessions"] += 1
+    items = [{**groups[k], "minutes": round(groups[k]["minutes"])} for k in order]
+    last = rows[-1] if len(rows) == READ_HISTORY_PAGE else None
+    return {"items": items, "cursor": f'{last["started_at"]}|{last["id"]}' if last else None}
+
+
 @app.get("/api/history")
 def history(user=Depends(current_user), type: str = "tv", cursor: str = ""):
     uid = user["id"]
@@ -4992,6 +5180,8 @@ def history(user=Depends(current_user), type: str = "tv", cursor: str = ""):
             rows = [dict(r) for r in con.execute(q, params)]
             return {"items": rows, "cursor": f'{rows[-1]["watched_at"]}|{rows[-1]["id"]}'
                     if len(rows) == 120 else None}
+        if type == "reading":
+            return reading_history(con, user, cursor)
 
         q = """SELECT w.show_id, w.season, w.number, w.watched_at, s.title, s.poster,
                  e.title AS ep_title, COALESCE(e.runtime, s.avg_runtime, 30) runtime
