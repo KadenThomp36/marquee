@@ -252,23 +252,7 @@ struct ShowScreen: View {
     private func actions(_ detail: ShowDetail) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
-                if detail.followed {
-                    Button(detail.archived ? "Resume" : "Watching") {
-                        Task { await model.setArchived(!detail.archived, session: session) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.mqBrassFill)
-                    .foregroundStyle(Color.mqBrassOnFill)
-                } else {
-                    Button {
-                        Task { await model.follow(session: session) }
-                    } label: {
-                        Label("Follow", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.mqBrassFill)
-                    .foregroundStyle(Color.mqBrassOnFill)
-                }
+                watchlistControl(detail)
 
                 if session.requestConfig?.enabled == true, let status = model.requestStatus {
                     RequestButton(status: status) { showingRequestSheet = true }
@@ -304,6 +288,59 @@ struct ShowScreen: View {
                     }
                 }
             }
+        }
+    }
+
+    /// One word everywhere: shows go on your watchlist. Not added → "Add to
+    /// watchlist"; added but not begun → "On your watchlist" (tap to take it off);
+    /// under way → "Watching", with stopping one level down so it's never a single
+    /// mis-tap; stopped → "Resume watching".
+    @ViewBuilder
+    private func watchlistControl(_ detail: ShowDetail) -> some View {
+        if !detail.followed {
+            Button {
+                Task { await model.follow(session: session) }
+            } label: {
+                Label("Add to watchlist", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.mqBrassFill)
+            .foregroundStyle(Color.mqBrassOnFill)
+        } else if detail.archived {
+            Button {
+                Task { await model.setArchived(false, session: session) }
+            } label: {
+                Label("Resume watching", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.mqBrassFill)
+            .foregroundStyle(Color.mqBrassOnFill)
+        } else if model.watchedCount == 0 {
+            Button {
+                Task { await model.removeFromWatchlist(session: session) }
+            } label: {
+                Label("On your watchlist", systemImage: "checkmark")
+            }
+            .buttonStyle(.bordered)
+            .tint(Color.mqBrass)
+            .accessibilityHint("Removes it from your watchlist")
+        } else {
+            Menu {
+                Button("Stop watching", systemImage: "stop.circle", role: .destructive) {
+                    Task { await model.setArchived(true, session: session) }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text("Watching")
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 11, weight: .bold))
+                }
+            }
+            .menuStyle(.button)
+            .buttonStyle(.borderedProminent)
+            .tint(Color.mqBrassFill)
+            .foregroundStyle(Color.mqBrassOnFill)
+            .accessibilityHint("Opens a menu to stop watching")
         }
     }
 

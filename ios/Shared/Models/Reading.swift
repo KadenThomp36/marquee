@@ -16,13 +16,35 @@ public enum ReadingState: String, Codable, Sendable, CaseIterable {
     case want
     case reading
     case finished
+    /// Set aside, coming back to it.
+    case paused
+    /// Did not finish. The pages read still count.
+    case dnf
 
     public var label: String {
         switch self {
         case .want: "Want to read"
         case .reading: "Reading"
         case .finished: "Finished"
+        case .paused: "Paused"
+        case .dnf: "Didn't finish"
         }
+    }
+
+    /// The three everyday shelves, in the order the segmented control shows them.
+    /// Paused and Didn't finish live one level down.
+    public static let primary: [ReadingState] = [.want, .reading, .finished]
+    public static let secondary: [ReadingState] = [.paused, .dnf]
+
+    /// Shelves in the order the Library lists them.
+    public static let shelfOrder: [ReadingState] = [.reading, .want, .paused, .finished, .dnf]
+
+    /// A state the server invents after this build shipped must not take the whole
+    /// shelf down with it. Decoding directly falls back to "want"; the `readingState`
+    /// accessors on the models use `init(rawValue:)` and simply return nil.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ReadingState(rawValue: raw) ?? .want
     }
 }
 
@@ -45,8 +67,52 @@ public struct ReadingSections: Codable, Sendable, Equatable {
     public var reading: [ReadingItem]
     public var want: [ReadingItem]
     public var finished: [ReadingItem]
+    /// Newer servers only — an older one has no such shelves.
+    public var paused: [ReadingItem]?
+    public var dnf: [ReadingItem]?
 
-    public var all: [ReadingItem] { reading + want + finished }
+    public var all: [ReadingItem] { reading + want + (paused ?? []) + finished + (dnf ?? []) }
+
+    public func items(in state: ReadingState) -> [ReadingItem] {
+        switch state {
+        case .reading: reading
+        case .want: want
+        case .finished: finished
+        case .paused: paused ?? []
+        case .dnf: dnf ?? []
+        }
+    }
+
+    public mutating func setItems(_ items: [ReadingItem], in state: ReadingState) {
+        switch state {
+        case .reading: reading = items
+        case .want: want = items
+        case .finished: finished = items
+        case .paused: paused = items
+        case .dnf: dnf = items
+        }
+    }
+
+    /// Take an item off whichever shelf it's on; returns it, and where it was.
+    @discardableResult
+    public mutating func take(_ id: Int) -> (item: ReadingItem, state: ReadingState, index: Int)? {
+        for state in ReadingState.shelfOrder {
+            var shelf = items(in: state)
+            if let index = shelf.firstIndex(where: { $0.id == id }) {
+                let item = shelf.remove(at: index)
+                setItems(shelf, in: state)
+                return (item, state, index)
+            }
+        }
+        return nil
+    }
+
+    /// Put an item on a shelf, at the front unless told otherwise.
+    public mutating func put(_ item: ReadingItem, in state: ReadingState, at index: Int = 0) {
+        var shelf = items(in: state)
+        shelf.insert(item, at: min(max(0, index), shelf.count))
+        setItems(shelf, in: state)
+    }
 }
 
 public struct ReadingItem: Codable, Sendable, Identifiable, Hashable {
@@ -56,11 +122,25 @@ public struct ReadingItem: Codable, Sendable, Identifiable, Hashable {
     public var year: FlexInt?
     public var state: String?
     public var progress: Int?
-    /// Your own 1–10 score.
-    public var rating: Int?
+    /// Your own score, as sent. Books keep halves server-side, so this may not be a
+    /// whole number — decoding it as an Int would fail the entire shelf on one 7.5.
+    public var ratingValue: FlexDouble?
     public var startedAt: String?
     public var finishedAt: String?
     public var mode: String?
+
+    // Home's Continue reading rail, and newer shelves.
+    /// "book" or "manga" — set only where both kinds share one list (the dashboard).
+    public var kind: String?
+    /// Units (pages or chapters) per day over the last three weeks.
+    public var pace: Double?
+    /// At that pace, days until the end.
+    public var finishDays: Int?
+    /// Newest chapter MangaDex knows about.
+    public var latestCh: Int?
+    public var latestAt: String?
+    /// The last session or checkpoint on this title.
+    public var lastReadAt: String?
 
     // books
     public var author: String?
@@ -83,10 +163,45 @@ public struct ReadingItem: Codable, Sendable, Identifiable, Hashable {
     public var seriesPos: Int?
 
     public var displayTitle: String { title ?? "Untitled" }
-    public var readingState: ReadingState? { state.flatMap(ReadingState.init) }
+    public var readingState: ReadingState? { state.flatMap(ReadingState.init(rawValue:)) }
+    /// Your own 1–10 score, rounded for display.
+    public var rating: Int? { ratingValue?.value.map { Int($0.rounded()) } }
+    /// The `kind` field, for lists that mix books and manga. Defaults to book.
+    public var readingKind: ReadingKind { kind.flatMap(ReadingKind.init(rawValue:)) ?? .book }
+    /// Unique across a mixed list — a book and a manga can share an id.
+    public var railID: String { "\(readingKind.rawValue):\(id)" }
     public var genreList: [String] {
         (genres ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    /// Chapters out past where you are — manga only.
+    public var newChapters: Int {
+        guard let latestCh, latestCh > (progress ?? 0) else { return 0 }
+        return latestCh - (progress ?? 0)
+    }
+
+    /// The line that makes a reading card useful: new chapters you haven't read, or
+    /// when you'll finish at the pace you've actually been reading.
+    public var paceLine: String? {
+        let behind = newChapters
+        if behind > 0 { return "\(behind) new chapter\(behind == 1 ? "" : "s")" }
+        if let finishDays, finishDays > 0 {
+            return "~\(finishDays) day\(finishDays == 1 ? "" : "s") left at your pace"
+        }
+        return nil
+    }
+
+    /// Where a "+1" lands, in the canonical stored unit. A book tracked in chapters
+    /// steps a chapter at a time while the server still stores pages — so convert on
+    /// the way out, never on the way back.
+    public func incrementedProgress(for kind: ReadingKind) -> Int {
+        if kind == .book, mode == ProgressMode.chapters.rawValue,
+           let pages, let chapters, chapters > 0 {
+            return min(pages, Int((Double(chapterPosition + 1) / Double(chapters)
+                                   * Double(pages)).rounded()))
+        }
+        return min(total(for: kind) ?? .max, (progress ?? 0) + 1)
     }
 
     public func total(for kind: ReadingKind) -> Int? {
@@ -123,13 +238,18 @@ public struct ReadingItem: Codable, Sendable, Identifiable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, cover, year, state, progress, rating, mode, author, pages, olid
-        case chapters, volumes, status, origin, genres, series
+        case id, title, cover, year, state, progress, mode, author, pages, olid
+        case chapters, volumes, status, origin, genres, series, kind, pace
+        case ratingValue = "rating"
         case startedAt = "started_at"
         case finishedAt = "finished_at"
         case hcID = "hc_id"
         case communityRating = "community_rating"
         case seriesPos = "series_pos"
+        case finishDays = "finish_days"
+        case latestCh = "latest_ch"
+        case latestAt = "latest_at"
+        case lastReadAt = "last_read_at"
     }
 }
 
@@ -210,15 +330,18 @@ public struct MangaChapter: Codable, Sendable, Hashable, Identifiable {
 public struct ReadingStateRow: Codable, Sendable, Equatable {
     public var state: String?
     public var progress: Int?
-    public var rating: Int?
+    /// Lenient for the same reason as `ReadingItem.ratingValue`.
+    public var ratingValue: FlexDouble?
     public var startedAt: String?
     public var finishedAt: String?
     public var mode: String?
 
-    public var readingState: ReadingState? { state.flatMap(ReadingState.init) }
+    public var readingState: ReadingState? { state.flatMap(ReadingState.init(rawValue:)) }
+    public var rating: Int? { ratingValue?.value.map { Int($0.rounded()) } }
 
     enum CodingKeys: String, CodingKey {
-        case state, progress, rating, mode
+        case state, progress, mode
+        case ratingValue = "rating"
         case startedAt = "started_at"
         case finishedAt = "finished_at"
     }
@@ -242,16 +365,23 @@ public struct HouseholdRead: Codable, Sendable, Hashable, Identifiable {
     public var displayName: String?
     public var avatar: String?
     public var state: String?
-    public var rating: Int?
+    public var ratingValue: FlexDouble?
 
     public var id: String { username }
+    public var rating: Int? { ratingValue?.value.map { Int($0.rounded()) } }
+    /// "Didn't finish" rather than "dnf".
+    public var stateLabel: String {
+        guard let state else { return "" }
+        return ReadingState(rawValue: state)?.label ?? state
+    }
     public var person: Person {
         Person(id: nil, username: username, displayName: displayName, avatar: avatar,
                banner: nil, features: nil, isAdmin: nil, isMe: false)
     }
 
     enum CodingKeys: String, CodingKey {
-        case username, avatar, state, rating
+        case username, avatar, state
+        case ratingValue = "rating"
         case displayName = "display_name"
     }
 }
@@ -345,11 +475,63 @@ public struct ReadingStateRequest: Codable, Sendable, Equatable {
         self.mode = mode?.rawValue
     }
 
-    /// "none" removes the title from the shelf entirely.
+    /// Send `"rating": null`. Omitting the key means "leave it", so clearing a
+    /// score has to be explicit.
+    public var clearsRating = false
+
+    /// "none" removes the title from the shelf entirely (and drops a live session on
+    /// it). The undo is `RestoreReadingRequest`.
     public static var remove: ReadingStateRequest {
         var request = ReadingStateRequest()
         request.state = "none"
         return request
+    }
+
+    public static var clearRating: ReadingStateRequest {
+        var request = ReadingStateRequest()
+        request.clearsRating = true
+        return request
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case state, progress, rating, mode
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(state, forKey: .state)
+        try container.encodeIfPresent(progress, forKey: .progress)
+        if clearsRating {
+            try container.encodeNil(forKey: .rating)
+        } else {
+            try container.encodeIfPresent(rating, forKey: .rating)
+        }
+        try container.encodeIfPresent(startedAt, forKey: .startedAt)
+        try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+        try container.encodeIfPresent(mode, forKey: .mode)
+    }
+}
+
+/// `POST /api/{kind}/{id}/restore` — put a removed title back exactly as it was.
+/// Built from the item as it sat on the shelf before the remove.
+public struct RestoreReadingRequest: Codable, Sendable, Equatable {
+    public var state: String
+    public var progress: Int?
+    /// Sent as a number, never a string: the server validates 1–10.
+    public var rating: Double?
+    public var mode: String?
+    public var startedAt: String?
+    public var finishedAt: String?
+
+    public init(from item: ReadingItem, state fallback: ReadingState) {
+        state = item.readingState?.rawValue ?? fallback.rawValue
+        progress = item.progress
+        rating = item.ratingValue?.value
+        mode = item.mode
+        startedAt = item.startedAt
+        finishedAt = item.finishedAt
     }
 
     enum CodingKeys: String, CodingKey {

@@ -19,6 +19,9 @@ public final class Navigator {
         case person(Int)
         case list(Int)
         case book(Int)
+        /// A Hardcover search result, by Hardcover id — not on anyone's shelf yet, or
+        /// on it under a different local id.
+        case bookPreview(Int)
         case manga(Int)
         case profile(String)
         /// Year in Review. `username` nil means "me".
@@ -54,7 +57,7 @@ public final class Navigator {
     private func tab(for route: Route) -> Destination {
         switch route {
         case .show, .episode: .next
-        case .movie, .book, .manga: .library
+        case .movie, .book, .bookPreview, .manga: .library
         case .search: .search
         case .person: .search
         case .list, .profile, .history, .notifications, .settings, .recap, .watched: .you

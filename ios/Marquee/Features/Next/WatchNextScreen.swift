@@ -29,6 +29,9 @@ struct WatchNextScreen: View {
     @State private var beat: PunchBeat = .biting
     @State private var holeRadius: CGFloat = 0
     @State private var bit = false
+    /// Reading sessions running right now, so a Continue reading card can end one.
+    @State private var activeReading: [ActiveSession] = []
+    @State private var progressTarget: ReadingProgressTarget?
 
     var body: some View {
         MarqueeScreen {
@@ -85,6 +88,11 @@ struct WatchNextScreen: View {
         .mqBareNavigationBar()
         .task { await refresh() }
         .task { await loadDiscover() }
+        .sheet(item: $progressTarget) { target in
+            ReadingProgressSheet(target: target) { outcome in
+                await applyReading(outcome, to: target)
+            }
+        }
     }
 
     // MARK: - Sections
@@ -102,7 +110,41 @@ struct WatchNextScreen: View {
         }
 
         if dashboard.upNext.isEmpty {
-            EmptyLine("Nothing in the queue — everything is crossed off.")
+            if let watchlist = dashboard.watchlist, !watchlist.isEmpty {
+                EmptyQueuePrompt(waiting: max(watchlist.count, dashboard.counts?.notStarted ?? 0))
+            } else {
+                EmptyLine("Nothing in the queue — everything is crossed off.")
+            }
+        }
+
+        if let reading = dashboard.reading, !reading.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                PlainRailHeader(title: "Continue reading")
+                HorizontalRail {
+                    ForEach(reading, id: \.railID) { item in
+                        ContinueReadingCard(
+                            item: item,
+                            live: liveSession(for: item),
+                            onIncrement: { await incrementReading(item) },
+                            onLog: { openProgress(for: item) })
+                            .frame(width: MQ.showCardWidth,
+                                   height: MQ.showCardWidth / MQ.posterAspect)
+                    }
+                }
+            }
+        }
+
+        if let watchlist = dashboard.watchlist, !watchlist.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                RailHeader(title: "On your watchlist") {
+                    ShowsShelfScreen(shelf: .watchlist)
+                }
+                HorizontalRail {
+                    ForEach(watchlist) { show in
+                        WatchlistRailCard(show: show)
+                    }
+                }
+            }
         }
 
         if !dashboard.stale.isEmpty {
@@ -239,6 +281,85 @@ struct WatchNextScreen: View {
         if let notifications: NotificationsResponse = try? await client.get("notifications") {
             unreadCount = notifications.unread
         }
+        await loadActiveReading()
+    }
+
+    // MARK: - Continue reading
+
+    private func loadActiveReading() async {
+        guard session.me?.features?.tracksReading == true, let client = session.client else {
+            activeReading = []
+            return
+        }
+        if let response = try? await client.get("reading/active", as: ActiveSessionsResponse.self) {
+            activeReading = response.sessions
+        }
+    }
+
+    private func liveSession(for item: ReadingItem) -> ActiveSession? {
+        activeReading.first { $0.kind == item.readingKind.rawValue && $0.itemID == item.id }
+    }
+
+    private func openProgress(for item: ReadingItem) {
+        progressTarget = ReadingProgressTarget(item: item, kind: item.readingKind,
+                                               live: liveSession(for: item))
+    }
+
+    /// +1 chapter, in place. Reaching the last one opens the sheet instead, where
+    /// finishing is its own deliberate button.
+    private func incrementReading(_ item: ReadingItem) async {
+        let kind = item.readingKind
+        let next = item.incrementedProgress(for: kind)
+        if let total = item.total(for: kind), next >= total {
+            openProgress(for: item)
+            return
+        }
+        setReadingProgress(item, to: next)
+        guard let client = session.client else { return }
+        do {
+            try await client.post("\(kind.path)/\(item.id)/state",
+                                  body: ReadingStateRequest(progress: next), as: Empty.self)
+        } catch {
+            OfflineStore.shared.enqueue(PendingWrite(
+                .readingProgress(kind: kind.path, itemID: item.id, progress: next)))
+        }
+    }
+
+    private func setReadingProgress(_ item: ReadingItem, to progress: Int) {
+        data.mutate { dashboard in
+            guard var reading = dashboard.reading,
+                  let index = reading.firstIndex(where: { $0.railID == item.railID }) else { return }
+            reading[index].progress = progress
+            dashboard.reading = reading
+        }
+    }
+
+    private func applyReading(_ outcome: ReadingProgressOutcome, to target: ReadingProgressTarget) async {
+        let railID = "\(target.kind.rawValue):\(target.itemID)"
+        switch outcome {
+        case .progress(let value):
+            data.mutate { dashboard in
+                guard var reading = dashboard.reading,
+                      let index = reading.firstIndex(where: { $0.railID == railID }) else { return }
+                reading[index].progress = value
+                dashboard.reading = reading
+            }
+        case .sessionEnded(let value):
+            data.mutate { dashboard in
+                guard var reading = dashboard.reading,
+                      let index = reading.firstIndex(where: { $0.railID == railID }) else { return }
+                reading[index].progress = max(value, reading[index].progress ?? 0)
+                dashboard.reading = reading
+            }
+        case .finished:
+            // Finished books leave "Continue reading".
+            data.mutate { dashboard in
+                dashboard.reading?.removeAll { $0.railID == railID }
+            }
+        case .discarded:
+            break
+        }
+        if target.live != nil { await loadActiveReading() }
     }
 
     private func loadDiscover() async {

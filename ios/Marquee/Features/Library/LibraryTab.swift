@@ -8,12 +8,13 @@ import SwiftUI
 struct LibraryTab: View {
     @Environment(Session.self) private var session
     @State private var path = NavigationPath()
-    @State private var section: Section = .films
+    /// Shows first: the TV watchlist is the household's most-asked-for shelf.
+    @State private var section: Section = .shows
     @State private var query = ""
 
     enum Section: String, CaseIterable, Identifiable {
-        case films = "Films"
         case shows = "Shows"
+        case films = "Films"
         case reading = "Reading"
         var id: String { rawValue }
     }
@@ -21,7 +22,7 @@ struct LibraryTab: View {
     private var available: [Section] {
         session.me?.features?.tracksReading == true
             ? Section.allCases
-            : [.films, .shows]
+            : [.shows, .films]
     }
 
     private var trimmedQuery: String {
@@ -59,7 +60,7 @@ struct LibraryTab: View {
         }
         .routed(into: $path)
         .onChange(of: available.count) { _, _ in
-            if !available.contains(section) { section = .films }
+            if !available.contains(section) { section = .shows }
         }
     }
 }
@@ -70,11 +71,13 @@ struct FilmsShelf: View {
 
     @Environment(Session.self) private var session
     @State private var data = RemoteData<MovieShelves>(cacheKey: "movies")
-    @State private var tab: Shelf = .watched
+    /// The watchlist leads: "what shall we watch" is the question, not "what did we".
+    @State private var tab: Shelf = .watchlist
+    @State private var undo: UndoToast?
 
     enum Shelf: String, CaseIterable, Identifiable {
-        case watched = "Watched"
         case watchlist = "Watchlist"
+        case watched = "Watched"
         var id: String { rawValue }
     }
 
@@ -108,15 +111,18 @@ struct FilmsShelf: View {
                     EmptyLine(query.isEmpty
                               ? "Nothing here yet — find something in Search."
                               : "No film on this shelf matches \u{201C}\(query)\u{201D}.")
-                } else {
-                    LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(films) { film in
-                            FilmTile(film: film, shelf: tab) { action in
-                                await update(film, action: action)
-                            }
+                } else if tab == .watchlist {
+                    // Out now first — what you could put on tonight — then what's
+                    // still on its way, soonest first.
+                    ForEach(watchlistGroups) { group in
+                        VStack(alignment: .leading, spacing: 10) {
+                            SectionHeader(group.title, count: "\(group.films.count)")
+                                .padding(.horizontal, MQ.gutter)
+                            grid(group.films)
                         }
                     }
-                    .padding(.horizontal, MQ.gutter)
+                } else {
+                    grid(films)
                 }
 
                 if data.isEmpty {
@@ -134,6 +140,35 @@ struct FilmsShelf: View {
         .refreshable { await load(force: true) }
         .task { await load() }
         .task { await session.refreshListMembership() }
+        .undoBanner($undo)
+    }
+
+    private func grid(_ items: [MovieCard]) -> some View {
+        LazyVGrid(columns: columns, spacing: 16) {
+            ForEach(items) { film in
+                FilmTile(film: film, shelf: tab) { action in
+                    await update(film, action: action)
+                }
+            }
+        }
+        .padding(.horizontal, MQ.gutter)
+    }
+
+    private struct FilmGroup: Identifiable {
+        let title: String
+        let films: [MovieCard]
+        var id: String { title }
+    }
+
+    private var watchlistGroups: [FilmGroup] {
+        let today = MQTime.today()
+        let out = films.filter { !$0.isUpcoming(today: today) }
+        let soon = films.filter { $0.isUpcoming(today: today) }
+            .sorted { ($0.releaseDate ?? "") < ($1.releaseDate ?? "") }
+        var groups: [FilmGroup] = []
+        if !out.isEmpty { groups.append(FilmGroup(title: "Out now", films: out)) }
+        if !soon.isEmpty { groups.append(FilmGroup(title: "Coming soon", films: soon)) }
+        return groups
     }
 
     private func count(for shelf: Shelf) -> Int {
@@ -148,14 +183,23 @@ struct FilmsShelf: View {
 
     private func update(_ film: MovieCard, action: String) async {
         guard let client = session.client else { return }
+        var spot: (watched: Bool, index: Int)?
         data.mutate { shelves in
+            if let index = shelves.watched.firstIndex(where: { $0.id == film.id }) {
+                spot = (true, index)
+            } else if let index = shelves.watchlist.firstIndex(where: { $0.id == film.id }) {
+                spot = (false, index)
+            }
             shelves.watched.removeAll { $0.id == film.id }
             shelves.watchlist.removeAll { $0.id == film.id }
+            var moved = film
             if action == "watched" {
-                var moved = film
                 moved.state = "watched"
-                moved.watchedAt = MQTime.stamp()
+                moved.watchedAt = moved.watchedAt ?? MQTime.stamp()
                 shelves.watched.insert(moved, at: 0)
+            } else if action == "watchlist" {
+                moved.state = "watchlist"
+                shelves.watchlist.insert(moved, at: 0)
             }
         }
         do {
@@ -164,6 +208,26 @@ struct FilmsShelf: View {
         } catch {
             OfflineStore.shared.enqueue(PendingWrite(
                 .movieState(movieID: film.id, state: action, rating: nil)))
+        }
+        guard action == "none" else { return }
+        // Removing drops the rating and the watch date with it, so the undo hands
+        // both back rather than re-adding a blank film.
+        let was = spot
+        undo = UndoToast(message: "Removed \(film.displayTitle)") {
+            data.mutate { shelves in
+                if was?.watched == true {
+                    shelves.watched.insert(film, at: min(was?.index ?? 0, shelves.watched.count))
+                } else {
+                    shelves.watchlist.insert(film, at: min(was?.index ?? 0, shelves.watchlist.count))
+                }
+            }
+            _ = try? await client.post(
+                "movie/\(film.id)/state",
+                body: MovieStateRequest(state: film.state ?? (was?.watched == true ? "watched" : "watchlist"),
+                                        rating: film.rating,
+                                        watchedAt: film.watchedAt,
+                                        addedAt: film.addedAt),
+                as: Empty.self)
         }
     }
 }
@@ -192,6 +256,7 @@ private struct FilmTile: View {
                     .overlay(alignment: .bottomTrailing) {
                         ListBookmark(count: session.listCount("movie", film.id)).padding(6)
                     }
+                    .overlay(alignment: .bottomLeading) { householdFaces.padding(6) }
                     .overlay(alignment: .topLeading) { quickActions.padding(6) }
 
                 Text(film.displayTitle)
@@ -203,10 +268,19 @@ private struct FilmTile: View {
                     .font(.mqCaption)
                     .foregroundStyle(Color.mqInkMuted)
                     .mqSecondaryLine()
+                if shelf == .watchlist, let provider = film.prov?.name, !provider.isEmpty {
+                    Text(provider)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkSoft)
+                        .lineLimit(1)
+                }
             }
         }
         .buttonStyle(.plain)
         .contextMenu {
+            if let household {
+                Text(household.text)
+            }
             if shelf == .watchlist {
                 Button("Mark watched", systemImage: "checkmark") {
                     Task { await perform("watched") }
@@ -221,14 +295,45 @@ private struct FilmTile: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(film.displayTitle)\(film.year?.text.isEmpty == false ? ", \(film.year!.text)" : "")")
+        .accessibilityLabel(accessibilityText)
         .accessibilityAction(named: "Remove from library") { Task { await perform("none") } }
+    }
+
+    private var household: HouseholdSummary? { HouseholdSummary.film(film) }
+
+    private var accessibilityText: String {
+        var parts = [film.displayTitle]
+        if let year = film.year?.text, !year.isEmpty { parts.append(year) }
+        if let household { parts.append(household.text) }
+        return parts.joined(separator: ", ")
+    }
+
+    /// Who else in the house wants it or has seen it — faces on the art, the words in
+    /// the accessibility label and the long-press preview.
+    @ViewBuilder
+    private var householdFaces: some View {
+        if let household {
+            HStack(spacing: -5) {
+                ForEach(Array(household.people.enumerated()), id: \.offset) { _, person in
+                    AvatarView(person: person, size: 20, baseURL: session.server?.baseURL)
+                        .overlay(Circle().strokeBorder(Color.mqGround, lineWidth: 1.5))
+                }
+            }
+            .accessibilityHidden(true)
+        }
     }
 
     private var subtitle: String {
         var parts: [String] = []
-        if let year = film.year?.text, !year.isEmpty { parts.append(year) }
-        if let watchedAt = film.watchedAt, !watchedAt.isEmpty {
+        if shelf == .watchlist, film.isUpcoming(today: MQTime.today()), let release = film.releaseDate {
+            parts.append("Out \(MQTime.short(release))")
+        } else if let year = film.year?.text, !year.isEmpty {
+            parts.append(year)
+        }
+        if shelf == .watchlist {
+            if let runtime = LibraryFormat.runtime(film.runtime) { parts.append(runtime) }
+            if let cert = film.cert, !cert.isEmpty { parts.append(cert) }
+        } else if let watchedAt = film.watchedAt, !watchedAt.isEmpty {
             parts.append(MQTime.medium(watchedAt))
         }
         return parts.joined(separator: " · ")
@@ -259,7 +364,10 @@ private struct FilmTile: View {
 }
 
 /// Every show you've watched anything of, newest first, with how far in you are.
-struct ShowsShelf: View {
+///
+/// What the Shows side of the Library was before the server grew `/api/shows`; kept
+/// as the fallback for a server that hasn't been updated yet.
+struct LegacyShowsGrid: View {
     var query: String = ""
 
     @Environment(Session.self) private var session

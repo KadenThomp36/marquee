@@ -22,6 +22,11 @@ struct ReadingDetailScreen: View {
     @State private var editingSession: ReadingSession?
     @State private var showingMatches = false
     @State private var busy = false
+    /// This title's running session, if there is one.
+    @State private var live: ActiveSession?
+    @State private var progressTarget: ReadingProgressTarget?
+    @State private var confirmingFinish = false
+    @State private var confirmingRemove = false
 
     private var item: ReadingDetailItem? { detail?.item }
     private var state: ReadingStateRow? { detail?.state }
@@ -61,6 +66,41 @@ struct ReadingDetailScreen: View {
         .sheet(isPresented: $showingMatches) {
             RematchSheet(bookID: itemID) { await load() }
         }
+        .sheet(item: $progressTarget) { target in
+            ReadingProgressSheet(target: target) { _ in await load() }
+        }
+        .confirmationDialog("Mark \(item?.displayTitle ?? "this") finished?",
+                            isPresented: $confirmingFinish, titleVisibility: .visible) {
+            Button("Mark finished") { Task { await setState(.finished) } }
+            Button("Update progress instead") { openProgress() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This moves your progress to the end and dates the finish today.")
+        }
+        .confirmationDialog("Remove \(item?.displayTitle ?? "this") from your shelf?",
+                            isPresented: $confirmingRemove, titleVisibility: .visible) {
+            Button("Remove", role: .destructive) { Task { await removeFromShelf() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your progress, dates and rating go with it\(live != nil ? ", and the running session is dropped" : "").")
+        }
+    }
+
+    /// The progress sheet, for this title — ending the live session if one's running.
+    private func openProgress() {
+        guard let item, let id = item.id else { return }
+        var target = ReadingProgressTarget(kind: kind, itemID: id, title: item.displayTitle,
+                                           progress: state?.progress ?? 0, pages: item.pages,
+                                           chapters: item.chapters, rawMode: state?.mode,
+                                           live: live)
+        if kind == .book, let toc = item.toc, !toc.isEmpty {
+            target.chapterTitles = Dictionary(uniqueKeysWithValues:
+                toc.enumerated().map { ($0.offset + 1, $0.element) })
+        } else if let list = item.chlist, !list.isEmpty {
+            target.chapterTitles = Dictionary(list.map { ($0.number, $0.displayTitle) },
+                                              uniquingKeysWith: { first, _ in first })
+        }
+        progressTarget = target
     }
 
     // MARK: - Hero
@@ -119,12 +159,7 @@ struct ReadingDetailScreen: View {
     @ViewBuilder
     private func tracked(_ detail: ReadingDetail) -> some View {
         VStack(alignment: .leading, spacing: 18) {
-            Picker("Shelf", selection: Binding(
-                get: { state?.readingState ?? .want },
-                set: { newValue in Task { await setState(newValue) } })) {
-                ForEach(ReadingState.allCases, id: \.self) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented)
+            stateControls
 
             if state?.readingState != .want { progressControls }
 
@@ -135,7 +170,14 @@ struct ReadingDetailScreen: View {
                 Spacer()
                 StarRating(rating: Binding(
                     get: { state?.rating },
-                    set: { value in Task { await save(ReadingStateRequest(rating: value)) } })) { _ in }
+                    set: { value in
+                        // A number 1–10, or an explicit null to clear — never a
+                        // missing key, which the server reads as "leave it".
+                        Task {
+                            await save(value.map { ReadingStateRequest(rating: $0) }
+                                       ?? ReadingStateRequest.clearRating)
+                        }
+                    })) { _ in }
             }
 
             dates
@@ -143,10 +185,81 @@ struct ReadingDetailScreen: View {
         .padding(.horizontal, MQ.gutter)
     }
 
+    /// Want / Reading / Finished as the segmented control it always was, with Paused
+    /// and Didn't finish one level down — five segments don't fit a phone.
+    @ViewBuilder
+    private var stateControls: some View {
+        let current = state?.readingState
+        HStack(spacing: 8) {
+            Picker("Shelf", selection: Binding(
+                get: { current ?? .want },
+                set: { newValue in requestState(newValue) })) {
+                ForEach(ReadingState.primary, id: \.self) { Text($0.label).tag($0) }
+                // A fourth segment only while the title sits on one of the quieter
+                // shelves, so the control always shows where it is.
+                if let current, ReadingState.secondary.contains(current) {
+                    Text(current.label).tag(current)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Menu {
+                ForEach(ReadingState.secondary, id: \.self) { option in
+                    Button {
+                        requestState(option)
+                    } label: {
+                        if option == current {
+                            Label(option.label, systemImage: "checkmark")
+                        } else {
+                            Text(option.label)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color.mqInkSoft)
+                    .frame(width: 40, height: 32)
+                    .mqPanel(radius: 9)
+            }
+            .accessibilityLabel("More shelves: Paused, Didn\u{2019}t finish")
+        }
+
+        if let current, ReadingState.secondary.contains(current) {
+            HStack(spacing: 8) {
+                Label(current.label, systemImage: current == .paused ? "pause.circle" : "xmark.circle")
+                    .font(.mqSub)
+                    .foregroundStyle(Color.mqInkSoft)
+                Spacer()
+                if current == .paused {
+                    Button("Pick it back up") { requestState(.reading) }
+                        .buttonStyle(.mqChip(on: true))
+                }
+            }
+        }
+    }
+
+    /// Finishing from the shelf control is one tap on a book that may have hundreds
+    /// of pages left — so unless you're already at the end, it asks.
+    private func requestState(_ newValue: ReadingState) {
+        guard newValue != state?.readingState else { return }
+        if newValue == .finished, let total, (state?.progress ?? 0) < total {
+            confirmingFinish = true
+            return
+        }
+        Task { await setState(newValue) }
+    }
+
     @ViewBuilder
     private var progressControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ProgressBar(fraction: fraction, height: 8)
+            Button { openProgress() } label: {
+                ProgressBar(fraction: fraction, height: 8)
+                    .padding(.vertical, 6)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Update progress")
 
             if availableModes.count > 1 {
                 Picker("Progress mode", selection: Binding(
@@ -165,11 +278,17 @@ struct ReadingDetailScreen: View {
                 }
                 .buttonStyle(.mqChip)
 
-                Text(displayedProgress)
-                    .font(MarqueeFont.body(17, .bold, relativeTo: .title3))
-                    .foregroundStyle(Color.mqInk)
-                    .monospacedDigit()
-                    .frame(minWidth: 62)
+                // Tap the number for the full sheet: a track, jumps, exact entry.
+                Button { openProgress() } label: {
+                    Text(displayedProgress)
+                        .font(MarqueeFont.body(17, .bold, relativeTo: .title3))
+                        .foregroundStyle(Color.mqInk)
+                        .monospacedDigit()
+                        .frame(minWidth: 62)
+                        .underline(color: Color.mqBrassDim)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Progress \(displayedProgress). Opens the progress sheet.")
 
                 Button { Task { await step(1) } } label: {
                     Image(systemName: "plus").frame(width: 34, height: 34)
@@ -230,16 +349,41 @@ struct ReadingDetailScreen: View {
         }
     }
 
+    /// Start a session — or, with one running, see it ticking and end it into the
+    /// progress sheet, which shows the session's own numbers above Save.
     @ViewBuilder
     private func sessionButton(_ detail: ReadingDetail) -> some View {
-        Button {
-            Task { await startSession() }
-        } label: {
-            Label("Start a reading session", systemImage: "play.fill")
-                .font(.mqSub)
+        if let live {
+            HStack(spacing: 10) {
+                Circle().fill(Color.mqBrassFill).frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Reading now").mqEyebrowStyle()
+                    if let started = MQTime.date(from: live.startedAt) {
+                        Text(started, style: .timer)
+                            .font(MarqueeFont.body(17, .bold, relativeTo: .headline))
+                            .foregroundStyle(Color.mqInk)
+                            .monospacedDigit()
+                    }
+                }
+                Spacer(minLength: 6)
+                Button("End session") { openProgress() }
+                    .buttonStyle(.mqChip(on: true))
+            }
+            .padding(11)
+            .background(Color.mqBrassSoft, in: .rect(cornerRadius: MQ.radiusSmall))
+            .accessibilityElement(children: .combine)
+            .accessibilityAction(named: "End session") { openProgress() }
+        } else {
+            Button {
+                Task { await startSession() }
+            } label: {
+                Label("Start a reading session", systemImage: "play.fill")
+                    .font(.mqSub)
+            }
+            .buttonStyle(.mqChip)
+            .disabled(busy)
         }
-        .buttonStyle(.mqChip)
-        .disabled(busy)
     }
 
     private var dates: some View {
@@ -344,7 +488,7 @@ struct ReadingDetailScreen: View {
                             Text(member.person.name)
                                 .font(MarqueeFont.body(12.5, .semibold, relativeTo: .caption))
                                 .foregroundStyle(Color.mqInk)
-                            Text(member.state ?? "")
+                            Text(member.stateLabel)
                                 .font(.mqCaption)
                                 .foregroundStyle(Color.mqInkMuted)
                             if let rating = member.rating {
@@ -386,7 +530,7 @@ struct ReadingDetailScreen: View {
             }
             if detail.tracked {
                 ChipButton(title: "Remove", symbol: "trash", isDestructive: true) {
-                    Task { await removeFromShelf() }
+                    confirmingRemove = true
                 }
             }
         }
@@ -419,6 +563,18 @@ struct ReadingDetailScreen: View {
         } catch {
             if detail == nil { self.error = error.localizedDescription }
         }
+        await loadLive()
+    }
+
+    /// Sessions outlive the app — whatever's running server-side is the truth.
+    private func loadLive() async {
+        guard let client = session.client, detail?.tracked == true, let id = item?.id else {
+            live = nil
+            return
+        }
+        guard let response = try? await client.get("reading/active", as: ActiveSessionsResponse.self)
+        else { return }
+        live = response.sessions.first { $0.kind == kind.rawValue && $0.itemID == id }
     }
 
     private func save(_ request: ReadingStateRequest) async {
@@ -485,8 +641,10 @@ struct ReadingDetailScreen: View {
 
     private func removeFromShelf() async {
         guard let client = session.client, let id = item?.id else { return }
+        // The server drops a running session along with the title.
         _ = try? await client.post("\(kind.path)/\(id)/state",
                                    body: ReadingStateRequest.remove, as: Empty.self)
+        live = nil
         dismiss()
     }
 }

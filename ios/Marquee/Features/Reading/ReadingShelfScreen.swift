@@ -3,7 +3,7 @@ import SwiftUI
 /// Books and manga. Opt-in per user — the whole section only exists once someone
 /// switches a tracking feature on in Settings, exactly as the web client does it.
 struct ReadingShelfScreen: View {
-    /// Filters the shelves. Distinct from `query`, which searches Hardcover and
+    /// Filters the shelves. Distinct from `addQuery`, which searches Hardcover and
     /// AniList for things you *don't* have yet.
     var query: String = ""
 
@@ -16,8 +16,10 @@ struct ReadingShelfScreen: View {
     @State private var bookResults: [BookSearchResult] = []
     @State private var mangaResults: [MangaSearchResult] = []
     @State private var searchTask: Task<Void, Never>?
-    @State private var endingSession: ActiveSession?
+    @State private var progressTarget: ReadingProgressTarget?
     @State private var showingStats = false
+    @State private var undo: UndoToast?
+    @State private var incrementTick = 0
 
     @Environment(\.dynamicTypeSize) private var gridTypeSize
 
@@ -44,9 +46,9 @@ struct ReadingShelfScreen: View {
                 if !addQuery.isEmpty { searchResults }
 
                 if let sections {
-                    shelf("Reading now", sections.reading, section: .reading)
-                    shelf("Want to read", sections.want, section: .want)
-                    shelf("Finished", sections.finished, section: .finished)
+                    ForEach(ReadingState.shelfOrder, id: \.self) { state in
+                        shelf(title(for: state), sections.items(in: state), section: state)
+                    }
                     if sections.all.isEmpty {
                         EmptyLine("Nothing on the shelf yet — search above to add your first \(kind == .book ? "book" : "series").")
                     }
@@ -62,7 +64,10 @@ struct ReadingShelfScreen: View {
             }
             .padding(.vertical, 6)
         }
-        .refreshable { await load(force: true) }
+        .refreshable {
+            await load(force: true)
+            await loadActive()
+        }
         .task { await load() }
         .task { await loadActive() }
         .onChange(of: addQuery) { _, new in scheduleSearch(new) }
@@ -74,13 +79,27 @@ struct ReadingShelfScreen: View {
                 .accessibilityLabel("Reading stats")
             }
         }
+        .sensoryFeedback(.increase, trigger: incrementTick)
+        .undoBanner($undo)
         .sheet(isPresented: $showingStats) { ReadingStatsScreen() }
-        .sheet(item: $endingSession) { session in
-            EndSessionSheet(session: session) { await load(force: true); await loadActive() }
+        .sheet(item: $progressTarget) { target in
+            ReadingProgressSheet(target: target) { outcome in
+                await apply(outcome, to: target)
+            }
         }
     }
 
     // MARK: - Pieces
+
+    private func title(for state: ReadingState) -> String {
+        switch state {
+        case .reading: "Reading now"
+        case .want: "Want to read"
+        case .paused: "Paused"
+        case .finished: "Finished"
+        case .dnf: "Didn\u{2019}t finish"
+        }
+    }
 
     @ViewBuilder
     private var kindPicker: some View {
@@ -98,25 +117,28 @@ struct ReadingShelfScreen: View {
     private var liveSessions: some View {
         if !active.isEmpty {
             VStack(spacing: 8) {
-                ForEach(active) { session in
+                ForEach(active) { live in
                     HStack(spacing: 10) {
                         Circle().fill(Color.mqBrassFill).frame(width: 8, height: 8)
-                        Text(session.title ?? "Reading")
+                        Text(live.title ?? "Reading")
                             .font(.mqSub)
                             .foregroundStyle(Color.mqInk)
                             .lineLimit(1)
-                        Text(elapsed(since: session.startedAt))
-                            .font(.mqCaption)
-                            .foregroundStyle(Color.mqBrass)
-                            .monospacedDigit()
+                        if let started = MQTime.date(from: live.startedAt) {
+                            Text(started, style: .timer)
+                                .font(.mqCaption)
+                                .foregroundStyle(Color.mqBrass)
+                                .monospacedDigit()
+                        }
                         Spacer(minLength: 6)
-                        Button("End") { endingSession = session }
+                        Button("End") { progressTarget = target(for: live) }
                             .buttonStyle(.mqChip(on: true))
                     }
                     .padding(11)
                     .background(Color.mqBrassSoft, in: .rect(cornerRadius: MQ.radiusSmall))
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Reading \(session.title ?? ""), for \(elapsed(since: session.startedAt))")
+                    .accessibilityLabel("Reading \(live.title ?? ""), session running")
+                    .accessibilityAction(named: "End session") { progressTarget = target(for: live) }
                 }
             }
             .padding(.horizontal, MQ.gutter)
@@ -157,8 +179,7 @@ struct ReadingShelfScreen: View {
                                         .compactMap { $0 }.filter { !$0.isEmpty }
                                         .joined(separator: " · "),
                                     score: result.communityRating,
-                                    route: .book(result.hcID),
-                                    isPreview: true) { state in
+                                    route: .bookPreview(result.hcID)) { state in
                             await addBook(result, state: state)
                         }
                     }
@@ -169,8 +190,7 @@ struct ReadingShelfScreen: View {
                                         .compactMap { $0 }.filter { !$0.isEmpty }
                                         .joined(separator: " · "),
                                     score: result.score,
-                                    route: .manga(result.id),
-                                    isPreview: true) { state in
+                                    route: .manga(result.id)) { state in
                             await addManga(result, state: state)
                         }
                     }
@@ -199,7 +219,8 @@ struct ReadingShelfScreen: View {
                     .padding(.horizontal, MQ.gutter)
                 LazyVGrid(columns: columns, spacing: 16) {
                     ForEach(items) { item in
-                        ReadingTile(item: item, kind: kind, section: section) { action in
+                        ReadingTile(item: item, kind: kind, section: section,
+                                    isLive: liveSession(for: item) != nil) { action in
                             await perform(action, on: item)
                         }
                     }
@@ -209,10 +230,18 @@ struct ReadingShelfScreen: View {
         }
     }
 
-    private func elapsed(since stamp: String) -> String {
-        guard let started = MQTime.date(from: stamp) else { return "" }
-        let minutes = max(1, Int(Date().timeIntervalSince(started) / 60))
-        return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h \(minutes % 60)m"
+    private func liveSession(for item: ReadingItem) -> ActiveSession? {
+        active.first { $0.kind == kind.rawValue && $0.itemID == item.id }
+    }
+
+    /// A running session's sheet, seeded with the shelf's copy of the title when we
+    /// have it — that's the one with the current position in it.
+    private func target(for live: ActiveSession) -> ReadingProgressTarget {
+        let sections = live.readingKind == .book ? shelves.value?.books : shelves.value?.manga
+        if let item = sections?.all.first(where: { $0.id == live.itemID }) {
+            return ReadingProgressTarget(item: item, kind: live.readingKind, live: live)
+        }
+        return ReadingProgressTarget(session: live, progress: nil)
     }
 
     // MARK: - Data
@@ -280,16 +309,15 @@ struct ReadingShelfScreen: View {
 
         switch action {
         case .increment:
-            // A book tracked in chapters steps a chapter at a time, and the server
-            // still stores pages — so convert on the way out, not on the way back.
-            let next: Int
-            if kind == .book, item.mode == ProgressMode.chapters.rawValue,
-               let pages = item.pages, let chapters = item.chapters, chapters > 0 {
-                next = min(pages, Int((Double(item.chapterPosition + 1) / Double(chapters)
-                                       * Double(pages)).rounded()))
-            } else {
-                next = min(total ?? .max, (item.progress ?? 0) + 1)
+            let next = item.incrementedProgress(for: kind)
+            // Reaching the end is a decision, not a side effect of "+1": the sheet
+            // opens at the last chapter and offers "Finished it".
+            if let total, next >= total {
+                progressTarget = ReadingProgressTarget(item: item, kind: kind,
+                                                       live: liveSession(for: item))
+                return
             }
+            incrementTick += 1
             shelves.mutate { patch(&$0, item: item, progress: next) }
             do {
                 try await client.post(path, body: ReadingStateRequest(progress: next), as: Empty.self)
@@ -297,6 +325,10 @@ struct ReadingShelfScreen: View {
                 OfflineStore.shared.enqueue(PendingWrite(
                     .readingProgress(kind: kind.path, itemID: item.id, progress: next)))
             }
+        case .progress:
+            progressTarget = ReadingProgressTarget(item: item, kind: kind,
+                                                   live: liveSession(for: item))
+            return
         case .finish:
             shelves.mutate { patch(&$0, item: item, state: .finished, progress: total) }
             do {
@@ -307,58 +339,116 @@ struct ReadingShelfScreen: View {
                 OfflineStore.shared.enqueue(PendingWrite(
                     .readingState(kind: kind.path, itemID: item.id, state: "finished")))
             }
-        case .start:
-            shelves.mutate { patch(&$0, item: item, state: .reading) }
+        case .move(let state):
+            shelves.mutate { patch(&$0, item: item, state: state) }
             do {
-                try await client.post(path, body: ReadingStateRequest(state: .reading), as: Empty.self)
+                try await client.post(path, body: ReadingStateRequest(state: state), as: Empty.self)
             } catch {
                 OfflineStore.shared.enqueue(PendingWrite(
-                    .readingState(kind: kind.path, itemID: item.id, state: "reading")))
+                    .readingState(kind: kind.path, itemID: item.id, state: state.rawValue)))
             }
         case .remove:
-            shelves.mutate { remove(&$0, item: item) }
-            do {
-                try await client.post(path, body: ReadingStateRequest.remove, as: Empty.self)
-            } catch {
-                OfflineStore.shared.enqueue(PendingWrite(
-                    .readingState(kind: kind.path, itemID: item.id, state: "none")))
-            }
+            await remove(item)
         }
         if let value = shelves.value { WidgetBridge.publish(reading: value, session: session) }
+    }
+
+    /// Removing takes the dates, rating and any live session with it; the undo hands
+    /// everything but the session back through `/restore`.
+    private func remove(_ item: ReadingItem) async {
+        guard let client = session.client else { return }
+        let removedKind = kind
+        var spot: (state: ReadingState, index: Int)?
+        shelves.mutate { value in
+            var sections = removedKind == .book ? value.books : value.manga
+            if let found = sections.take(item.id) { spot = (found.state, found.index) }
+            if removedKind == .book { value.books = sections } else { value.manga = sections }
+        }
+        active.removeAll { $0.kind == removedKind.rawValue && $0.itemID == item.id }
+        do {
+            try await client.post("\(removedKind.path)/\(item.id)/state",
+                                  body: ReadingStateRequest.remove, as: Empty.self)
+        } catch {
+            OfflineStore.shared.enqueue(PendingWrite(
+                .readingState(kind: removedKind.path, itemID: item.id, state: "none")))
+        }
+        let was = spot
+        undo = UndoToast(message: "Removed \(item.displayTitle)") {
+            shelves.mutate { value in
+                var sections = removedKind == .book ? value.books : value.manga
+                sections.put(item, in: was?.state ?? item.readingState ?? .want, at: was?.index ?? 0)
+                if removedKind == .book { value.books = sections } else { value.manga = sections }
+            }
+            let request = RestoreReadingRequest(from: item, state: was?.state ?? .want)
+            do {
+                try await client.post("\(removedKind.path)/\(item.id)/restore",
+                                      body: request, as: Empty.self)
+            } catch {
+                // An older server has no /restore — the plain state write gets the
+                // title back on its shelf, if not its dates.
+                _ = try? await client.post("\(removedKind.path)/\(item.id)/state",
+                                           body: ReadingStateRequest(state: was?.state ?? .want,
+                                                                     progress: item.progress),
+                                           as: Empty.self)
+            }
+        }
+    }
+
+    /// The sheet saved something — reflect it without a refetch where we can.
+    private func apply(_ outcome: ReadingProgressOutcome, to target: ReadingProgressTarget) async {
+        switch outcome {
+        case .progress(let value), .sessionEnded(let value):
+            shelves.mutate { value2 in
+                patchByID(&value2, kind: target.kind, id: target.itemID) { item in
+                    item.progress = max(value, target.live == nil ? 0 : (item.progress ?? 0))
+                }
+            }
+        case .finished(let total):
+            shelves.mutate { value in
+                patchByID(&value, kind: target.kind, id: target.itemID, moveTo: .finished) { item in
+                    item.progress = total
+                    item.state = ReadingState.finished.rawValue
+                    if item.finishedAt == nil { item.finishedAt = MQTime.stamp() }
+                }
+            }
+        case .discarded:
+            break
+        }
+        if target.live != nil { await loadActive() }
+        if let value = shelves.value { WidgetBridge.publish(reading: value, session: session) }
+    }
+
+    private func patchByID(_ value: inout ReadingShelves, kind: ReadingKind, id: Int,
+                           moveTo: ReadingState? = nil, change: (inout ReadingItem) -> Void) {
+        var sections = kind == .book ? value.books : value.manga
+        guard let found = sections.take(id) else { return }
+        var item = found.item
+        change(&item)
+        if let moveTo {
+            sections.put(item, in: moveTo)
+        } else {
+            sections.put(item, in: found.state, at: found.index)
+        }
+        if kind == .book { value.books = sections } else { value.manga = sections }
     }
 
     /// Move an item between shelves in place, so the grid doesn't blink on every tap.
     private func patch(_ shelves: inout ReadingShelves, item: ReadingItem,
                        state: ReadingState? = nil, progress: Int? = nil) {
         var sections = kind == .book ? shelves.books : shelves.manga
-        var found: ReadingItem?
-        for keyPath in [\ReadingSections.reading, \ReadingSections.want, \ReadingSections.finished] {
-            if let index = sections[keyPath: keyPath].firstIndex(where: { $0.id == item.id }) {
-                found = sections[keyPath: keyPath].remove(at: index)
-                break
-            }
-        }
-        guard var moved = found else { return }
+        guard let found = sections.take(item.id) else { return }
+        var moved = found.item
         if let progress { moved.progress = progress }
         if let state {
             moved.state = state.rawValue
             if state == .finished, moved.finishedAt == nil { moved.finishedAt = MQTime.stamp() }
-            if state != .want, moved.startedAt == nil { moved.startedAt = MQTime.stamp() }
+            if state == .reading || state == .finished, moved.startedAt == nil {
+                moved.startedAt = MQTime.stamp()
+            }
+            sections.put(moved, in: state)
+        } else {
+            sections.put(moved, in: found.state, at: found.index)
         }
-        switch moved.readingState {
-        case .reading: sections.reading.insert(moved, at: 0)
-        case .want: sections.want.insert(moved, at: 0)
-        case .finished: sections.finished.insert(moved, at: 0)
-        case nil: break
-        }
-        if kind == .book { shelves.books = sections } else { shelves.manga = sections }
-    }
-
-    private func remove(_ shelves: inout ReadingShelves, item: ReadingItem) {
-        var sections = kind == .book ? shelves.books : shelves.manga
-        sections.reading.removeAll { $0.id == item.id }
-        sections.want.removeAll { $0.id == item.id }
-        sections.finished.removeAll { $0.id == item.id }
         if kind == .book { shelves.books = sections } else { shelves.manga = sections }
     }
 }
@@ -369,9 +459,18 @@ struct ReadingTile: View {
     let item: ReadingItem
     let kind: ReadingKind
     let section: ReadingState
+    var isLive = false
     let perform: (Action) async -> Void
 
-    enum Action { case increment, finish, start, remove }
+    enum Action {
+        case increment
+        /// Open the progress sheet.
+        case progress
+        /// The long-press "Mark finished": deliberate, so it may skip the sheet.
+        case finish
+        case move(ReadingState)
+        case remove
+    }
 
     var body: some View {
         NavigationLink(value: kind == .book ? Navigator.Route.book(item.id)
@@ -390,6 +489,7 @@ struct ReadingTile: View {
                     }
                     .overlay(alignment: .topLeading) { actions.padding(6) }
                     .overlay(alignment: .bottom) { statusStrip }
+                    .opacity(section == .dnf ? 0.75 : 1)
 
                 Text(item.displayTitle)
                     .font(.mqTile)
@@ -401,18 +501,44 @@ struct ReadingTile: View {
                     .foregroundStyle(Color.mqInkMuted)
                     .lineLimit(1)
 
-                if section == .reading, item.total(for: kind) != nil {
-                    ProgressBar(fraction: item.fraction(for: kind), percentLabel: true)
+                if section == .reading, let pace = item.paceLine {
+                    Text(pace)
+                        .font(MarqueeFont.body(11, .semibold, relativeTo: .caption2))
+                        .foregroundStyle(item.newChapters > 0 ? Color.mqBrass : Color.mqInkSoft)
+                        .lineLimit(1)
+                }
+
+                if section == .reading || section == .paused, item.total(for: kind) != nil {
+                    // The bar is the way in to logging progress, as on the web.
+                    Button { Task { await perform(.progress) } } label: {
+                        ProgressBar(fraction: item.fraction(for: kind), percentLabel: true)
+                            .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Update progress, \(item.progressLabel(for: kind))")
                 }
             }
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button("Update progress", systemImage: "slider.horizontal.3") {
+                Task { await perform(.progress) }
+            }
             if section != .reading {
-                Button("Start reading", systemImage: "book") { Task { await perform(.start) } }
+                Button(section == .paused ? "Pick it back up" : "Start reading", systemImage: "book") {
+                    Task { await perform(.move(.reading)) }
+                }
+            }
+            if section == .reading {
+                Button("Pause", systemImage: "pause") { Task { await perform(.move(.paused)) } }
             }
             if section != .finished {
                 Button("Mark finished", systemImage: "checkmark") { Task { await perform(.finish) } }
+            }
+            if section == .reading || section == .paused {
+                Button("Didn\u{2019}t finish", systemImage: "xmark.circle") {
+                    Task { await perform(.move(.dnf)) }
+                }
             }
             Button("Remove from shelf", systemImage: "trash", role: .destructive) {
                 Task { await perform(.remove) }
@@ -420,6 +546,7 @@ struct ReadingTile: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(item.displayTitle). \(item.progressLabel(for: kind))")
+        .accessibilityAction(named: "Update progress") { Task { await perform(.progress) } }
         .accessibilityAction(named: "Remove from shelf") { Task { await perform(.remove) } }
     }
 
@@ -427,32 +554,47 @@ struct ReadingTile: View {
         var parts: [String] = []
         if kind == .book, let author = item.author, !author.isEmpty { parts.append(author) }
         if kind == .manga, let origin = item.origin { parts.append(origin) }
-        if section == .reading { parts.append(item.progressLabel(for: kind)) }
+        if section == .reading || section == .paused || section == .dnf {
+            parts.append(item.progressLabel(for: kind))
+        }
         if section == .finished, let finished = item.finishedAt, !finished.isEmpty {
             parts.append(MQTime.medium(finished))
         }
         return parts.joined(separator: " · ")
     }
 
+    private var statusText: String {
+        if isLive { return "Reading now" }
+        switch item.readingState {
+        case .finished: return "Read"
+        case .reading: return "Reading"
+        case .paused: return "Paused"
+        case .dnf: return "Didn\u{2019}t finish"
+        case .want, nil: return "Not read"
+        }
+    }
+
     private var statusStrip: some View {
         HStack(spacing: 3) {
             if item.readingState == .finished {
                 Image(systemName: "checkmark").font(.system(size: 8, weight: .bold))
+            } else if isLive {
+                Circle().fill(Color.mqBrassOnFill).frame(width: 5, height: 5)
             }
-            Text(item.readingState == .finished ? "Read"
-                 : item.readingState == .reading ? "Reading" : "Not read")
+            Text(statusText)
         }
         .font(MarqueeFont.body(9.5, .bold, relativeTo: .caption2))
-        .foregroundStyle(item.readingState == .finished ? Color.mqBrassOnFill : .white)
+        .foregroundStyle(item.readingState == .finished || isLive ? Color.mqBrassOnFill : .white)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .frame(maxWidth: .infinity)
-        .background(item.readingState == .finished ? Color.mqBrassFill.opacity(0.9)
-                                                   : Color.mqScrim.opacity(0.75))
+        .background(item.readingState == .finished || isLive ? Color.mqBrassFill.opacity(0.9)
+                                                              : Color.mqScrim.opacity(0.75))
     }
 
-    /// The poster carries the move you make often; removing something from the shelf
-    /// is a long press, not a button on the artwork.
+    /// The poster carries the move you make often. A "+1" where a chapter is the
+    /// unit; otherwise the progress sheet — never a one-tap "finished", which on a
+    /// 400-page book is one stray tap from a wrong finish date.
     @ViewBuilder
     private var actions: some View {
         VStack(spacing: 6) {
@@ -461,10 +603,14 @@ struct ReadingTile: View {
                 if item.supportsIncrement(for: kind) {
                     tileButton("plus", "Read one more chapter") { await perform(.increment) }
                 }
-                tileButton("checkmark", "Finished it") { await perform(.finish) }
+                tileButton("slider.horizontal.3", isLive ? "End session" : "Update progress") {
+                    await perform(.progress)
+                }
             case .want:
-                tileButton("book", "Start reading") { await perform(.start) }
-            case .finished:
+                tileButton("book", "Start reading") { await perform(.move(.reading)) }
+            case .paused:
+                tileButton("play.fill", "Pick it back up") { await perform(.move(.reading)) }
+            case .finished, .dnf:
                 EmptyView()
             }
         }
@@ -485,13 +631,12 @@ struct ReadingTile: View {
 }
 
 /// A search result you can put straight on a shelf.
-private struct AddableTile: View {
+struct AddableTile: View {
     let cover: String?
     let title: String
     let subtitle: String
     let score: Double?
     let route: Navigator.Route
-    let isPreview: Bool
     let add: (ReadingState) async -> Void
 
     @State private var added = false
@@ -518,6 +663,7 @@ private struct AddableTile: View {
                                 .frame(width: 28, height: 28)
                                 .background(.ultraThinMaterial, in: .circle)
                                 .padding(6)
+                                .accessibilityLabel("On your shelf")
                         } else {
                             VStack(spacing: 6) {
                                 button("bookmark", "Want to read") { await add(.want) }
@@ -539,6 +685,7 @@ private struct AddableTile: View {
             }
         }
         .buttonStyle(.plain)
+        .sensoryFeedback(.success, trigger: added) { _, new in new }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(title). \(subtitle)")
     }
@@ -556,84 +703,5 @@ private struct AddableTile: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
-    }
-}
-
-/// "Where did you get to?" — the only question ending a session asks.
-struct EndSessionSheet: View {
-    let session: ActiveSession
-    let onDone: () async -> Void
-
-    @Environment(Session.self) private var appSession
-    @Environment(\.dismiss) private var dismiss
-    @State private var position = 0
-
-    var body: some View {
-        NavigationStack {
-            MarqueeScreen {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(session.title ?? "")
-                        .font(MarqueeFont.body(19, .bold, relativeTo: .title3))
-                        .foregroundStyle(Color.mqInk)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Where did you get to?").mqEyebrowStyle()
-                        HStack(spacing: 10) {
-                            Button { position = max(0, position - 1) } label: {
-                                Image(systemName: "minus").frame(width: 38, height: 38)
-                            }
-                            .buttonStyle(.mqChip)
-
-                            TextField("0", value: $position, format: .number)
-                                .keyboardType(.numberPad)
-                                .font(MarqueeFont.body(22, .bold, relativeTo: .title2))
-                                .multilineTextAlignment(.center)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .mqPanel()
-
-                            Button {
-                                position = min(session.total ?? .max, position + 1)
-                            } label: {
-                                Image(systemName: "plus").frame(width: 38, height: 38)
-                            }
-                            .buttonStyle(.mqChip)
-                        }
-                        Text(session.total.map { "of \($0) \(session.readingKind.unit)" }
-                             ?? session.readingKind.unit)
-                            .font(.mqCaption)
-                            .foregroundStyle(Color.mqInkMuted)
-                    }
-
-                    Button("Save session") { Task { await end(discard: false) } }
-                        .buttonStyle(.mqPrimary)
-
-                    Button("Discard this session") { Task { await end(discard: true) } }
-                        .buttonStyle(.mqQuiet)
-                        .frame(maxWidth: .infinity)
-
-                    Spacer()
-                }
-                .padding(MQ.gutter)
-            }
-            .navigationTitle("End session")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-            }
-        }
-        .presentationDetents([.height(400)])
-        .presentationBackground(Color.mqGround)
-        .onAppear { position = session.startPos ?? 0 }
-    }
-
-    private func end(discard: Bool) async {
-        guard let client = appSession.client else { return }
-        _ = try? await client.post("\(session.kind)/\(session.itemID)/session/end",
-                                   body: EndSessionRequest(pos: discard ? nil : position,
-                                                           discard: discard ? true : nil),
-                                   as: Empty.self)
-        await onDone()
-        dismiss()
     }
 }

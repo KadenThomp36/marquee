@@ -294,12 +294,34 @@ final class ShowModel {
 
     func rate(_ rating: Int?, session: Session) async {
         detail?.rating = rating
-        guard let client = session.client, let rating else { return }
+        guard let client = session.client else { return }
+        guard let rating else {
+            // Clearing is an explicit `"rating": null` — leaving the key out would
+            // tell the server to keep the old score.
+            _ = try? await client.post("show/\(showID)/follow",
+                                       body: FollowRequest.clearRating, as: Empty.self)
+            return
+        }
         do {
             try await client.post("show/\(showID)/follow",
                                   body: FollowRequest(rating: rating), as: Empty.self)
         } catch {
             OfflineStore.shared.enqueue(PendingWrite(.rateShow(showID: showID, rating: rating)))
+        }
+    }
+
+    /// Take a show you haven't started back off your watchlist. Nothing's been
+    /// watched, so there's no history to lose and no need to ask.
+    func removeFromWatchlist(session: Session) async {
+        guard let client = session.client else { return }
+        detail?.followed = false
+        detail?.archived = false
+        do {
+            try await client.post("show/\(showID)/follow",
+                                  body: FollowRequest(unfollow: true), as: Empty.self)
+            OfflineStore.shared.cache(detail, for: cacheKey)
+        } catch {
+            detail?.followed = true
         }
     }
 

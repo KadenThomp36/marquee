@@ -19,6 +19,8 @@ extension View {
                 ListScreen(listID: id)
             case .book(let id):
                 ReadingDetailScreen(kind: .book, itemID: id)
+            case .bookPreview(let hardcoverID):
+                ReadingDetailScreen(kind: .book, itemID: hardcoverID, isHardcoverPreview: true)
             case .manga(let id):
                 ReadingDetailScreen(kind: .manga, itemID: id)
             case .profile(let username):
