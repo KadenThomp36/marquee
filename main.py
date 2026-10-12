@@ -888,6 +888,18 @@ def admin_user(user=Depends(current_user)):
     return user
 
 
+def ua_device(request):
+    """'Safari on iPhone', 'Chrome on Mac' — so the Devices list isn't six identical
+    'Web browser' rows. Only a fallback: native clients send their own device_name."""
+    ua = request.headers.get("user-agent") or ""
+    os_ = next((n for k, n in (("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"),
+                               ("Mac OS X", "Mac"), ("Windows", "Windows"), ("CrOS", "Chromebook"),
+                               ("Linux", "Linux")) if k in ua), "")
+    br = next((n for k, n in (("Edg/", "Edge"), ("Firefox/", "Firefox"), ("FxiOS", "Firefox"),
+                              ("CriOS", "Chrome"), ("Chrome/", "Chrome"), ("Safari/", "Safari")) if k in ua), "")
+    return " on ".join(x for x in (br, os_) if x) or None
+
+
 def new_session(con, user_id, device_name=None):
     """Mint a session token, optionally naming the device it belongs to so it can be
     listed and revoked one at a time."""
@@ -931,7 +943,7 @@ async def login(request: Request, response: Response):
         stale = request.cookies.get("sid")
         if stale:
             con.execute("DELETE FROM sessions WHERE token=?", (stale,))
-        tok = new_session(con, u["id"], body.get("device_name"))
+        tok = new_session(con, u["id"], body.get("device_name") or ua_device(request))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
     out = {"username": u["username"], "is_admin": bool(u["is_admin"])}
     # native clients ask for the token in the body; browsers keep using the cookie
@@ -1135,7 +1147,7 @@ async def register(request: Request, response: Response):
                                  datetime.now().isoformat()))
         uid = cur.lastrowid
         ensure_default_list(con, uid)
-        tok = new_session(con, uid, body.get("device_name"))
+        tok = new_session(con, uid, body.get("device_name") or ua_device(request))
     response.set_cookie("sid", tok, max_age=86400 * SESSION_DAYS, httponly=True, samesite="lax")
     out = {"username": username, "is_admin": first}
     if body.get("want_token"):

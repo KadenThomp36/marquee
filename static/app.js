@@ -1504,7 +1504,8 @@ routes.show = async id => {
   const nextEp = watchable.find(e => !e.watched);
   const openSeason = nextEp ? nextEp.season : (s.seasons.at(-1)?.season ?? 1);
   const stars = r => [1, 2, 3, 4, 5].map(i =>
-    `<span data-v="${i * 2}" class="${(r || 0) >= i * 2 ? "b" : ""}">${I.star}</span>`).join("");
+    `<span data-v="${i * 2}" class="${(r || 0) >= i * 2 ? "b" : ""}" role="button" tabindex="0"
+      aria-label="Rate ${i} of 5${(r || 0) === i * 2 ? " (tap again to clear)" : ""}">${I.star}</span>`).join("");
 
   const info = s.info || {};
   const yearsSpan = info.first_air ? info.first_air.slice(0, 4) +
@@ -1571,6 +1572,8 @@ routes.show = async id => {
     <div id="watch-now"></div>
     ${info.cast?.length ? `<div class="section"><h2>Cast</h2><div class="rule"></div></div>${castStrip(info.cast)}` : ""}
     <div id="show-ratings"></div>
+    ${s.seasons.length ? `<div class="section"><h2>Episodes</h2><div class="rule"></div>
+      <span class="cnt ep-hint">${matchMedia("(hover:hover)").matches ? "right-click" : "press and hold"} an episode to change when you watched it</span></div>` : ""}
     <div class="reveal">
     ${s.seasons.map(se => {
       const eps = se.episodes, w = eps.filter(e => e.watched).length;
@@ -1830,9 +1833,14 @@ routes.show = async id => {
   $("#stars").onclick = e => {
     const v = e.target.closest("[data-v]")?.dataset.v;
     if (!v) return;
-    $("#stars").innerHTML = stars(+v);
-    api(`/show/${id}/follow`, { body: { rating: +v } }).catch(() => {});
+    if (!s.followed) { toast("Add it to your watchlist first, then rate it"); return; }
+    const next = +v === s.rating ? null : +v;           // tap your current rating to clear it
+    s.rating = next;
+    $("#stars").innerHTML = stars(next);
+    api(`/show/${id}/follow`, { body: { rating: next } })
+      .then(() => toast(next ? `Rated ${next / 2} of 5` : "Rating cleared")).catch(() => {});
   };
+  $("#stars").onkeydown = e => { if ((e.key === "Enter" || e.key === " ") && e.target.dataset.v) { e.preventDefault(); e.target.click(); } };
 
   view.onclick = async e => {
     if (lpFired) { lpFired = false; e.preventDefault(); return; }   // swallow the click after a long-press
