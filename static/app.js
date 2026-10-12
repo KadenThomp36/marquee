@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261011a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261011b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -949,7 +949,8 @@ function wlCard(s) {
   return `<a class="wcard" href="#/show/${s.id}">
     <div class="wc-shot"><img loading="lazy" src="${POSTER(s.poster)}" alt=""></div>
     <div class="wc-t">${esc(s.title)}</div>
-    <div class="wc-s">${esc(showLibSub(s, "watchlist"))}</div></a>`;
+    <div class="wc-s">${esc(!s.aired && s.next_air ? `Premieres ${shortDay(s.next_air)}`
+      : [s.prov ? s.prov.name : s.network, hrs(s.total_min)].filter(Boolean).join(" · ") || String(s.year || ""))}</div></a>`;
 }
 function calCard(e) {
   return `<a class="wcard" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
@@ -970,9 +971,12 @@ function renderHome(d, animate = true) {
     <div class="home-hi"><h1>${greeting}, ${esc((ME.display_name || ME.username).split(" ")[0])}</h1></div>
     ${d.up_next.length || (d.recent || []).length ? `${railHead("Up Next")}
       <div class="hrail up ${rv}">${pastStrip(d.recent)}${d.up_next.map(x => bigCard(x)).join("")}</div>` : ""}
-    ${d.up_next.length ? "" : `<div class="empty">Nothing in the queue — everything is crossed off.</div>`}
+    ${d.up_next.length ? "" : (d.watchlist || []).length
+      ? `<a class="lib-pick home-nudge" href="#/shows/watchlist">${I.check}<span><b>All caught up.</b> ${d.watchlist.length} show${d.watchlist.length === 1 ? "" : "s"} waiting on your watchlist</span>${I.chevS}</a>`
+      : (d.recent || []).length ? `<div class="empty">Nothing in the queue — everything is crossed off.</div>`
+      : `<div class="empty">Nothing here yet. Add a show from <a class="tlink" href="#/search">Discover</a> and it’ll wait on your watchlist until you start it.</div>`}
     ${railOf("Haven’t watched in a while", d.stale, x => bigCard(x))}
-    ${railOf("Ready to start", d.watchlist, wlCard, "#/shows/watchlist")}
+    ${railOf("On your watchlist", d.watchlist, wlCard, "#/shows/watchlist")}
     ${railOf("On the calendar", d.calendar, calCard, "#/upcoming")}
     <div id="home-recs"></div>
     ${railOf("Around the house", d.social, x => watchedCard(x, { by: true }))}
@@ -1392,8 +1396,10 @@ routes.show = async id => {
           </div>
           <div class="actions">
             <div class="act-main">
-              ${s.followed ? `<button class="btn pri" id="arch">${s.archived ? "Resume" : "Watching"}</button>`
-                : `<button class="btn pri" id="follow">${I.plus} Follow</button>`}
+              ${!s.followed ? `<button class="btn pri" id="follow">${I.plus} Add to watchlist</button>`
+                : s.archived ? `<button class="btn pri" id="arch">Resume watching</button>`
+                : !watched ? `<button class="btn on-wl" id="unwl" aria-label="On your watchlist — tap to remove">${I.check} On your watchlist</button>`
+                : `<button class="btn on-wl" id="watchmenu" aria-haspopup="true">Watching <svg class="ico" viewBox="0 0 24 24" fill="none"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>`}
               <span id="reqslot" data-req="show:${id}"></span>
             </div>
             <div class="act-row">
@@ -1639,12 +1645,36 @@ routes.show = async id => {
     if (r) { delete CACHE["/dashboard"]; routes.show(id); }
   };
   if ($("#artbtn")) $("#artbtn").onclick = () => openGallery("show", id, s.title);
-  if ($("#follow")) $("#follow").onclick = async () => { await api(`/show/${id}/follow`, { body: {} }); delete CACHE["/dashboard"]; routes.show(id); };
+  const libDirty = () => { delete CACHE["/dashboard"]; delete CACHE["/shows"]; delete CACHE["/upcoming"]; };
+  if ($("#follow")) $("#follow").onclick = async () => {
+    await api(`/show/${id}/follow`, { body: {} }); libDirty(); routes.show(id);
+    undoToast(`${s.title} is on your watchlist`, () => { location.hash = "#/shows/watchlist"; }, "See it");
+  };
+  if ($("#unwl")) $("#unwl").onclick = async () => {
+    const at = s.added_at;
+    await api(`/show/${id}/follow`, { body: { unfollow: true } }); libDirty(); routes.show(id);
+    undoToast(`Off your watchlist`, async () => {
+      await api(`/show/${id}/follow`, { body: { added_at: at || undefined } }); libDirty(); routes.show(id); });
+  };
+  if ($("#watchmenu")) $("#watchmenu").onclick = () => {
+    const sh = sheet(`<div class="sh-t">${esc(s.title)}</div>
+      <div class="sortopts"><button class="sortopt" data-x="stop"><span>Stop watching<br><small class="hint">Moves it out of Up Next, onto your Stopped shelf</small></span></button></div>`,
+      { cls: "editor" });
+    sh.el.addEventListener("click", async e => {
+      if (!e.target.closest("[data-x=stop]")) return;
+      sh.close();
+      await api(`/show/${id}/follow`, { body: { archived: true } }); libDirty(); routes.show(id);
+      undoToast(`Stopped watching ${s.title}`, async () => {
+        await api(`/show/${id}/follow`, { body: { archived: false } }); libDirty(); routes.show(id); });
+    });
+  };
   if ($("#arch")) $("#arch").onclick = async () => {
-    await api(`/show/${id}/follow`, { body: { archived: !s.archived } }); delete CACHE["/dashboard"]; routes.show(id); };
+    await api(`/show/${id}/follow`, { body: { archived: false } }); libDirty(); routes.show(id); };
   if ($("#unfollow")) $("#unfollow").onclick = async () => {
-    if (confirm(`Remove ${s.title} and all its watch history?`)) {
-      await api(`/show/${id}/follow`, { body: { unfollow: true } }); delete CACHE["/dashboard"]; location.hash = "#/"; } };
+    if (await ask(`Remove ${esc(s.title)} and all its watch history?`, "Remove", "Keep it") !== "primary") return;
+    await api(`/show/${id}/follow`, { body: { unfollow: true } }); libDirty();
+    if (NAV_DEPTH > 0) history.back(); else location.hash = "#/shows";
+  };
   $("#stars").onclick = e => {
     const v = e.target.closest("[data-v]")?.dataset.v;
     if (!v) return;
@@ -1794,16 +1824,17 @@ routes.episode = async (id, season, number) => {
 };
 
 /* ---------- library: every show and film you've put your hand on ----------
-   One tab, two sides. Movies has always had its watched/watchlist shelves; Shows gets
-   the same treatment — most of all a Watchlist (followed, not started), the one
-   shelf nothing else in the app showed you. */
+   One tab, two sides. Each side has shelves; the Watchlist is the one people live in,
+   so it opens there and gets the most help choosing: grouped by when you can actually
+   start something, with the size of the commitment, where it streams and who else in
+   the house is into it, all on the row. */
 const LIB = {
   shows: {
     path: "/shows", noun: ["show", "shows"], def: "watchlist",
     shelves: [["watchlist", "Watchlist"], ["watching", "Watching"], ["caught_up", "Caught up"],
               ["finished", "Finished"], ["stopped", "Stopped"]],
     empty: {
-      watchlist: `Shows you add but haven’t started land here. Find one in <a class="tlink" href="#/search">Discover</a>.`,
+      watchlist: `Shows you add land here until you start them. Find one in <a class="tlink" href="#/search">Discover</a>.`,
       watching: "Nothing in progress — start something from your watchlist.",
       caught_up: "No shows waiting on new episodes.",
       finished: "No finished series yet.",
@@ -1811,17 +1842,26 @@ const LIB = {
     },
   },
   movies: {
-    path: "/movies", noun: ["film", "films"], def: "watched",
-    shelves: [["watched", "Watched"], ["watchlist", "Watchlist"]],
+    path: "/movies", noun: ["film", "films"], def: "watchlist",
+    shelves: [["watchlist", "Watchlist"], ["watched", "Watched"]],
     empty: {
       watched: `No films logged yet. Find one in <a class="tlink" href="#/search">Discover</a>.`,
       watchlist: `Films you want to see land here. Find one in <a class="tlink" href="#/search">Discover</a>.`,
     },
   },
 };
-const LIB_SORTS = [["recent", "Recent"], ["title", "Title A–Z"], ["year", "Year"], ["rating", "My rating"]];
+// sorts offered per shelf — "My rating" means nothing on a list of things you haven't seen
+const LIB_SORTS = {
+  "shows.watchlist": [["added", "Recently added"], ["short", "Shortest first"], ["house", "Household picks"], ["imdb", "Highest rated"], ["title", "Title A–Z"]],
+  "shows.watching": [["recent", "Recently watched"], ["short", "Least left"], ["title", "Title A–Z"]],
+  "movies.watchlist": [["added", "Recently added"], ["short", "Shortest first"], ["house", "Household picks"], ["imdb", "Highest rated"], ["year", "Newest"], ["title", "Title A–Z"]],
+  other: [["recent", "Recent"], ["title", "Title A–Z"], ["year", "Year"], ["rating", "My rating"]],
+};
+const libSorts = (kind, shelf) => LIB_SORTS[`${kind}.${shelf}`] || LIB_SORTS.other;
 const libPref = (k, d) => { try { return localStorage.getItem("mq.lib." + k) || d; } catch { return d; } };
 const libSave = (k, v) => { try { localStorage.setItem("mq.lib." + k, v); } catch { /* private mode */ } };
+const libView = (kind, shelf) => libPref(`view.${kind}.${shelf}`,
+  shelf === "watchlist" || shelf === "watching" ? "list" : "grid");
 let LIBQ = "";                               // the filter box survives switching shelves
 const libFind = (d, id) => {
   for (const k of Object.keys(d)) {
@@ -1830,111 +1870,360 @@ const libFind = (d, id) => {
   }
   return [null, -1];
 };
+const minsOf = it => it.left_min != null ? it.left_min : it.runtime || 0;
 function libSort(arr, by) {
   const a = arr.slice();
-  if (by === "title") a.sort((x, y) => stripArticle(x.title).localeCompare(stripArticle(y.title)));
+  const t = x => stripArticle(x.title);
+  if (by === "title") a.sort((x, y) => t(x).localeCompare(t(y)));
   else if (by === "year") a.sort((x, y) => (y.year || 0) - (x.year || 0));
   else if (by === "rating") a.sort((x, y) => (y.rating || 0) - (x.rating || 0));
-  return a;                                  // "recent" is the server's order
+  else if (by === "imdb") a.sort((x, y) => (y.imdb || y.vote || 0) - (x.imdb || x.vote || 0));
+  else if (by === "house") a.sort((x, y) => (y.household || []).length - (x.household || []).length);
+  else if (by === "short") a.sort((x, y) => (minsOf(x) || 1e9) - (minsOf(y) || 1e9));
+  return a;                                  // "added" / "recent" is the server's order
 }
-function showLibSub(s, shelf) {
-  const ep = s.next_ep;
-  if (shelf === "watchlist")
-    return s.aired ? [s.year, s.seasons ? `${s.seasons} season${s.seasons === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")
-      : s.next_air ? `Premieres ${fmtDate(s.next_air).replace(/, \d{4}$/, "")}` : String(s.year || "");
-  if (shelf === "caught_up")
-    return s.next_air ? `New ep ${fmtDate(s.next_air).replace(/, \d{4}$/, "")}` : "Up to date";
-  if (shelf === "finished") return `${s.watched} episode${s.watched === 1 ? "" : "s"}`;
-  if (ep) return `${sxe(ep.season, ep.number)}${s.remaining > 1 ? ` · ${s.remaining} left` : ""}`;
-  return `${s.watched} / ${s.aired}`;
+const hrs = m => !m ? "" : m < 60 ? `${Math.round(m)} min` : m < 600 ? `~${(m / 60).toFixed(m < 180 ? 1 : 0).replace(/\.0$/, "")} hrs` : `~${Math.round(m / 60)} hrs`;
+const hm = m => !m ? "" : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ""}`;
+const shortDay = d => {
+  const diff = Math.round((new Date(d + "T00:00") - new Date(nowStamp().slice(0, 10) + "T00:00")) / 864e5);
+  return diff <= 0 ? "today" : diff === 1 ? "tomorrow"
+    : diff < 7 ? new Date(d + "T00:00").toLocaleDateString(undefined, { weekday: "short" })
+    : fmtDate(d).replace(/, \d{4}$/, "");
+};
+/* where a watchlist title sits: can you start it tonight, is it still airing, or not out */
+function libGroupOf(kind, it) {
+  if (kind === "movies") return it.release_date && it.release_date > nowStamp().slice(0, 10) ? "soon" : "out";
+  if (!it.aired) return "soon";
+  return it.next_air ? "airing" : "binge";
 }
-function showLibCard(s, shelf) {
-  const ep = s.next_ep;
-  const pct = s.aired ? Math.round(100 * Math.min(s.watched, s.aired) / s.aired) : 0;
-  const bar = (shelf === "watching" || shelf === "stopped") && s.aired;
-  return `<div class="pcard" data-id="${s.id}">
-    <div class="pshot"><a href="#/show/${s.id}" aria-label="${esc(s.title)}"><img class="poster" loading="lazy" src="${POSTER(s.poster)}" alt=""></a>
-      ${s.rating ? `<span class="badge">${s.rating}/10</span>` : ""}
-      ${s.stale ? `<span class="lib-flag" title="Haven’t watched in a while">Paused</span>` : ""}
-      <span data-listmark="show:${s.id}">${listMark("show", s.id)}</span>
+const LIB_GROUPS = {
+  shows: [["binge", "Ready to binge"], ["airing", "Airing now"], ["soon", "Coming soon"]],
+  movies: [["out", "Out now"], ["soon", "Coming soon"]],
+};
+/* "Mia finished it · ★9", "On Mia & Jo’s watchlists too" — the household on one line */
+function houseLine(kind, it) {
+  const hh = it.household || [];
+  if (!hh.length) return "";
+  const names = ps => ps.length === 1 ? ps[0].name : ps.length === 2 ? `${ps[0].name} & ${ps[1].name}`
+    : `${ps[0].name} +${ps.length - 1}`;
+  const star = p => p.rating ? ` · ${I.star}${p.rating}` : "";
+  let want, done, on = [];
+  if (kind === "movies") {
+    want = hh.filter(p => p.state === "watchlist"); done = hh.filter(p => p.state === "watched");
+  } else {
+    want = hh.filter(p => !p.watched && !p.stopped);
+    done = hh.filter(p => p.watched && it.aired && p.watched >= it.aired);
+    on = hh.filter(p => p.watched && !(it.aired && p.watched >= it.aired) && !p.stopped && p.last_ep);
+  }
+  const bits = [];
+  if (done.length) bits.push(done.length === 1
+    ? `<b>${esc(done[0].name)}</b> ${kind === "movies" ? "watched" : "finished"} it${star(done[0])}`
+    : `<b>${esc(names(done))}</b> ${kind === "movies" ? "watched" : "finished"} it`);
+  if (on.length && bits.length < 2) {
+    const [s, n] = on[0].last_ep.split(":");
+    bits.push(`<b>${esc(on[0].name)}</b> is on ${sxe(s, n)}`);
+  }
+  if (want.length && bits.length < 2) bits.push(want.length === 1 && !bits.length
+    ? `On <b>${esc(want[0].name)}</b>’s watchlist too` : `<b>${esc(names(want))}</b> want${want.length === 1 ? "s" : ""} it too`);
+  const faces = [...done, ...on, ...want].slice(0, 3);
+  return `<span class="lr-h"><span class="lr-faces">${faces.map(p =>
+    avatarHTML({ display_name: p.name, avatar: p.avatar }, "xs")).join("")}</span><span>${bits.join(" · ")}</span></span>`;
+}
+const housePips = it => (it.household || []).length ? `<span class="lt-faces">${it.household.slice(0, 2).map(p =>
+  avatarHTML({ display_name: p.name, avatar: p.avatar }, "xs")).join("")}</span>` : "";
+function provHTML(it, kind) {
+  const net = kind === "shows" && it.network;
+  if (it.prov) return `<span class="lr-prov">${it.prov.logo ? `<img src="${esc(it.prov.logo)}" alt="" loading="lazy">` : ""}${esc(it.prov.name)}</span>`;
+  return net ? `<span class="lr-prov dim">${esc(net)}</span>` : "";
+}
+const scoreHTML = it => it.imdb ? `<span class="lr-score">${SRC_LOGO.IMDb}${(+it.imdb).toFixed(1)}</span>`
+  : it.vote ? `<span class="lr-score tm">${I.star}${it.vote}</span>` : "";
+function libMeta(kind, it, shelf) {
+  if (kind === "movies") return [hm(it.runtime), it.year, it.cert].filter(Boolean).map(esc).join(" · ");
+  const ep = it.next_ep;
+  if (shelf === "watching")
+    return ep ? `<b class="amb">${sxe(ep.season, ep.number)}</b> next · ${it.remaining} left${it.left_min ? ` · <b>${hrs(it.left_min)}</b>` : ""}`
+      : `${it.watched} / ${it.aired}`;
+  if (!it.aired) return it.n_episodes ? `${it.n_episodes} episodes announced` : esc(it.network || "Not out yet");
+  return [it.seasons ? `${it.seasons} season${it.seasons === 1 ? "" : "s"}` : "",
+          `${it.aired} ep${it.aired === 1 ? "" : "s"}`,
+          it.total_min ? `<b>${hrs(it.total_min)}</b>` : ""].filter(Boolean).join(" · ");
+}
+function libWhen(kind, it) {
+  if (kind === "movies") return it.release_date && it.release_date > nowStamp().slice(0, 10)
+    ? `<span class="lr-when">Out ${shortDay(it.release_date)}</span>` : "";
+  if (!it.aired && it.next_air) return `<span class="lr-when">Premieres ${shortDay(it.next_air)}</span>`;
+  if (it.next_air) return `<span class="lr-when">New ep ${shortDay(it.next_air)}</span>`;
+  return "";
+}
+/* the big right-hand action: start / next episode / seen it — never on top of the art */
+function libGo(kind, it, shelf) {
+  if (kind === "movies") return shelf === "watchlist"
+    ? `<button class="lr-go" data-a="watched" aria-label="Mark ${esc(it.title)} watched">${I.check}<small>Seen it</small></button>` : "";
+  const ep = it.next_ep;
+  if (ep && (shelf === "watchlist" || shelf === "watching"))
+    return `<button class="lr-go" data-a="punch" data-s="${ep.season}" data-n="${ep.number}"
+      aria-label="Mark ${esc(it.title)} ${sxe(ep.season, ep.number)} watched">${I.check}<small>S${ep.season} E${ep.number}</small></button>`;
+  if (!it.aired && it.next_air)
+    return `<span class="lr-go soon" aria-hidden="true">${I.bell}<small>${esc(shortDay(it.next_air))}</small></span>`;
+  return "";
+}
+function libRow(kind, it, shelf) {
+  const type = kind === "shows" ? "show" : "movie";
+  const pct = it.aired ? Math.round(100 * Math.min(it.watched, it.aired) / it.aired) : 0;
+  return `<div class="lrow-wrap" data-id="${it.id}">
+    <button class="lr-del" data-a="remove" tabindex="-1" aria-hidden="true">${I.trash}<span>Remove</span></button>
+    <div class="lrow${it.stale ? " paused" : ""}">
+      <a class="lr-art" href="#/${type}/${it.id}" aria-hidden="true" tabindex="-1"><img loading="lazy" src="${POSTER(it.poster)}" alt="">
+        <span data-listmark="${type}:${it.id}">${listMark(type, it.id)}</span></a>
+      <a class="lr-body" href="#/${type}/${it.id}">
+        <span class="lr-t">${esc(it.title)}${it.stale ? `<i class="lr-tag">Paused</i>` : ""}</span>
+        <span class="lr-m">${libMeta(kind, it, shelf)}</span>
+        ${shelf === "watching" && it.aired ? `<span class="lr-bar"><i style="width:${pct}%"></i></span>` : ""}
+        ${libWhen(kind, it) || provHTML(it, kind) || scoreHTML(it) ? `<span class="lr-p">${libWhen(kind, it)}${provHTML(it, kind)}${scoreHTML(it)}</span>` : ""}
+        ${houseLine(kind, it)}
+      </a>
+      ${libGo(kind, it, shelf)}
+    </div></div>`;
+}
+function libTile(kind, it, shelf) {
+  const type = kind === "shows" ? "show" : "movie";
+  const sub = kind === "movies"
+    ? (shelf === "watched" && it.watched_at ? fmtDate(it.watched_at.slice(0, 10)) : [it.prov && it.prov.name, hm(it.runtime) || it.year].filter(Boolean).join(" · "))
+    : shelf === "watchlist" ? [it.prov ? it.prov.name : it.network, hrs(it.total_min)].filter(Boolean).join(" · ")
+    : shelf === "caught_up" ? (it.next_air ? `New ep ${shortDay(it.next_air)}` : "Up to date")
+    : shelf === "finished" ? `${it.watched} episode${it.watched === 1 ? "" : "s"}`
+    : it.next_ep ? `${sxe(it.next_ep.season, it.next_ep.number)} · ${it.remaining} left` : `${it.watched} / ${it.aired}`;
+  const bar = kind === "shows" && (shelf === "watching" || shelf === "stopped") && it.aired;
+  const pct = it.aired ? Math.round(100 * Math.min(it.watched, it.aired) / it.aired) : 0;
+  return `<div class="pcard lt" data-id="${it.id}">
+    <div class="pshot"><a href="#/${type}/${it.id}" aria-label="${esc(it.title)}"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt=""></a>
+      ${it.rating ? `<span class="badge">${+it.rating}/10</span>` : ""}
+      <span data-listmark="${type}:${it.id}">${listMark(type, it.id)}</span>
+      ${housePips(it)}
       ${bar ? `<span class="lib-prog ${shelf === "stopped" ? "stopped" : ""}" style="--p:${pct}%"></span>` : ""}
-      <div class="act">
-        ${ep && (shelf === "watchlist" || shelf === "watching")
-          ? `<button data-a="punch" data-s="${ep.season}" data-n="${ep.number}" title="Mark ${sxe(ep.season, ep.number)} watched"
-               aria-label="Mark ${esc(s.title)} ${sxe(ep.season, ep.number)} watched">${I.check}</button>` : ""}
-        ${shelf === "watchlist" ? `<button data-a="remove" title="Remove from watchlist" aria-label="Remove ${esc(s.title)}">${I.x}</button>` : ""}
-      </div>
     </div>
-    <a class="t" href="#/show/${s.id}">${esc(s.title)}</a><div class="y">${esc(showLibSub(s, shelf))}</div>
-  </div>`;
-}
-function movieLibCard(m, shelf) {
-  return `<div class="pcard" data-id="${m.id}">
-    <div class="pshot"><a href="#/movie/${m.id}" aria-label="${esc(m.title)}"><img class="poster" loading="lazy" src="${POSTER(m.poster)}" alt=""></a>
-      ${m.rating ? `<span class="badge">${m.rating}/10</span>` : ""}
-      <span data-listmark="movie:${m.id}">${listMark("movie", m.id)}</span>
-      <div class="act">
-        ${shelf === "watchlist" ? `<button data-a="watched" title="Mark watched" aria-label="Mark ${esc(m.title)} watched">${I.check}</button>` : ""}
-        <button data-a="remove" title="Remove" aria-label="Remove ${esc(m.title)}">${I.x}</button>
-      </div>
-    </div>
-    <a class="t" href="#/movie/${m.id}">${esc(m.title)}</a><div class="y">${
-      m.watched_at && shelf === "watched" ? fmtDate(m.watched_at.slice(0, 10)) : (m.year || "")}</div>
+    <a class="t" href="#/${type}/${it.id}">${esc(it.title)}</a><div class="y">${esc(sub)}</div>
   </div>`;
 }
 const libCountsHTML = (kind, d, shelf) => LIB[kind].shelves
-  .filter(([k]) => k === shelf || k === LIB[kind].def || k === "watching" || (d[k] || []).length)
+  .filter(([k]) => k === shelf || k === LIB[kind].def || k === "watching" || k === "watched" || (d[k] || []).length)
   .map(([k, lab]) => `<button data-t="${k}" class="${k === shelf ? "on" : ""}" role="tab"
      aria-selected="${k === shelf}">${lab} · ${(d[k] || []).length}</button>`).join("");
-function libGridHTML(kind, d, shelf, animate) {
+function libBodyHTML(kind, d, shelf, animate) {
   const all = d[shelf] || [];
-  const q = LIBQ.trim().toLowerCase();
-  const arr = libSort(q ? all.filter(x => (x.title || "").toLowerCase().includes(q)) : all, libPref("sort", "recent"));
   if (!all.length) return `<div class="empty">${LIB[kind].empty[shelf]}</div>`;
+  const q = LIBQ.trim().toLowerCase();
+  const sortBy = libPref(`sort.${kind}.${shelf}`, libSorts(kind, shelf)[0][0]);
+  const arr = libSort(q ? all.filter(x => (x.title || "").toLowerCase().includes(q)) : all, sortBy);
   if (!arr.length) return `<div class="empty">Nothing on this shelf matches “${esc(LIBQ.trim())}”.</div>`;
-  const card = kind === "shows" ? showLibCard : movieLibCard;
-  return `<div class="pgrid ${animate ? "reveal" : ""}">${arr.map(x => card(x, shelf)).join("")}</div>`;
+  const lay = libView(kind, shelf), rv = animate ? "reveal" : "";
+  const block = items => lay === "list"
+    ? `<div class="lrows ${rv}">${items.map(x => libRow(kind, x, shelf)).join("")}</div>`
+    : `<div class="pgrid ${rv}">${items.map(x => libTile(kind, x, shelf)).join("")}</div>`;
+  if (shelf !== "watchlist") return block(arr);
+  const groups = LIB_GROUPS[kind].map(([g, label]) => ({ g, label, items: arr.filter(x => libGroupOf(kind, x) === g) }))
+    .filter(x => x.items.length);
+  if (groups.length < 2 && groups[0] && groups[0].g !== "soon") return block(arr);
+  return groups.map(({ g, label, items }) => {
+    const total = g !== "soon" ? items.reduce((n, x) => n + (kind === "movies" ? x.runtime || 0 : x.total_min || 0), 0) : 0;
+    return `<div class="lgroup${g === "soon" ? " soon" : ""}"><h3><b>${label}</b><span>${items.length}</span>${total >= 60 ? `<em>${hrs(total).replace("~", "")} in all</em>` : ""}</h3>
+      ${block(items)}</div>`;
+  }).join("");
 }
 function renderLibrary(kind, d, shelf, animate = true) {
   navHere(kind === "shows" ? "Shows" : "Movies");
-  const total = Object.values(d).reduce((n, a) => n + (Array.isArray(a) ? a.length : 0), 0);
+  const all = d[shelf] || [];
+  const sorts = libSorts(kind, shelf);
+  const sortBy = libPref(`sort.${kind}.${shelf}`, sorts[0][0]);
+  const lay = libView(kind, shelf);
+  const canPick = shelf === "watchlist" && all.filter(x => libGroupOf(kind, x) !== "soon").length >= 3;
   view.innerHTML = `
     <div class="lib-head"><h1>Library</h1>
       <div class="libswitch" role="tablist" aria-label="Library">
         <button data-k="shows" class="${kind === "shows" ? "on" : ""}" role="tab" aria-selected="${kind === "shows"}">Shows</button>
         <button data-k="movies" class="${kind === "movies" ? "on" : ""}" role="tab" aria-selected="${kind === "movies"}">Movies</button>
+        ${(ME.features || {}).books || (ME.features || {}).manga ? `<a href="#/reading" role="tab">${READ_LABEL()}</a>` : ""}
       </div></div>
     <div class="tabs scroll" role="tablist">${libCountsHTML(kind, d, shelf)}</div>
-    ${total > 8 ? `<div class="lib-tools">
-      <label class="lib-filter"><svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m15.4 15.4 5.2 5.2" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>
-        <input id="libq" type="search" placeholder="Filter your ${LIB[kind].noun[1]}" value="${esc(LIBQ)}" autocomplete="off" enterkeyhint="search"></label>
-      <select id="libsort" aria-label="Sort">${LIB_SORTS.map(([v, l]) =>
-        `<option value="${v}" ${libPref("sort", "recent") === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    ${all.length ? `<div class="lib-tools">
+      ${all.length > 6 ? `<label class="lib-filter"><svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m15.4 15.4 5.2 5.2" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>
+        <input id="libq" type="search" placeholder="Filter" aria-label="Filter your ${LIB[kind].noun[1]}" value="${esc(LIBQ)}" autocomplete="off" enterkeyhint="search"></label>` : `<span class="lib-sp"></span>`}
+      <select id="libsort" aria-label="Sort">${sorts.map(([v, l]) =>
+        `<option value="${v}" ${sortBy === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <div class="vt" role="group" aria-label="Layout">
+        <button data-v="list" class="${lay === "list" ? "on" : ""}" aria-label="List" aria-pressed="${lay === "list"}"><svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.6" cy="6.5" r="1.4" fill="currentColor"/><circle cx="4.6" cy="12" r="1.4" fill="currentColor"/><circle cx="4.6" cy="17.5" r="1.4" fill="currentColor"/></svg></button>
+        <button data-v="grid" class="${lay === "grid" ? "on" : ""}" aria-label="Grid" aria-pressed="${lay === "grid"}"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.9"/></svg></button>
+      </div>
     </div>` : ""}
-    <div id="libgrid">${libGridHTML(kind, d, shelf, animate)}</div>`;
-  const regrid = () => { $("#libgrid").innerHTML = libGridHTML(kind, d, shelf, false); paintListMarks(view); };
+    ${canPick ? `<button class="lib-pick" id="libpick">${DICE_ICO}<span><b>Can’t decide?</b> Deal three from your watchlist</span>${I.chevS}</button>` : ""}
+    <div id="libgrid">${libBodyHTML(kind, d, shelf, animate)}</div>`;
+  const grid = $("#libgrid");
+  const regrid = () => { grid.innerHTML = libBodyHTML(kind, d, shelf, false); paintListMarks(grid); libFillProviders(kind, d, grid); };
   $$(".libswitch button", view).forEach(b => b.onclick = () => {
     if (b.dataset.k === kind) return;
     libSave("kind", b.dataset.k);
     history.replaceState(history.state, "", `#/${b.dataset.k}`);
     routes[b.dataset.k]();
   });
-  $$(".tabs button", view).forEach(b => b.onclick = () => {
+  $$(".tabs button").forEach(b => b.onclick = () => {
     libSave(kind + ".shelf", b.dataset.t);
     history.replaceState(history.state, "", `#/${kind}/${b.dataset.t}`);
     renderLibrary(kind, d, b.dataset.t);
   });
   if ($("#libq")) $("#libq").oninput = e => { LIBQ = e.target.value; regrid(); };
-  if ($("#libsort")) $("#libsort").onchange = e => { libSave("sort", e.target.value); regrid(); };
-  ensureListSet().then(() => paintListMarks(view));
-  $("#libgrid").onclick = e => {
-    const b = e.target.closest(".act button");
-    if (!b) return;
+  if ($("#libsort")) $("#libsort").onchange = e => { libSave(`sort.${kind}.${shelf}`, e.target.value); regrid(); };
+  $$(".vt button").forEach(b => b.onclick = () => {
+    libSave(`view.${kind}.${shelf}`, b.dataset.v);
+    $$(".vt button").forEach(x => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
+    regrid();
+  });
+  if ($("#libpick")) $("#libpick").onclick = () => libDeal(kind, d);
+  ensureListSet().then(() => paintListMarks(grid));
+  libFillProviders(kind, d, grid);
+  const act = (b, id) => (kind === "shows" ? libShowAction : libMovieAction)(d, shelf, id, b);
+  grid.onclick = e => {
+    const b = e.target.closest("[data-a]");
+    if (!b || b.tagName !== "BUTTON") return;
     e.preventDefault();
-    const id = +b.closest(".pcard").dataset.id;
-    (kind === "shows" ? libShowAction : libMovieAction)(d, shelf, id, b);
+    act(b, +b.closest("[data-id]").dataset.id);
+  };
+  libGestures(grid, id => libSheet(kind, d, shelf, id, act), (id, el) => act(el, id));
+}
+/* swipe a row left to reveal Remove; long-press (or right-click) anything for the sheet */
+function libGestures(grid, onHold, onAct) {
+  let lp = null, sx = 0, sy = 0, row = null, dx = 0, swiping = false, held = false;
+  const reset = (r, keepOpen) => { if (!r) return; r.style.transition = ""; r.style.transform = keepOpen ? "translateX(-96px)" : ""; r.closest(".lrow-wrap").classList.toggle("open", !!keepOpen); };
+  grid.onpointerdown = e => {
+    const card = e.target.closest("[data-id]");
+    if (!card || e.target.closest("button")) return;
+    held = false;
+    clearTimeout(lp);
+    if (e.pointerType !== "mouse") lp = setTimeout(() => { held = true; if (navigator.vibrate) navigator.vibrate(8); onHold(+card.dataset.id); }, 480);
+    $$(".lrow-wrap.open", grid).forEach(w => { if (!w.contains(e.target)) reset($(".lrow", w)); });
+    row = e.pointerType === "touch" ? e.target.closest(".lrow") : null;
+    sx = e.clientX; sy = e.clientY; dx = 0; swiping = false;
+  };
+  grid.onpointermove = e => {
+    if (Math.abs(e.clientX - sx) > 8 || Math.abs(e.clientY - sy) > 8) clearTimeout(lp);
+    if (!row) return;
+    const mx = e.clientX - sx, my = e.clientY - sy;
+    if (!swiping && Math.abs(mx) > 12 && Math.abs(mx) > Math.abs(my) * 1.4) swiping = true;
+    if (!swiping) return;
+    dx = Math.min(0, mx + (row.closest(".lrow-wrap").classList.contains("open") ? -96 : 0));
+    row.style.transition = "none";
+    row.style.transform = `translateX(${Math.max(dx, -150)}px)`;
+  };
+  const up = () => {
+    clearTimeout(lp);
+    if (row && swiping) {
+      const w = row.closest(".lrow-wrap");
+      if (dx < -140) { reset(row); onAct(+w.dataset.id, $(".lr-del", w)); }
+      else reset(row, dx < -48);
+    }
+    row = null;
+  };
+  grid.onpointerup = up; grid.onpointercancel = up;
+  grid.addEventListener("click", e => { if (held || swiping) { e.preventDefault(); e.stopPropagation(); held = false; swiping = false; } }, true);
+  grid.oncontextmenu = e => {
+    const card = e.target.closest("[data-id]");
+    if (!card) return;
+    e.preventDefault();
+    if (held) return;                 // touch long-press already opened it
+    clearTimeout(lp);
+    onHold(+card.dataset.id);
   };
 }
+function libSheet(kind, d, shelf, id, act) {
+  const [k, i] = libFind(d, id);
+  if (i < 0) return;
+  const it = d[k][i], type = kind === "shows" ? "show" : "movie";
+  const ep = it.next_ep;
+  const rows = [];
+  if (kind === "shows" && ep && (k === "watchlist" || k === "watching"))
+    rows.push(`<button class="sortopt" data-x="punch"><span>Mark ${sxe(ep.season, ep.number)} watched</span>${I.check}</button>`);
+  if (kind === "movies" && k === "watchlist")
+    rows.push(`<button class="sortopt" data-x="watched"><span>Mark watched</span>${I.check}</button>`);
+  rows.push(`<button class="sortopt" data-x="list"><span>Add to a list</span>${I.listadd}</button>`);
+  rows.push(`<button class="sortopt" data-x="open"><span>Open ${kind === "shows" ? "show" : "film"}</span>${I.chevS}</button>`);
+  if (kind === "movies" || k === "watchlist")
+    rows.push(`<button class="sortopt danger" data-x="remove"><span>${kind === "movies" ? "Remove from Library" : "Remove from watchlist"}</span>${I.trash}</button>`);
+  const s = sheet(`<div class="lsh-head"><img src="${POSTER(it.poster)}" alt=""><div><div class="sh-t">${esc(it.title)}</div>
+      <div class="hint">${libMeta(kind, it, k)}</div></div></div><div class="sortopts">${rows.join("")}</div>`, { cls: "editor" });
+  s.el.addEventListener("click", e => {
+    const o = e.target.closest("[data-x]"); if (!o) return;
+    s.close();
+    const x = o.dataset.x;
+    if (x === "open") location.hash = `#/${type}/${id}`;
+    else if (x === "list") addToListMenu(type, id, it.title);
+    else {
+      const fake = document.createElement("button");
+      fake.dataset.a = x;
+      if (ep) { fake.dataset.s = ep.season; fake.dataset.n = ep.number; }
+      act(fake, id);
+    }
+  });
+}
+/* "Can't decide?" — three, not thirty: dealt from what you could start tonight */
+function libDeal(kind, d) {
+  const pool = (d.watchlist || []).filter(x => libGroupOf(kind, x) !== "soon");
+  const deal = () => pool.slice().sort(() => Math.random() - .5).slice(0, 3);
+  const type = kind === "shows" ? "show" : "movie";
+  const s = sheet(`<div class="sh-t">Tonight, maybe…</div><div class="deal"></div>
+    <button class="btn" id="redeal">${DICE_ICO} Deal again</button>`, { cls: "editor dealsheet" });
+  const paint = () => {
+    $(".deal", s.el).innerHTML = deal().map((it, n) => `
+      <a class="dcard" href="#/${type}/${it.id}" style="--i:${n}">
+        <img src="${POSTER(it.poster)}" alt="">
+        <span class="dc-t">${esc(it.title)}</span>
+        <span class="dc-m">${kind === "shows" ? hrs(it.total_min) || `${it.aired} eps` : hm(it.runtime) || it.year || ""}</span>
+        ${it.prov ? `<span class="dc-m">${esc(it.prov.name)}</span>` : ""}
+      </a>`).join("");
+  };
+  paint();
+  $("#redeal", s.el).onclick = () => { hapticTick(); paint(); };
+  s.el.addEventListener("click", e => { if (e.target.closest(".dcard")) s.close(); });
+}
+/* streaming info is cached weekly server-side; rows that missed the cache ask for it as
+   they scroll into view, four at a time, and patch themselves in place */
+let _provQ = [], _provBusy = 0, _provObs = null;
+function libFillProviders(kind, d, root) {
+  const type = kind === "shows" ? "show" : "movie";
+  if (_provObs) _provObs.disconnect();
+  _provQ = [];
+  _provObs = new IntersectionObserver(entries => entries.forEach(en => {
+    if (!en.isIntersecting) return;
+    _provObs.unobserve(en.target);
+    _provQ.push(+en.target.dataset.id);
+    pump();
+  }), { rootMargin: "200px" });
+  const need = new Set([].concat(...Object.values(d).filter(Array.isArray)).filter(x => !x.prov_known).map(x => x.id));
+  $$("[data-id]", root).forEach(el => { if (need.has(+el.dataset.id)) _provObs.observe(el); });
+  const pump = () => {
+    while (_provBusy < 4 && _provQ.length) {
+      const id = _provQ.shift();
+      _provBusy++;
+      api(`/watch_providers/${type}/${id}`).then(p => {
+        const fl = (p && p.flatrate) || [];
+        for (const arr of Object.values(d)) if (Array.isArray(arr)) arr.forEach(x => {
+          if (x.id === id) { x.prov = fl[0] ? { name: fl[0].name, logo: fl[0].logo } : null; x.prov_known = true; }
+        });
+        const [k, i] = libFind(d, id);
+        const el = root.isConnected && $(`[data-id="${id}"]`, root);
+        if (el && i > -1) {
+          const it = d[k][i], p2 = $(".lr-p", el), y = $(".y", el);
+          if (p2) p2.innerHTML = libWhen(kind, it) + provHTML(it, kind) + scoreHTML(it);
+          else if ($(".lr-body", el) && it.prov) $(".lr-m", el).insertAdjacentHTML("afterend", `<span class="lr-p">${provHTML(it, kind)}${scoreHTML(it)}</span>`);
+          if (y && it.prov && /watchlist/.test(k) && !y.textContent.includes(it.prov.name))
+            y.textContent = [it.prov.name, kind === "shows" ? hrs(it.total_min) : hm(it.runtime) || it.year].filter(Boolean).join(" · ");
+        }
+      }).catch(() => {}).finally(() => { _provBusy--; pump(); });
+    }
+  };
+}
+const READ_LABEL = () => { const f = (ME && ME.features) || {};
+  return f.books && f.manga ? "Reading" : f.books ? "Books" : "Manga"; };
+const DICE_ICO = `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="3.5" width="17" height="17" rx="4" stroke="currentColor" stroke-width="1.8"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.4" fill="currentColor"/></svg>`;
 /* re-shelve locally, then draw — the server agrees a moment later */
 function libRedraw(kind, d, shelf) {
   if (seg()[0] === kind) renderLibrary(kind, d, shelf, false);
@@ -1943,12 +2232,16 @@ function libMovieAction(d, shelf, id, b) {
   const [k, i] = libFind(d, id);
   if (i < 0) return;
   const [m] = d[k].splice(i, 1);
-  delete CACHE["/upcoming"];
+  delete CACHE["/upcoming"]; delete CACHE["/dashboard"];
   if (b.dataset.a === "watched") {
-    sparks(b);
+    if (b.isConnected) sparks(b);
     m.state = "watched"; m.watched_at = nowStamp(); d.watched.unshift(m);
     api(`/movie/${id}/state`, { body: { state: "watched" } }).catch(() => routes.movies(shelf));
-    toast(`${m.title} — watched`);
+    undoToast(`${m.title} — watched`, () => {
+      d.watched.splice(d.watched.indexOf(m), 1); m.state = "watchlist"; m.watched_at = null;
+      d[k].splice(i, 0, m); libRedraw("movies", d, shelf);
+      api(`/movie/${id}/state`, { body: { state: "watchlist" } }).catch(() => {});
+    });
   } else {
     // removing drops the rating and watch date with it, so the undo puts them back
     api(`/movie/${id}/state`, { body: { state: "none" } }).catch(() => routes.movies(shelf));
@@ -1971,28 +2264,29 @@ async function libShowAction(d, shelf, id, b) {
     api(`/show/${id}/follow`, { body: { unfollow: true } }).catch(() => routes.shows(shelf));
     undoToast(`Removed ${s.title}`, () => {
       d[k].splice(i, 0, s); libRedraw("shows", d, shelf);
-      api(`/show/${id}/follow`, { body: {} }).catch(() => {});
+      api(`/show/${id}/follow`, { body: { added_at: s.added_at || undefined } }).catch(() => {});
     });
     return;
   }
   const mS = +b.dataset.s, mN = +b.dataset.n;
-  b.disabled = true; b.classList.add("done"); sparks(b);
+  if (b.isConnected) { b.disabled = true; b.classList.add("done"); sparks(b); }
   episodeDoneToast(id, mS, mN, s.next_ep?.title || "", pickImg(s.next_ep?.still, s.poster));
   try {
     const r = await api(`/show/${id}/watch`, { body: { season: mS, number: mN } });
-    const ns = { ...s, ...r.show, added_at: s.added_at, seasons: s.seasons, stale: false };
+    const ns = { ...s, ...r.show, stale: false,
+      left_min: Math.max(0, (s.left_min || 0) - (s.avg_runtime || 0)) };
     d[k].splice(libFind(d, id)[1], 1);
     const dest = ns.next_ep ? "watching"
       : isEnded(ns.status) || (ns.status || "").toLowerCase() === "cancelled" ? "finished" : "caught_up";
     d[dest].unshift(ns);
-    if (dest !== shelf && shelf === "watchlist") toast(`${s.title} moved to Watching`);
+    if (k === "watchlist" && dest === "watching") setTimeout(() => toast(`Started ${s.title} — it’s in Up Next`), 900);
     libRedraw("shows", d, shelf);
-  } catch { b.disabled = false; b.classList.remove("done"); }
+  } catch { if (b.isConnected) { b.disabled = false; b.classList.remove("done"); } }
 }
 // a toast with one action on it — for anything destructive done in a single tap
-function undoToast(msg, undo) {
+function undoToast(msg, undo, label = "Undo") {
   const t = $("#toast");
-  t.innerHTML = `<span>${esc(msg)}</span><button class="toast-act">Undo</button>`;
+  t.innerHTML = `<span>${esc(msg)}</span><button class="toast-act">${esc(label)}</button>`;
   t.classList.add("show", "has-act");
   clearTimeout(t._h);
   const hide = () => { t.classList.remove("show"); setTimeout(() => t.classList.remove("has-act"), 250); };
@@ -2007,7 +2301,7 @@ function libRoute(kind, shelf) {
   const c = cached(L.path);
   if (c.stale) renderLibrary(kind, c.stale, shelf);
   else view.innerHTML = `<div class="lib-head"><h1>Library</h1></div>
-    <div class="pgrid">${Array.from({ length: 12 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
+    <div class="lrows">${Array.from({ length: 6 }, () => `<div class="sk lrow-sk"></div>`).join("")}</div>`;
   c.refresh(() => seg()[0] === kind, d => renderLibrary(kind, d, seg()[1] || shelf, !c.stale));
 }
 routes.shows = shelf => libRoute("shows", shelf);
@@ -4248,13 +4542,13 @@ function posterTile(r) {
       <span data-listmark="${r.type}:${r.id}">${listMark(r.type, r.id)}</span>
       <div class="act">
         ${r.type === "show"
-          ? (r.followed ? `<div class="have">${I.check}</div>` : `<button title="Follow" data-a="follow">${I.plus}</button>`)
-          : (r.state ? `<div class="have">${I.check}</div>` : `<button title="Add to watchlist" data-a="watchlist">${I.plus}</button>
-             <button title="Mark watched" data-a="watched">${I.check}</button>`)}
+          ? (r.followed ? `<div class="have" title="In your library">${I.check}</div>` : `<button title="Add to watchlist" aria-label="Add ${esc(r.title)} to your watchlist" data-a="follow">${I.plus}</button>`)
+          : (r.state ? `<div class="have" title="In your library">${I.check}</div>` : `<button title="Add to watchlist" aria-label="Add ${esc(r.title)} to your watchlist" data-a="watchlist">${I.plus}</button>
+             <button title="Mark watched" aria-label="Mark ${esc(r.title)} watched" data-a="watched">${I.check}</button>`)}
       </div>
     </div>
     <div class="t">${esc(r.title)}</div>
-    <div class="y">${r.year || ""}${r.followed ? " · following" : r.state ? " · " + r.state : ""}</div>
+    <div class="y">${r.year || ""}${r.followed ? " · in library" : r.state ? " · " + r.state : ""}</div>
   </div>`;
 }
 function wireTiles(root, after) {
@@ -4269,12 +4563,13 @@ function wireTiles(root, after) {
       await api("/add", { body: { type: isShow ? "show" : "movie", id: +c.dataset.id,
         state: watched ? "watched" : "watchlist" } });
     } catch { b.disabled = false; return; }
-    delete CACHE["/dashboard"]; delete CACHE["/movies"]; delete CACHE["/discover"]; delete CACHE["/lists"];
+    delete CACHE["/dashboard"]; delete CACHE["/movies"]; delete CACHE["/shows"]; delete CACHE["/discover"]; delete CACHE["/lists"];
     // optimistic confirmation on the tile itself — no stale re-render
     const act = $(".act", c), y = $(".y", c);
-    if (act) act.innerHTML = `<div class="have" title="${isShow ? "Following" : watched ? "Watched" : "On your watchlist"}">${I.check}</div>`;
-    if (y) y.innerHTML = (y.textContent.split(" · ")[0]) + (isShow ? " · following" : watched ? " · watched" : " · watchlist");
-    toast(isShow ? "Added to your shows — it’s in Watch Next" : watched ? "Marked watched" : "Added to watchlist");
+    if (act) act.innerHTML = `<div class="have" title="${watched ? "Watched" : "On your watchlist"}">${I.check}</div>`;
+    if (y) y.innerHTML = (y.textContent.split(" · ")[0]) + (watched ? " · watched" : " · watchlist");
+    if (watched) toast("Marked watched");
+    else undoToast("On your watchlist", () => { location.hash = isShow ? "#/shows/watchlist" : "#/movies/watchlist"; }, "See it");
   });
 }
 

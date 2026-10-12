@@ -38,7 +38,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261011a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261011b"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -2091,6 +2091,21 @@ def scan_airing(con):
             continue
         sh = con.execute("SELECT title FROM shows WHERE id=?", (f["show_id"],)).fetchone()
         sname = sh["title"] if sh else "A show"
+        started = con.execute("SELECT 1 FROM watches WHERE user_id=? AND show_id=? LIMIT 1",
+                              (uid, f["show_id"])).fetchone()
+        if not started:
+            # on the watchlist, not begun: weekly episode pings for a show you haven't
+            # started are noise — but a premiere (season 1 included) is the moment it
+            # becomes something you can start
+            for e in con.execute("""SELECT season, air_date FROM episodes
+                WHERE show_id=? AND number=1 AND season>0 AND air_date>=? AND air_date<=?
+                ORDER BY air_date""", (f["show_id"], today_s, soon)).fetchall():
+                what = "premieres" if e["season"] == 1 else f"Season {e['season']} premieres"
+                push_notif(con, uid, "new_season" if ns_en else "airing",
+                           f"{sname} — {what} {fmt_when(e['air_date'])}",
+                           "It's on your watchlist", f"show/{f['show_id']}",
+                           dedup=f"newseason:{f['show_id']}:{e['season']}")
+            continue
         if en:
             # `val` is a comma-separated set of lead times in days (0 = "when it airs")
             leads = {max(0, int(x)) for x in str(val or "1").split(",")
@@ -2438,6 +2453,117 @@ def home(user=Depends(current_user)):
     return out
 
 
+def _ph(ids):
+    return ",".join("?" * len(ids))
+
+
+def _first_streamer(con, item_type, ids):
+    """{id: {"name","logo"}} from the weekly where-to-watch cache — no network here;
+    the client fills misses lazily, a few at a time."""
+    out = {}
+    if not ids:
+        return out
+    for r in con.execute(f"""SELECT item_id, data FROM watch_providers WHERE item_type=?
+            AND region='US' AND item_id IN ({_ph(ids)})""", (item_type, *ids)):
+        try:
+            fl = (json.loads(r["data"]) or {}).get("flatrate") or []
+        except (json.JSONDecodeError, TypeError):
+            continue
+        out[r["item_id"]] = ({"name": fl[0]["name"], "logo": fl[0]["logo"]} if fl else None)
+    return out
+
+
+def _household_people(con, uid):
+    return {r["id"]: {"name": (r["display_name"] or r["username"]).split(" ")[0],
+                      "username": r["username"], "avatar": r["avatar"]}
+            for r in con.execute("SELECT id, username, display_name, avatar FROM users WHERE id<>?",
+                                 (uid,))}
+
+
+def enrich_show_cards(con, uid, items):
+    """What you need to pick tonight's show, per card: hours left, where it streams,
+    the IMDb score, and who else in the house is into it."""
+    ids = [it["id"] for it in items]
+    if not ids:
+        return items
+    t = today()
+    mins = {r["show_id"]: r for r in con.execute(f"""
+        SELECT e.show_id,
+          SUM(COALESCE(NULLIF(e.runtime,0), s.avg_runtime, 30)) AS total_min,
+          SUM(CASE WHEN w.user_id IS NULL THEN COALESCE(NULLIF(e.runtime,0), s.avg_runtime, 30)
+                   ELSE 0 END) AS left_min
+        FROM episodes e JOIN shows s ON s.id=e.show_id
+        LEFT JOIN watches w ON w.user_id=? AND w.show_id=e.show_id AND w.season=e.season
+          AND w.number=e.number
+        WHERE e.show_id IN ({_ph(ids)}) AND e.season>0 AND e.air_date IS NOT NULL AND e.air_date<=?
+        GROUP BY e.show_id""", (uid, *ids, t))}
+    meta = {r["id"]: r for r in con.execute(
+        f"SELECT id, imdb_rating, details FROM shows WHERE id IN ({_ph(ids)})", ids)}
+    prov = _first_streamer(con, "show", ids)
+    people = _household_people(con, uid)
+    hh = {}
+    for r in con.execute(f"""
+        SELECT f.show_id, f.user_id, f.archived, f.rating,
+          (SELECT COUNT(*) FROM watches w WHERE w.user_id=f.user_id AND w.show_id=f.show_id
+             AND w.season>0) AS watched,
+          (SELECT w.season || ':' || w.number FROM watches w WHERE w.user_id=f.user_id
+             AND w.show_id=f.show_id AND w.season>0 ORDER BY w.season DESC, w.number DESC
+             LIMIT 1) AS last_ep
+        FROM follows f WHERE f.show_id IN ({_ph(ids)}) AND f.user_id<>?""", (*ids, uid)):
+        if r["user_id"] not in people:
+            continue
+        hh.setdefault(r["show_id"], []).append({**people[r["user_id"]],
+            "watched": r["watched"], "last_ep": r["last_ep"], "rating": r["rating"],
+            "stopped": bool(r["archived"])})
+    for it in items:
+        m, mt = mins.get(it["id"]), meta.get(it["id"])
+        det = {}
+        try:
+            det = json.loads(mt["details"] or "{}") if mt else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        it["total_min"] = m["total_min"] if m else 0
+        it["left_min"] = m["left_min"] if m else 0
+        it["imdb"] = mt["imdb_rating"] if mt and mt["imdb_rating"] else None
+        it["vote"] = det.get("vote")
+        it["network"] = (det.get("networks") or [None])[0]
+        it["n_episodes"] = det.get("n_episodes")
+        it["prov"] = prov.get(it["id"])
+        it["prov_known"] = it["id"] in prov
+        it["household"] = hh.get(it["id"], [])
+    return items
+
+
+def enrich_movie_cards(con, uid, items):
+    ids = [it["id"] for it in items]
+    if not ids:
+        return items
+    meta = {r["id"]: r for r in con.execute(
+        f"SELECT id, imdb_rating, details FROM movies WHERE id IN ({_ph(ids)})", ids)}
+    prov = _first_streamer(con, "movie", ids)
+    people = _household_people(con, uid)
+    hh = {}
+    for r in con.execute(f"""SELECT movie_id, user_id, state, rating FROM movie_states
+            WHERE movie_id IN ({_ph(ids)}) AND user_id<>?""", (*ids, uid)):
+        if r["user_id"] in people:
+            hh.setdefault(r["movie_id"], []).append({**people[r["user_id"]],
+                                                     "state": r["state"], "rating": r["rating"]})
+    for it in items:
+        mt = meta.get(it["id"])
+        det = {}
+        try:
+            det = json.loads(mt["details"] or "{}") if mt else {}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        it["imdb"] = mt["imdb_rating"] if mt and mt["imdb_rating"] else None
+        it["vote"] = det.get("vote")
+        it["cert"] = det.get("content_rating")
+        it["prov"] = prov.get(it["id"])
+        it["prov_known"] = it["id"] in prov
+        it["household"] = hh.get(it["id"], [])
+    return items
+
+
 @app.get("/api/shows")
 def shows_library(user=Depends(current_user)):
     """Every show you follow, on a shelf — the TV side of the Library, the way /api/movies
@@ -2450,6 +2576,9 @@ def shows_library(user=Depends(current_user)):
     watching.sort(key=lambda x: x["last_watched"] or "", reverse=True)
     ended = lambda it: (it["status"] or "").lower() in ENDED_STATUSES
     watchlist = sorted(h["not_started"], key=lambda x: x["added_at"] or "", reverse=True)
+    with db() as con:
+        enrich_show_cards(con, user["id"], h["watch_next"] + h["stale"] + h["not_started"]
+                          + h["up_to_date"] + h["archived"])
     return {
         "watching": watching,
         "watchlist": watchlist,
@@ -2529,11 +2658,13 @@ def dashboard(user=Depends(current_user)):
                             "by": {"display_name": r["display_name"] or r["username"],
                                    "avatar": r["avatar"]}})
 
+    wl_rail = sorted(home_data["not_started"], key=lambda x: x["added_at"] or "", reverse=True)[:16]
+    with db() as con:
+        enrich_show_cards(con, uid, wl_rail)
     return {
         "up_next": home_data["watch_next"],
         "stale": home_data["stale"],
-        "watchlist": sorted(home_data["not_started"], key=lambda x: x["added_at"] or "",
-                            reverse=True)[:16],
+        "watchlist": wl_rail,
         "calendar": calendar,
         "recent": collapse(recent)[:24],
         "social": collapse(social)[:12],
@@ -2598,6 +2729,7 @@ def show_detail(show_id: int, user=Depends(current_user)):
         return {**{k: s[k] for k in s.keys() if k != "details"}, "info": info,
                 "followed": bool(f), "archived": bool(f and f["archived"]),
                 "rating": f["rating"] if f else None,
+                "added_at": f["added_at"] if f and "added_at" in f.keys() else None,
                 "seasons": [{"season": k, "episodes": v} for k, v in sorted(seasons.items())]}
 
 
@@ -3041,8 +3173,10 @@ async def follow(show_id: int, request: Request, user=Depends(current_user)):
             con.execute("UPDATE follows SET rating=? WHERE user_id=? AND show_id=?",
                         (rating_or_none(body["rating"]), user["id"], show_id))
         else:
+            # added_at may be handed back by an undo, so the show keeps its place
             con.execute("INSERT OR IGNORE INTO follows(user_id,show_id,added_at) VALUES(?,?,?)",
-                        (user["id"], show_id, datetime.now().isoformat()))
+                        (user["id"], show_id,
+                         date_or_none(body.get("added_at"), "added_at") or datetime.now().isoformat()))
     return {"ok": True}
 
 
@@ -3061,6 +3195,8 @@ def movies(user=Depends(current_user)):
     # saved before added_at existed fall in behind, newest release first.
     out["watched"].sort(key=lambda m: m["watched_at"] or m["release_date"] or "", reverse=True)
     out["watchlist"].sort(key=lambda m: (m["added_at"] or "", m["release_date"] or ""), reverse=True)
+    with db() as con:
+        enrich_movie_cards(con, user["id"], out["watched"] + out["watchlist"])
     return out
 
 
