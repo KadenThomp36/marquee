@@ -2640,6 +2640,7 @@ function renderRDetail(d) {
         </div>
       </div></div>
     <div class="rdt-body reveal">
+      ${rdActChips(kind, it)}
       ${d.tracked ? `
       <div id="rdtstates">
         <div class="rd-states">${[["want", "Want to read"], ["reading", "Reading"], ["finished", "Finished"]].map(([x, l]) =>
@@ -2836,7 +2837,25 @@ function renderRDetail(d) {
       chapters: it.chapters, pages: it.pages }, rerun);
   });
   if (it.id) reviewsBlock(kind, it.id, { watched: st.state === "finished" }).then(el => { const c = $("#rd-reviews"); if (c) c.appendChild(el); });
+  wireRdActChips(kind, it);
   rdTickTimers();
+}
+/* Favorite / List / Share for a book or manga — the same chips the show and movie
+   pages carry. An untracked Hardcover preview has no Marquee id yet, so it can only
+   be shared until it's on a shelf. */
+function rdActChips(kind, it) {
+  return `<div class="act-row rdt-acts">${it.id ? `
+    <button class="chip-btn fav-chip" id="favchip" aria-pressed="false">${I.star}<span id="favchiplbl">Favorite</span></button>
+    <button class="chip-btn" id="rdaddlist" data-listbtn="${kind}:${it.id}">${I.listadd}<span>List</span></button>` : ""}
+    <button class="chip-btn" id="rdshare">${I.share}<span>Share</span></button></div>`;
+}
+function wireRdActChips(kind, it) {
+  const path = it.id ? `${kind}/${it.id}` : `book/hc/${it.hc_id}`;
+  if ($("#rdshare")) $("#rdshare").onclick = () => share(it.title, path);
+  if (!it.id) return;
+  wireFavChip(kind, it.id);
+  $("#rdaddlist").onclick = () => addToListMenu(kind, it.id, it.title);
+  ensureListSet().then(() => { const b = $("#rdaddlist"); if (b) paintListBtn(b); });
 }
 
 /* edit/delete a past session or checkpoint from the reading log — fields speak the
@@ -3887,7 +3906,16 @@ routes.list = async (id, quiet) => {
     const complete = total > 0 && watched >= total;
     const pcls = it.archived ? "stopped" : (complete && it.ended) ? "done" : "";
     let line = "", bar = "";
-    if (!isShow) {
+    const isRead = it.type === "book" || it.type === "manga";
+    if (isRead) {
+      // books + manga speak shelf states; a book in progress gets the same amber bar
+      const pct = total ? Math.min(100, Math.round(100 * watched / total)) : 0;
+      if (it.state === "finished") line = `${I.check} Read`;
+      else if (it.state === "reading") {
+        line = total ? `${watched} / ${total} ${it.unit}` : `At ${it.unit === "pages" ? "p." : "ch."} ${it.watched || 0}`;
+        if (total) bar = `<div class="pbar"><div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div><div class="pbar-num">${pct}%</div></div>`;
+      } else line = it.state === "want" ? "Want to read" : (it.year ? "" + it.year : "");
+    } else if (!isShow) {
       line = it.watched ? `${I.check} Watched` : (it.year ? "" + it.year : "");
     } else if (it.archived) {
       const pct = total ? Math.round(100 * watched / total) : 0;
@@ -3904,7 +3932,8 @@ routes.list = async (id, quiet) => {
       <img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt="">
       <div class="scrim"></div>
       <a class="fill" href="#/${it.type}/${it.id}" aria-label="${esc(it.title)}"></a>
-      ${it.ended ? `<span class="ended-tag">${I.flag} Ended</span>` : `<span class="badge">${isShow ? "TV" : "FILM"}</span>`}
+      ${it.ended ? `<span class="ended-tag">${I.flag} Ended</span>` : `<span class="badge">${
+        isShow ? "TV" : isRead ? it.type.toUpperCase() : "FILM"}</span>`}
       ${canEdit ? `<button class="lc-rm rmlist" title="Remove from list">${I.x}</button>` : ""}
       <div class="info">
         <div class="t">${esc(it.title)}</div>
@@ -4134,8 +4163,9 @@ routes.person = async id => {
 
 /* ---------- what you've watched: rails on the profile, grids behind them ---------- */
 function watchedTile(it, kind) {
-  const sub = kind === "movies"
-    ? (it.watched_at ? fmtDate(it.watched_at.slice(0, 10)) : String(it.year || ""))
+  // films, books and manga are dated by when you finished them; shows count episodes
+  const sub = kind !== "shows"
+    ? (it.watched_at ? fmtDate(it.watched_at.slice(0, 10)) : it.by || String(it.year || ""))
     : `${it.watched}${it.aired ? " / " + it.aired : ""} ${it.watched === 1 ? "episode" : "episodes"}`;
   return `<a class="wsc" href="#/${it.type}/${it.id}">
     <span class="wsc-art"><img class="poster" loading="lazy" src="${POSTER(it.poster)}" alt="">
@@ -4156,38 +4186,44 @@ function watchedYearsHTML(items, kind, animate = true) {
     if (last && last.year === y) last.items.push(it);
     else groups.push({ year: y, items: [it] });
   }
-  const noun = kind === "shows" ? "series" : "film";
   return groups.map(g => `
     <div class="yr-div"><b>${g.year === "?" ? "No date" : g.year}</b>
-      <span>${g.items.length} ${noun}${g.items.length === 1 || noun === "series" ? "" : "s"}</span>
+      <span>${watchedNoun(kind, g.items.length)}</span>
       <i></i></div>
     <div class="pgrid ${animate ? "reveal" : ""}">${g.items.map(x => watchedTile(x, kind)).join("")}</div>`
   ).join("");
 }
 const watchedHref = (username, kind, me) =>
   me ? `#/watched/${kind}` : `#/u/${encodeURIComponent(username)}/watched/${kind}`;
+const watchedNoun = (kind, n) => `${n} ${{ shows: "series", movies: n === 1 ? "film" : "films",
+  books: n === 1 ? "book" : "books", manga: "manga" }[kind]}`;
+// the grid's tabs: books / manga only exist for members who keep that shelf
+const watchedKinds = feats => [["shows", "Shows"], ["movies", "Films"],
+  ...(feats?.books ? [["books", "Books"]] : []), ...(feats?.manga ? [["manga", "Manga"]] : [])];
 
-async function loadWatchedRails(username, me, host) {
+async function loadWatchedRails(username, me, host, feats = {}) {
   const slot = $("#watched-rails", host);
   if (!slot) return;
   const who = me ? "me" : username;
-  const [shows, movies] = await Promise.all([
-    api(`/watched/${encodeURIComponent(who)}/shows?limit=14`).catch(() => null),
-    api(`/watched/${encodeURIComponent(who)}/movies?limit=14`).catch(() => null),
-  ]);
+  const kinds = watchedKinds(feats).map(([k]) => k);
+  const data = await Promise.all(kinds.map(k =>
+    api(`/watched/${encodeURIComponent(who)}/${k}?limit=14`).catch(() => null)));
+  const titles = me
+    ? { shows: "Shows you've watched", movies: "Films you've watched", books: "Books you've read", manga: "Manga you've read" }
+    : { shows: "Shows watched", movies: "Films watched", books: "Books read", manga: "Manga read" };
   const rail = (d, kind, title) => {
     if (!d || !d.items.length) return "";
     return `<div class="section"><h2>${title}</h2><div class="rule"></div>
         <a class="cnt seeall" href="${watchedHref(username, kind, me)}">${d.total} · Show all ${I.chevR}</a></div>
       <div class="wstrip">${d.items.map(x => watchedTile(x, kind)).join("")}</div>`;
   };
-  slot.innerHTML = rail(shows, "shows", me ? "Shows you've watched" : "Shows watched")
-    + rail(movies, "movies", me ? "Films you've watched" : "Films watched");
+  if (!$("#watched-rails", host)) return;
+  slot.innerHTML = kinds.map((k, i) => rail(data[i], k, titles[k])).join("");
   ensureListSet().then(() => paintListMarks(slot));
 }
 
 routes.watched = async (username, kind = "shows") => {
-  if (!["shows", "movies"].includes(kind)) kind = "shows";
+  if (!["shows", "movies", "books", "manga"].includes(kind)) kind = "shows";
   const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
   const who = me ? "me" : username;
   view.innerHTML = `<div class="page-head">${crumb(me ? "#/profile" : `#/u/${username}`, "Profile")}</div>
@@ -4197,16 +4233,14 @@ routes.watched = async (username, kind = "shows") => {
   catch { view.innerHTML = `<div class="empty">Couldn’t load that.</div>`; return; }
   if (seg()[0] !== "watched" && seg()[2] !== "watched") return;
   const name = me ? "You" : (d.user.display_name || d.user.username);
-  navHere(`${name} · watched`);
-  const other = kind === "shows" ? "movies" : "shows";
+  const kinds = watchedKinds(d.user.features);
+  const what = kinds.length > 2 ? "watched & read" : "watched";
+  navHere(`${name} · ${what}`);
   view.innerHTML = `<div class="page-head">${crumb(me ? "#/profile" : `#/u/${username}`, "Profile")}</div>
-    <h1>${me ? "Watched" : esc(name) + "’s watched"}</h1>
-    <div class="tabs">
-      <button class="${kind === "shows" ? "on" : ""}" data-k="shows">Shows</button>
-      <button class="${kind === "movies" ? "on" : ""}" data-k="movies">Films</button>
-    </div>
-    <div class="sub-h">${d.total} ${kind === "shows"
-      ? (d.total === 1 ? "series" : "series") : (d.total === 1 ? "film" : "films")}</div>
+    <h1>${me ? what[0].toUpperCase() + what.slice(1) : esc(name) + "’s " + what}</h1>
+    <div class="tabs">${kinds.map(([k, l]) =>
+      `<button class="${kind === k ? "on" : ""}" data-k="${k}">${l}</button>`).join("")}</div>
+    <div class="sub-h">${watchedNoun(kind, d.total)}</div>
     <div id="wbody">${watchedYearsHTML(d.items, kind)}</div>
     <div class="loadmore" id="wmore">${d.next != null
       ? `<button class="btn" id="wmorebtn">Load more</button>` : ""}</div>`;
@@ -4255,11 +4289,17 @@ function syncFavSet(favs) { FAVSET = new Set(favs.map(f => f.type + ":" + f.id))
 
 const headPill = (v, l) => `<div class="hp"><div class="hp-v">${v}</div><div class="hp-l">${l}</div></div>`;
 function headPills(h) {
+  // reading only arrives for members who keep a shelf: it gets its own band under the
+  // watch numbers (two wide cells, or four when books and manga are both on)
+  const rd = [["books", "books"], ["pages", "pages"], ["manga", "manga"], ["chapters", "chapters"]]
+    .filter(([k]) => h[k] != null);
   return `<div class="headrow">
     ${headPill((h.shows || 0).toLocaleString(), "shows")}
     ${headPill((h.episodes || 0).toLocaleString(), "episodes")}
     ${headPill((h.movies || 0).toLocaleString(), "movies")}
-    ${headPill((h.hours || 0).toLocaleString(), "hours")}</div>`;
+    ${headPill((h.hours || 0).toLocaleString(), "hours")}
+    ${rd.map(([k, l]) => `<div class="hp hp-rd${rd.length === 2 ? " wide" : ""}"><div class="hp-v">${
+      (h[k] || 0).toLocaleString()}</div><div class="hp-l">${l}</div></div>`).join("")}</div>`;
 }
 
 function favCardHTML(f, me) {
@@ -4267,7 +4307,8 @@ function favCardHTML(f, me) {
     <a class="favcard-link" href="#/${f.type}/${f.id}" aria-label="${esc(f.title)}">
       <span class="favposter"><img loading="lazy" src="${POSTER(f.poster)}" alt=""></span>
       <span class="fav-t">${esc(f.title)}</span>
-      <span class="fav-y">${f.year || ""}</span></a>
+      <span class="fav-y">${f.type === "book" || f.type === "manga"
+        ? (f.type === "book" ? "Book" : "Manga") + (f.year ? " · " + f.year : "") : f.year || ""}</span></a>
     ${me ? `<div class="fav-edit">
       <button class="fav-pin" title="Pin to front" aria-label="Pin to front">${PIN_ICON}</button>
       <button class="fav-x" title="Remove favorite" aria-label="Remove favorite">${I.x}</button></div>` : ""}
@@ -4320,20 +4361,57 @@ function wireFavorites(host, me) {
 }
 
 function favPicker(onDone) {
+  // readers can also pin books / manga — picked from their own shelf (a book only
+  // exists in Marquee once it's on someone's shelf, so search would dead-end)
+  const f = (ME && ME.features) || {};
+  const modes = [["screen", "Shows & movies"], ...(f.books ? [["book", "Books"]] : []),
+    ...(f.manga ? [["manga", "Manga"]] : [])];
+  let mode = "screen", shelf = null;
   const s = sheet(`<div class="sh-t">Add a favorite</div>
+    ${modes.length > 1 ? `<div class="tabs fav-modes">${modes.map(([m, l]) =>
+      `<button data-m="${m}" class="${m === mode ? "on" : ""}">${l}</button>`).join("")}</div>` : ""}
     <div class="fav-search"><span class="fs-ic">${I.eye && ""}</span>
       <input id="fq" placeholder="Search shows & movies…" autocapitalize="none" autocomplete="off"></div>
     <div id="fres" class="fav-results"><div class="fav-hint">Type to search TMDB.</div></div>`, { cls: "favpicker" });
   const q = $("#fq", s.el), res = $("#fres", s.el);
   let t = null, last = "";
+  const shelfHTML = () => {
+    if (!shelf) return skRows(3);
+    const v = q.value.trim().toLowerCase();
+    const rank = { finished: 0, reading: 1, want: 2 };
+    const rows = (mode === "book" ? shelf.books : shelf.manga);
+    const all = [...rows.finished, ...rows.reading, ...rows.want]
+      .filter(r => !v || (r.title || "").toLowerCase().includes(v) || (r.author || "").toLowerCase().includes(v))
+      .sort((a, b) => rank[a.state] - rank[b.state]);
+    return all.length ? all.slice(0, 40).map(r => `
+      <button class="fav-opt" data-t="${mode}" data-id="${r.id}">
+        <img loading="lazy" src="${POSTER(r.cover)}" alt="">
+        <span class="fo-mid"><b>${esc(r.title)}</b><span class="fo-sub">${esc(
+          r.state === "finished" ? "Read" : r.state === "reading" ? "Reading" : "Want to read")}${
+          mode === "book" && r.author ? " · " + esc(r.author) : r.year ? " · " + r.year : ""}</span></span>
+        <span class="fo-add">${I.plus}</span></button>`).join("")
+      : `<div class="fav-hint">${v ? "Nothing on your shelf matches." : "Your shelf is empty."}</div>`;
+  };
+  $$(".fav-modes button", s.el).forEach(b => b.onclick = async () => {
+    mode = b.dataset.m; last = "";
+    $$(".fav-modes button", s.el).forEach(x => x.classList.toggle("on", x === b));
+    q.placeholder = mode === "screen" ? "Search shows & movies…" : `Filter your ${mode === "book" ? "books" : "manga"}…`;
+    if (mode === "screen") { q.oninput(); return; }
+    res.innerHTML = shelfHTML();
+    if (!shelf) { try { shelf = await api("/reading"); } catch { shelf = { books: {}, manga: {} }; }
+      ["books", "manga"].forEach(k => { shelf[k] = { finished: [], reading: [], want: [], ...shelf[k] }; });
+      if (mode !== "screen") res.innerHTML = shelfHTML(); }
+  });
   q.oninput = () => {
+    if (mode !== "screen") { res.innerHTML = shelfHTML(); return; }
     clearTimeout(t); const v = q.value.trim();
+    if (!v) { res.innerHTML = `<div class="fav-hint">Type to search TMDB.</div>`; return; }
     if (v.length < 2) { res.innerHTML = `<div class="fav-hint">Keep typing…</div>`; return; }
     t = setTimeout(async () => {
       if (v === last) return; last = v;
       res.innerHTML = skRows(3);
       let data; try { data = await api("/search?q=" + encodeURIComponent(v)); } catch { return; }
-      if ($("#fq", s.el)?.value.trim() !== v) return;
+      if ($("#fq", s.el)?.value.trim() !== v || mode !== "screen") return;
       const items = (data.results || []).filter(r => r.poster);
       res.innerHTML = items.length ? items.map(r => `
         <button class="fav-opt" data-t="${r.type}" data-id="${r.id}">
@@ -4441,6 +4519,54 @@ async function loadProfileStats(statsPath, advPath, host) {
   } catch { /* advanced is best-effort */ }
 }
 
+/* The reading corner of a profile — a compact cut of the Reading stats screen (same
+   tiles + column chart vocabulary) for any member who keeps a shelf. The API 404s
+   for members without one, which simply leaves the slot empty. */
+function profileReadingHTML(d, me, first) {
+  const tile = (hue, v, l, sub) =>
+    `<div class="tile" style="--tc:var(--c-${hue})"><div class="v">${v}</div>
+      <div class="l">${l}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+  const months = [];
+  for (let i = 11; i >= 0; i--) { const dt = new Date(); dt.setDate(1); dt.setMonth(dt.getMonth() - i);
+    months.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`); }
+  const block = (name, s, unit, both) => {
+    if (!s) return "";
+    const T = s.totals, byM = Object.fromEntries(s.monthly || []);
+    const vals = months.map(m => byM[m] || 0);
+    const yr = vals.reduce((a, b) => a + b, 0);
+    if (!T.all && !s.finished.all && !s.reading_now)
+      return `${both ? `<div class="sub-h">${name}</div>` : ""}<div class="empty prd-empty">No ${unit} logged yet.</div>`;
+    return `${both ? `<div class="sub-h">${name}</div>` : ""}
+      <div class="tiles prd-tiles">
+        ${tile("amber", s.finished.year, "finished this year", `${s.finished.all} all-time · ${s.reading_now} on the go`)}
+        ${tile("blue", `${yr.toLocaleString()}<small class="unit">${unit}</small>`, "last 12 months",
+          `${T.month.toLocaleString()} in the last 30 days`)}
+        ${tile("green", `${s.streak.current}<small class="unit">${s.streak.current === 1 ? "day" : "days"}</small>`,
+          "reading streak", `best ${s.streak.longest}`)}
+        ${s.pace ? tile("violet", `${s.pace}<small class="unit">${unit}/hr</small>`, "reading pace",
+            s.avg_session_min ? `avg session ${s.avg_session_min} min` : "")
+          : tile("violet", `${T.hours_all}<small class="unit">hrs</small>`, "in sessions", `${T.sessions} log entries`)}
+      </div>
+      ${yr ? `<div class="chart"><div class="ch-head"><h3>${unit[0].toUpperCase() + unit.slice(1)} by month</h3>
+        <span class="ch-badge">${yr.toLocaleString()} ${unit}</span></div>
+        ${colBar(months.map((m, i) => ({ label: MONTHS[+m.slice(5) - 1] + " " + m.slice(0, 4),
+          xlabel: MONTHS[+m.slice(5) - 1].slice(0, 1), v: vals[i], color: "var(--c-amber)" })), unit)}</div>` : ""}`;
+  };
+  const both = !!(d.books && d.manga);
+  return `<div class="section"><h2>${me ? "Your reading" : esc(first) + "’s reading"}</h2><div class="rule"></div>
+      ${me ? `<a class="cnt seeall" href="#/reading/stats">All stats ${I.chevR}</a>` : ""}</div>
+    ${block("Books", d.books, "pages", both)}${block("Manga", d.manga, "chapters", both)}`;
+}
+async function loadProfileReading(username, me, feats, first, host) {
+  const box = $("#prof-reading", host);
+  if (!box || !(feats && (feats.books || feats.manga))) return;
+  const c = cached(`/profile/${encodeURIComponent(username)}/reading/stats`);
+  const paint = d => { if (!$("#prof-reading", host)) return;
+    box.innerHTML = profileReadingHTML(d, me, first); wireStats(box); };
+  if (c.stale) paint(c.stale);
+  c.refresh(() => !!$("#prof-reading", host), paint);
+}
+
 // Profile banner as a *true* progressive blur: several copies of the same image at
 // stepped blur radii, each revealed by a feathered gradient mask so neighbouring
 // blur levels crossfade into one continuous ramp — sharp at the top, dissolving
@@ -4496,6 +4622,7 @@ routes.profile = async (username) => {
       <div class="section reveal"><h2>${me ? "Your numbers" : esc(p.display_name.split(" ")[0]) + "’s numbers"}</h2><div class="rule"></div></div>
       <div id="prof-stats">${statsSkeleton()}</div>
       <div id="prof-adv"></div>
+      <div id="prof-reading" class="stats-wrap"></div>
 
       ${me ? `<button class="btn signout" id="signout">Sign out</button>` : ""}`;
 
@@ -4524,9 +4651,10 @@ routes.profile = async (username) => {
         await api("/logout", { body: {} }).catch(() => {}); ME = null; resetUserState(); routes.login(); };
     }
     wireFavorites(view, me);
-    loadWatchedRails(p.username, me, view);
+    loadWatchedRails(p.username, me, view, p.features);
     loadMembers(view);
     loadProfileStats(statsPath, advPath, view);
+    loadProfileReading(p.username, me, p.features, p.display_name.split(" ")[0], view);
     if (window.renderProfileLists) {
       window.renderProfileLists(p.username, me)
         .then(html => { const s = $("#profile-lists"); if (s) s.innerHTML = html; })
@@ -4942,6 +5070,20 @@ const dayLabel = d0 => {
 const monthLabel = d0 => new Date(d0 + "T00:00").toLocaleDateString(undefined,
   { month: "long", year: "numeric" });
 
+/* one book (or manga) on one day: where you started → where you got to, time spent */
+function readRowHTML(it) {
+  const book = it.kind === "book", d = Math.max(0, (it.to || 0) - (it.from || 0));
+  const pre = book ? "pp." : "ch.";
+  const span = it.from !== it.to ? `${pre} ${it.from} → ${it.to}` : `at ${book ? "p." : "ch."} ${it.to}`;
+  const done = it.total && it.to >= it.total && it.from < it.total;
+  const parts = [span, it.minutes ? `${it.minutes} min` : "", done ? "Finished" : ""].filter(Boolean);
+  return `<a class="h-row h-read" data-k="${it.day}:${it.kind}:${it.id}" href="#/${it.kind}/${it.id}">
+    <img loading="lazy" src="${POSTER(it.cover)}" alt="">
+    <div class="mid"><div class="t">${esc(it.title)}</div>
+      <div class="s">${parts.join(" · ")}</div></div>
+    <div class="h-meta">${d ? `+${d.toLocaleString()}` : "—"}<small>${book
+      ? (d === 1 ? "page" : "pages") : (d === 1 ? "chapter" : "chapters")}</small></div></a>`;
+}
 function historyChunkHTML(items, type, state) {
   let html = "";
   for (const it of items) {
@@ -4961,6 +5103,8 @@ function historyChunkHTML(items, type, state) {
         <div class="mid"><div class="t">${esc(it.title)}</div>
           <div class="s">${it.year || ""}${it.runtime ? ` · ${Math.round(it.runtime / 60 * 10) / 10} hrs` : ""}</div></div>
         ${it.rating ? `<span class="h-rate">${num(it.rating)}<small>/10</small></span>` : ""}</a>`;
+    } else if (type === "reading") {
+      html += readRowHTML(it);
     } else {
       const n = it.eps.length;
       html += `<a class="h-row" data-k="${it.day}:${it.show_id}" href="#/show/${it.show_id}">
@@ -4975,11 +5119,14 @@ function historyChunkHTML(items, type, state) {
 
 routes.history = (tab = "tv") => {
   navHere("History");
+  const f = (ME && ME.features) || {}, reads = !!(f.books || f.manga);
+  if (tab === "reading" && !reads) tab = "tv";
   view.innerHTML = `<div class="page-head">${crumb("#/profile", "Profile")}</div>
     <h1>History</h1>
     <div class="tabs">
       <button data-t="tv" class="${tab === "tv" ? "on" : ""}">Shows</button>
       <button data-t="movie" class="${tab === "movie" ? "on" : ""}">Movies</button>
+      ${reads ? `<button data-t="reading" class="${tab === "reading" ? "on" : ""}">Reading</button>` : ""}
     </div>
     <div id="hlist" class="hlist">${skRows(8)}</div>
     <div id="hmore"></div>`;
@@ -5020,13 +5167,28 @@ routes.history = (tab = "tv") => {
         seen.set(k, it);
         return true;
       });
+    } else if (tab === "reading") {
+      items = items.filter(it => {
+        const k = `${it.day}:${it.kind}:${it.id}`;
+        if (seen.has(k)) {   // the same book+day carried over a page edge: extend it back
+          const prev = seen.get(k);
+          prev.from = it.from; prev.minutes += it.minutes; prev.sessions += it.sessions;
+          const el = $(`#hlist [data-k="${CSS.escape(k)}"]`);
+          if (el) el.outerHTML = readRowHTML(prev);
+          return false;
+        }
+        seen.set(k, it);
+        return true;
+      });
     }
     if (state.first) { $("#hlist").innerHTML = ""; state.first = false; }
     $("#hlist").insertAdjacentHTML("beforeend", historyChunkHTML(items, tab, state));
     state.cursor = d.cursor;
     state.done = !d.cursor;
     $("#hmore").innerHTML = state.done
-      ? (seen.size || tab === "movie" ? `<div class="empty">That's everything.</div>` : `<div class="empty">Nothing here yet.</div>`)
+      ? (seen.size || tab === "movie" ? `<div class="empty">That's everything.</div>`
+        : `<div class="empty">${tab === "reading"
+          ? "Nothing logged yet — start a reading session or update your progress." : "Nothing here yet."}</div>`)
       : "";
   }
   loadMore();
