@@ -38,7 +38,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261011c"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261011d"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -1970,6 +1970,7 @@ NOTIF_TYPES = [
     ("new_season", "A followed show returns",      "A new season of a show you follow gets a premiere date.", None),
     ("available",  "Your request is ready",        "A title you requested finishes downloading and is on Plex.", None),
     ("plex",       "Auto-tracked from Plex",       "Marquee marks something watched because you played it in Plex.", None),
+    ("new_chapter", "New manga chapters",          "A new chapter of a series you're reading is out (manga tracking only).", None),
 ]
 NOTIF_DEFAULT = {t: dv for t, _, _, dv in NOTIF_TYPES}
 
@@ -2207,7 +2208,15 @@ def get_notif_prefs(user=Depends(current_user)):
     return {"prefs": [{"type": t, "label": label, "help": help_, "has_days": t == "airing",
                        "enabled": bool(have[t]["enabled"]) if t in have else False,
                        "value": (have[t]["value"] if t in have and have[t]["value"] is not None else dv)}
-                      for t, label, help_, dv in NOTIF_TYPES]}
+                      for t, label, help_, dv in NOTIF_TYPES
+                      if t != "new_chapter" or _feats(user).get("manga")]}
+
+
+def _feats(user):
+    try:
+        return json.loads(user["features"] or "{}") if "features" in user.keys() else {}
+    except (TypeError, ValueError):
+        return {}
 
 
 @app.post("/api/notifications/prefs")
@@ -2659,12 +2668,23 @@ def dashboard(user=Depends(current_user)):
                                    "avatar": r["avatar"]}})
 
     wl_rail = sorted(home_data["not_started"], key=lambda x: x["added_at"] or "", reverse=True)[:16]
+    # Continue reading — books and manga in progress sit on Home next to TV, most
+    # recently touched first, when the person tracks reading at all
+    feats = _feats(user)
+    reading_now = []
+    if feats.get("books") or feats.get("manga"):
+        rd = reading(user)
+        for kind, key in (("book", "books"), ("manga", "manga")):
+            if feats.get(key):
+                reading_now += [{**it, "kind": kind} for it in rd[key]["reading"]]
+        reading_now.sort(key=lambda x: x.get("last_read_at") or x.get("started_at") or "", reverse=True)
     with db() as con:
         enrich_show_cards(con, uid, wl_rail)
     return {
         "up_next": home_data["watch_next"],
         "stale": home_data["stale"],
         "watchlist": wl_rail,
+        "reading": reading_now[:12],
         "calendar": calendar,
         "recent": collapse(recent)[:24],
         "social": collapse(social)[:12],
@@ -2690,7 +2710,18 @@ def upcoming(user=Depends(current_user)):
           JOIN movie_states ms ON ms.movie_id=m.id AND ms.user_id=? AND ms.state='watchlist'
           WHERE m.release_date>? AND m.release_date<=?
           ORDER BY m.release_date""", (uid, t, horizon)).fetchall()
-    return {"episodes": [dict(r) for r in eps], "movies": [dict(r) for r in movs]}
+        chapters = []
+        if _feats(user).get("manga"):
+            # manga doesn't publish dates ahead, so the reading side of Upcoming is
+            # "out now and you haven't read it": chapters from the last fortnight
+            recent = (date.today() - timedelta(days=14)).isoformat()
+            chapters = [dict(r) for r in con.execute("""
+              SELECT m.id, m.title, m.cover, m.latest_ch, m.latest_at, s.progress
+              FROM manga_states s JOIN manga m ON m.id=s.manga_id
+              WHERE s.user_id=? AND s.state IN ('reading','paused') AND m.latest_ch > COALESCE(s.progress,0)
+                AND m.latest_at >= ? ORDER BY m.latest_at DESC""", (uid, recent))]
+    return {"episodes": [dict(r) for r in eps], "movies": [dict(r) for r in movs],
+            "chapters": chapters}
 
 
 # ---------------------------------------------------------------- show detail + marking
@@ -3362,7 +3393,9 @@ def _state_row(r, kind):
         except (ValueError, TypeError):
             g = []
         out.update({"chapters": r["chapters"], "volumes": r["volumes"],
-                    "status": r["status"], "origin": r["origin"], "genres": ",".join(g[:4])})
+                    "status": r["status"], "origin": r["origin"], "genres": ",".join(g[:4]),
+                    "latest_ch": r["latest_ch"] if "latest_ch" in r.keys() else None,
+                    "latest_at": r["latest_at"] if "latest_at" in r.keys() else None})
     return out
 
 
@@ -3397,10 +3430,48 @@ def reading(user=Depends(current_user)):
     if need_bg and not _series_bg["running"]:
         _series_bg["running"] = True
         threading.Thread(target=_backfill_series, daemon=True).start()
-    group = lambda rows: {"reading": [r for r in rows if r["state"] == "reading"],
-                          "want": [r for r in rows if r["state"] == "want"],
-                          "finished": [r for r in rows if r["state"] == "finished"]}
+    with db() as con:
+        add_reading_pace(con, uid, books, "book")
+        add_reading_pace(con, uid, manga, "manga")
+    group = lambda rows: {st: [r for r in rows if r["state"] == st] for st in READING_STATES}
     return {"books": group(books), "manga": group(manga)}
+
+
+PACE_DAYS = 21
+
+
+def add_reading_pace(con, uid, items, kind):
+    """Pace and a finish forecast for what you're reading: units (pages/chapters) per
+    day over the last three weeks of sessions and checkpoints, counted from the first
+    of them — a book picked up twice in 21 days reads slower than one read daily.
+    Also when you last touched it, so Home can order by it."""
+    ids = [it["id"] for it in items]
+    if not ids:
+        return items
+    cut = (datetime.now() - timedelta(days=PACE_DAYS)).isoformat()
+    rows = {r["item_id"]: r for r in con.execute(f"""
+        SELECT item_id, SUM(MAX(0, COALESCE(end_pos,0) - COALESCE(start_pos,0))) AS units,
+               MIN(started_at) AS first_at, MAX(COALESCE(ended_at, started_at)) AS last_at
+        FROM reading_sessions WHERE user_id=? AND kind=? AND item_id IN ({_ph(ids)})
+          AND started_at >= ? GROUP BY item_id""", (uid, kind, *ids, cut))}
+    last = {r["item_id"]: r["last_at"] for r in con.execute(f"""
+        SELECT item_id, MAX(COALESCE(ended_at, started_at)) AS last_at FROM reading_sessions
+        WHERE user_id=? AND kind=? AND item_id IN ({_ph(ids)}) GROUP BY item_id""", (uid, kind, *ids))}
+    for it in items:
+        it["last_read_at"] = last.get(it["id"])
+        r = rows.get(it["id"])
+        if it["state"] != "reading" or not r or not r["units"]:
+            continue
+        try:
+            span = max(1, (datetime.now() - datetime.fromisoformat(r["first_at"])).days + 1)
+        except (TypeError, ValueError):
+            continue
+        per_day = r["units"] / span
+        total = it.get("pages") if kind == "book" else it.get("chapters")
+        it["pace"] = round(per_day, 1)
+        if total and per_day > 0 and (it["progress"] or 0) < total:
+            it["finish_days"] = max(1, round((total - (it["progress"] or 0)) / per_day))
+    return items
 
 
 def _norm_txt(s):
@@ -3677,11 +3748,17 @@ async def books_add(request: Request, user=Depends(current_user)):
     now = datetime.now().isoformat()
     with db() as con:
         bid = upsert_book(con, item)
-        prog = (body.get("pages") or 0) if state == "finished" else 0
-        con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,updated_at,started_at)
-            VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
-              state=excluded.state, updated_at=excluded.updated_at""",
-            (user["id"], bid, state, prog, now, now if state == "reading" else None))
+        prog = (item.get("pages") or body.get("pages") or 0) if state == "finished" else 0
+        # "I've read this" is a finish: it gets dates (else it never counts in a year)
+        # and progress, including when the book was already on the shelf
+        con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,updated_at,
+              started_at,finished_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,book_id) DO UPDATE SET
+              state=excluded.state, updated_at=excluded.updated_at,
+              progress=MAX(COALESCE(book_states.progress,0), excluded.progress),
+              started_at=COALESCE(book_states.started_at, excluded.started_at),
+              finished_at=COALESCE(excluded.finished_at, book_states.finished_at)""",
+            (user["id"], bid, state, prog, now, now if state in ("reading", "finished") else None,
+             now if state == "finished" else None))
     return {"ok": True, "id": bid}
 
 
@@ -3711,6 +3788,8 @@ async def manga_add(request: Request, user=Depends(current_user)):
         raise HTTPException(404, "not found on AniList")
     row = al_media_row(m)
     state = body.get("state") or "want"
+    if state not in ("want", "reading", "finished"):
+        raise HTTPException(400, "unknown reading state")
     now = datetime.now().isoformat()
     with db() as con:
         con.execute("""INSERT INTO manga(id,title,cover,chapters,volumes,status,origin,year,details)
@@ -3722,11 +3801,19 @@ async def manga_add(request: Request, user=Depends(current_user)):
              row["status"], row["origin"], row["year"],
              json.dumps({"genres": row["genres"], "score": row["score"], "desc": row["desc"]})))
         prog = (row["chapters"] or 0) if state == "finished" else 0
-        con.execute("""INSERT INTO manga_states(user_id,manga_id,state,progress,updated_at,started_at)
-            VALUES(?,?,?,?,?,?) ON CONFLICT(user_id,manga_id) DO UPDATE SET
-              state=excluded.state, updated_at=excluded.updated_at""",
-            (user["id"], mid, state, prog, now, now if state == "reading" else None))
+        con.execute("""INSERT INTO manga_states(user_id,manga_id,state,progress,updated_at,
+              started_at,finished_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,manga_id) DO UPDATE SET
+              state=excluded.state, updated_at=excluded.updated_at,
+              progress=MAX(COALESCE(manga_states.progress,0), excluded.progress),
+              started_at=COALESCE(manga_states.started_at, excluded.started_at),
+              finished_at=COALESCE(excluded.finished_at, manga_states.finished_at)""",
+            (user["id"], mid, state, prog, now, now if state in ("reading", "finished") else None,
+             now if state == "finished" else None))
     return {"ok": True, "id": mid}
+
+
+# paused = set aside, coming back to it; dnf = did not finish (pages read still count)
+READING_STATES = ("want", "reading", "finished", "paused", "dnf")
 
 
 def _update_reading_state(kind, item_id, body, uid):
@@ -3735,13 +3822,16 @@ def _update_reading_state(kind, item_id, body, uid):
     with db() as con:
         if body.get("state") == "none":
             con.execute(f"DELETE FROM {tbl} WHERE user_id=? AND {col}=?", (uid, item_id))
+            # a session left running on a title you've removed would stay "live" forever
+            con.execute("""DELETE FROM reading_sessions WHERE user_id=? AND kind=? AND item_id=?
+                AND ended_at IS NULL""", (uid, kind, item_id))
             return
         cur = con.execute(f"SELECT * FROM {tbl} WHERE user_id=? AND {col}=?",
                           (uid, item_id)).fetchone()
         if not cur:
             raise HTTPException(404, "not tracked")
         state = body.get("state") or cur["state"]
-        if state not in ("want", "reading", "finished"):
+        if state not in READING_STATES:
             raise HTTPException(400, "unknown reading state")
         progress = body.get("progress", cur["progress"])
         if progress is not None:
@@ -3838,6 +3928,79 @@ def _household_states(uid, kind, item_id):
             FROM {tbl} s JOIN users u ON u.id=s.user_id
             WHERE s.{col}=? AND s.user_id<>?""", (item_id, uid)).fetchall()
     return [dict(r) for r in rows]
+
+
+def mangadex_latest(al_id, title, uuid=None):
+    """(uuid, newest chapter number, when it was published) — one cheap feed call,
+    newest first. None when MangaDex can't be matched or doesn't answer."""
+    try:
+        if not uuid:
+            r = httpx.get("https://api.mangadex.org/manga", timeout=20, headers=OL_UA,
+                          params={"title": _clean_title(title), "limit": 10})
+            r.raise_for_status()
+            cands = r.json().get("data") or []
+            uuid = next((m["id"] for m in cands
+                         if ((m["attributes"].get("links") or {}).get("al")) == str(al_id)), None)
+            if not uuid:
+                return None
+        f = httpx.get(f"https://api.mangadex.org/manga/{uuid}/feed", timeout=20, headers=OL_UA,
+                      params={"order[chapter]": "desc", "limit": 5, "translatedLanguage[]": "en"})
+        f.raise_for_status()
+        for c in f.json().get("data") or []:
+            a = c["attributes"]
+            try:
+                n = int(float(a.get("chapter")))
+            except (TypeError, ValueError):
+                continue
+            return uuid, n, (a.get("publishAt") or a.get("readableAt") or "")[:19] or None
+        return uuid, None, None
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+
+
+MANGA_CHECK_HOURS = 12
+
+
+def refresh_manga_releases():
+    """Newest chapter for every releasing series someone is reading, a couple of times
+    a day. When it moves, readers who've switched on 'new_chapter' hear about it."""
+    stale = (datetime.now() - timedelta(hours=MANGA_CHECK_HOURS)).isoformat()
+    with db() as con:
+        rows = con.execute("""SELECT DISTINCT m.id, m.title, m.md_uuid, m.latest_ch FROM manga m
+            JOIN manga_states s ON s.manga_id=m.id AND s.state IN ('reading','paused')
+            WHERE UPPER(COALESCE(m.status,'')) NOT IN ('FINISHED','CANCELLED')
+              AND (m.latest_checked IS NULL OR m.latest_checked < ?)""", (stale,)).fetchall()
+    for m in rows:
+        got = mangadex_latest(m["id"], m["title"] or "", m["md_uuid"])
+        now = datetime.now().isoformat()
+        with db() as con:
+            if not got:
+                con.execute("UPDATE manga SET latest_checked=? WHERE id=?", (now, m["id"]))
+                continue
+            uuid, n, at = got
+            con.execute("""UPDATE manga SET md_uuid=?, latest_checked=?,
+                latest_ch=COALESCE(?, latest_ch), latest_at=CASE WHEN ? > COALESCE(latest_ch,0)
+                THEN COALESCE(?, ?) ELSE latest_at END WHERE id=?""",
+                (uuid, now, n, n or 0, at, now, m["id"]))
+            if n and m["latest_ch"] and n > m["latest_ch"]:
+                for r in con.execute("""SELECT user_id, progress FROM manga_states
+                        WHERE manga_id=? AND state='reading'""", (m["id"],)).fetchall():
+                    behind = n - (r["progress"] or 0)
+                    push_notif(con, r["user_id"], "new_chapter",
+                               f"{m['title']} — chapter {n} is out",
+                               f"You're {behind} chapter{'s' if behind != 1 else ''} behind" if behind > 0 else "",
+                               f"manga/{m['id']}", dedup=f"newch:{m['id']}:{n}")
+        time.sleep(1.2)          # MangaDex asks for gentle clients
+
+
+def manga_release_loop():
+    time.sleep(240)
+    while True:
+        try:
+            refresh_manga_releases()
+        except Exception:  # noqa: BLE001
+            log.exception("manga release refresh failed")
+        time.sleep(3600 * 3)
 
 
 def mangadex_chlist(al_id, title, expect=None):
@@ -4169,6 +4332,28 @@ def _session_kind(kind):
     return ("book_states", "book_id") if kind == "book" else ("manga_states", "manga_id")
 
 
+@app.post("/api/{kind}/{item_id}/restore")
+async def reading_restore(kind: str, item_id: int, request: Request, user=Depends(current_user)):
+    """Put a removed title back exactly as it was — the undo behind 'Removed Piranesi'."""
+    tbl, col = _session_kind(kind)
+    body = await request.json()
+    state = body.get("state")
+    if state not in READING_STATES:
+        raise HTTPException(400, "unknown reading state")
+    cat = "books" if kind == "book" else "manga"
+    with db() as con:
+        if not con.execute(f"SELECT 1 FROM {cat} WHERE id=?", (item_id,)).fetchone():
+            raise HTTPException(404, "unknown title")
+        con.execute(f"""INSERT OR REPLACE INTO {tbl}(user_id,{col},state,progress,rating,
+            started_at,finished_at,updated_at,mode) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (user["id"], item_id, state, max(0, int_or_400(body.get("progress") or 0, "progress")),
+             rating_or_none(body.get("rating"), real=True),
+             date_or_none(body.get("started_at"), "started_at"),
+             date_or_none(body.get("finished_at"), "finished_at"),
+             datetime.now().isoformat(), body.get("mode") if body.get("mode") in ("pages", "chapters", "pct") else None))
+    return {"ok": True}
+
+
 @app.post("/api/{kind}/{item_id}/session/start")
 def session_start(kind: str, item_id: int, user=Depends(current_user)):
     tbl, col = _session_kind(kind)
@@ -4205,7 +4390,7 @@ async def session_end(kind: str, item_id: int, request: Request, user=Depends(cu
         if body.get("discard"):
             con.execute("DELETE FROM reading_sessions WHERE id=?", (live["id"],))
             return {"ok": True, "discarded": True}
-        pos = int(body.get("pos", live["start_pos"] or 0))
+        pos = max(0, int_or_400(body.get("pos", live["start_pos"] or 0), "pos"))
         con.execute("UPDATE reading_sessions SET ended_at=?, end_pos=? WHERE id=?",
                     (now, pos, live["id"]))
         # bump shelf progress directly (the session row IS the history entry)
@@ -4252,6 +4437,11 @@ def reading_stats(user=Depends(current_user)):
                 FROM {states_tbl} s JOIN {items_tbl} i ON i.id=s.{id_col}
                 WHERE s.user_id=?""", (uid,)).fetchall()
         daily, clock, wd = {}, [0.0] * 24, [0.0] * 7
+        # days you actually opened the book (sessions + checkpoints). Levelled pages
+        # (spread below) feed the charts, but a streak or a "biggest day" made of
+        # imported books smeared across months was fiction — "best 41 days" with zero
+        # sessions logged
+        real = {}
         total_units = total_min = timed_units = 0
         timed = []
 
@@ -4283,6 +4473,7 @@ def reading_stats(user=Depends(current_user)):
                 except ValueError:
                     prev = None
             prev_by_item[s["item_id"]] = d_obj
+            real[day] = real.get(day, 0) + delta
             total_units += delta; total_min += m
             daily.setdefault(day, {"units": 0.0, "min": 0.0})["min"] += m
             if m >= 3:                                   # a real timed session → its day
@@ -4308,8 +4499,8 @@ def reading_stats(user=Depends(current_user)):
                 total_units += r["total"]
             except ValueError:
                 pass
-        days_sorted = sorted(daily)
-        # streak: consecutive days (ending today or yesterday) with any activity
+        days_sorted = sorted(real)
+        # streak: consecutive days (ending today or yesterday) with any real activity
         streak_cur = streak_max = 0
         run, prev = 0, None
         for dstr in days_sorted:
@@ -4347,7 +4538,8 @@ def reading_stats(user=Depends(current_user)):
                     fastest = {"title": r["title"], "days": days}
             if r["total"] and (not longest or r["total"] > longest["units"]):
                 longest = {"title": r["title"], "units": r["total"]}
-        big = max(daily.items(), key=lambda kv: kv[1]["units"], default=None)
+        big = max(((d0, daily[d0]) for d0 in real if d0 in daily),
+                  key=lambda kv: kv[1]["units"], default=None)
         timed_min = sum(m for m, _ in timed)
         rating_hist = {}
         for r in st:
@@ -5867,6 +6059,10 @@ def startup():
                      "ALTER TABLE episodes ADD COLUMN imdb_rating REAL",
                      "ALTER TABLE episodes ADD COLUMN imdb_votes INTEGER",
                      "ALTER TABLE movie_states ADD COLUMN added_at TEXT",
+                     "ALTER TABLE manga ADD COLUMN md_uuid TEXT",
+                     "ALTER TABLE manga ADD COLUMN latest_ch INTEGER",
+                     "ALTER TABLE manga ADD COLUMN latest_at TEXT",
+                     "ALTER TABLE manga ADD COLUMN latest_checked TEXT",
                      "CREATE INDEX IF NOT EXISTS idx_watches_time ON watches(watched_at)",
                      "CREATE INDEX IF NOT EXISTS idx_watches_show ON watches(show_id, season, number)",
                      "CREATE INDEX IF NOT EXISTS idx_shows_imdb ON shows(imdb_id)",
@@ -5885,6 +6081,7 @@ def startup():
     threading.Thread(target=plex_poll_loop, daemon=True).start()
     threading.Thread(target=notif_loop, daemon=True).start()
     threading.Thread(target=imdb_loop, daemon=True).start()
+    threading.Thread(target=manga_release_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

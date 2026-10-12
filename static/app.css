@@ -2353,3 +2353,22 @@ body.recap-open{overflow:hidden}
 .lb-x{width:44px;height:44px}
 @media(hover:none){.fav-edit{opacity:1!important}}
 @media(max-width:700px){#topavatar{display:none}.bar .bell{margin-left:auto}}
+
+/* ── reading on Home ── */
+.rcard .rc-bar{pointer-events:auto;cursor:pointer;padding:6px 0 2px;margin-top:4px}
+.rcard .rc-kind{text-transform:uppercase;letter-spacing:.08em;font-size:9.5px;font-weight:800}
+.rcard .sub .amb{color:var(--amber-2);font-weight:700}
+.rcard.live{box-shadow:0 0 0 2px var(--c-green),var(--shadow)}
+.rc-live{display:inline-flex;align-items:center;gap:6px;color:#9fe0b4;font-weight:650}
+.rc-live i{width:7px;height:7px;border-radius:50%;background:var(--c-green);animation:rdpulse 1.6s ease-in-out infinite}
+/* book covers are often pale — reading cards get a deeper scrim than TV posters */
+.bcard.rcard .scrim,.bcard.rdcard .scrim{background:linear-gradient(180deg,rgba(10,8,6,.5) 0%,rgba(10,8,6,0) 22%,
+  rgba(10,8,6,0) 34%,rgba(10,8,6,.82) 58%,rgba(10,8,6,.96) 100%)}
+.rc-live{white-space:nowrap}
+.bcard.rdcard.live{box-shadow:0 0 0 2px var(--c-green),var(--shadow)}
+.bcard.rdcard .sub .amb{color:var(--amber-2);font-weight:700}
+.rd-states2{margin-top:-6px}
+.rd-states2 .rd-st{padding:6px 4px;font-size:12px;border-style:dashed}
+.rd-states2 .rd-st.on{border-style:solid}
+.rdt-chmore{display:block;margin:8px auto 10px}
+.sfilt{margin:-4px 0 14px}

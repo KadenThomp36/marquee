@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261011c";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261011d";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -695,8 +695,8 @@ function parseHash() {
   else if (p[0] === "recap") routes.recap(null, p[1]);
   else (routes[p[0]] || routes.home)(p[1]);
   const active = { list: "lists", movie: "library", movies: "library", shows: "library", show: "home", u: "profile",
-    recap: "profile", stats: "profile", watched: "profile", book: "reading",
-    books: "reading", manga: "reading" }[p[0]] || p[0] || "home";
+    recap: "profile", stats: "profile", watched: "profile", book: "library",
+    books: "library", manga: "library", reading: "library" }[p[0]] || p[0] || "home";
   $$("#nav a, #tabbar a, .gear, .bell").forEach(a =>
     a.classList.toggle("on", a.dataset.r === active));
 }
@@ -1005,6 +1005,80 @@ function wlCard(s) {
     <div class="wc-s">${esc(!s.aired && s.next_air ? `Premieres ${shortDay(s.next_air)}`
       : [s.prov ? s.prov.name : s.network, hrs(s.total_min)].filter(Boolean).join(" · ") || String(s.year || ""))}</div></a>`;
 }
+/* Continue reading — a book or manga in progress, built like an Up Next card: the
+   cover fills it, progress sits inside, the round button logs reading. Manga and
+   chapter-mode books step +1 chapter; page books open the scrubber (one tap must
+   never "finish" a 400-page book). */
+function homeReadCard(it) {
+  const kind = it.kind, total = kind === "book" ? it.pages : it.chapters;
+  const pct = total && it.progress ? Math.min(100, Math.round(100 * it.progress / total)) : 0;
+  const plusable = kind === "manga" || (it.mode === "chapters" && it.chapters && it.pages);
+  const live = (RD_ACTIVE || []).find(s => s.item_id === it.id && s.kind === kind);
+  const behind = kind === "manga" && it.latest_ch && it.latest_ch > (it.progress || 0) ? it.latest_ch - (it.progress || 0) : 0;
+  const sub = live ? `<span class="rc-live"><i></i>Reading now · <b class="rd-el" data-t="${esc(live.started_at)}"></b></span>`
+    : behind ? `<b class="amb">${behind} new chapter${behind === 1 ? "" : "s"}</b>`
+    : it.finish_days ? `~${it.finish_days} day${it.finish_days === 1 ? "" : "s"} left at your pace`
+    : esc(kind === "book" ? it.author || "" : it.origin || "manga");
+  return `<div class="bcard rcard${live ? " live" : ""}" data-id="${it.id}" data-kind="${kind}">
+    <img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
+    <div class="scrim"></div>
+    <a class="fill" href="#/${kind}/${it.id}" aria-label="${esc(it.title)}"></a>
+    <span class="badge rc-kind">${kind === "book" ? "Book" : esc(it.origin || "Manga")}</span>
+    <button class="punch rpunch" data-a="${plusable ? "plus" : "log"}"
+      aria-label="${plusable ? `+1 chapter of ${esc(it.title)}` : `Log pages for ${esc(it.title)}`}">${plusable ? I.plus : I.edit}</button>
+    <div class="info">
+      <div class="t">${esc(it.title)}</div>
+      <div class="ep">${rdProgLabel(it, kind)}</div>
+      <div class="sub">${sub}</div>
+      ${total ? `<div class="pbar rc-bar" title="${rdProgLabel(it, kind)}">
+        <div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div>
+        <div class="pbar-num">${pct}%</div></div>` : ""}
+    </div>
+  </div>`;
+}
+async function homeReadAction(card, a) {
+  const kind = card.dataset.kind, id = +card.dataset.id;
+  const it = ((CACHE["/dashboard"] || {}).reading || []).find(x => x.id === id && x.kind === kind);
+  if (!it) return;
+  const total = kind === "book" ? it.pages : it.chapters;
+  const repaint = () => { const n = document.createElement("div"); n.innerHTML = homeReadCard(it);
+    card.replaceWith(n.firstElementChild); rdTickTimers(); };
+  const save = (body, done) => {
+    delete CACHE["/reading"]; delete CACHE["/reading/stats"];
+    api(`/${kind}/${id}/state`, { body }).then(done).catch(() => {});
+  };
+  if (a === "plus") {
+    const body = kind === "book"
+      ? { progress: Math.min(it.pages, Math.round((rdChOf(it) + 1) / it.chapters * it.pages)) }
+      : { progress: Math.min(total || 1e9, (it.progress || 0) + 1) };
+    sparks($(".rpunch", card));
+    const prev = it.progress;
+    it.progress = body.progress; repaint();
+    save(body, () => toast(`${it.title} — ${rdProgLabel(it, kind)}`));
+    if (total && body.progress >= total) homeReadFinish(it, kind, prev);
+    return;
+  }
+  const live = (RD_ACTIVE || []).find(x => x.item_id === id && x.kind === kind);
+  if (live) {        // mid-session, logging progress IS ending the session
+    rdEndSession({ ...live, cur: it.progress, item_state: it.state },
+      () => { delete CACHE["/dashboard"]; if (seg()[0] === "") routes.home(); });
+    return;
+  }
+  rdScrubber({ kind, title: it.title, cover: it.cover, total, pages: it.pages, chapters: it.chapters,
+    mode: it.mode, cur: it.progress || 0, state: it.state, session: null,
+    onSave: (p, fx) => {
+      it.progress = p;
+      if (fx.finished) { save({ state: "finished", progress: p }, () => {}); card.classList.add("gone");
+        setTimeout(() => card.remove(), 380); toast(`Finished ${it.title}`); }
+      else { repaint(); save({ progress: p }, () => {}); }
+    } });
+}
+// stepping onto the last chapter asks rather than assumes — ongoing series end there too
+async function homeReadFinish(it, kind, prev) {
+  if (await ask(`That’s the last chapter of ${esc(it.title)}. Mark it finished?`, "Finished it", null) !== "primary") return;
+  await api(`/${kind}/${it.id}/state`, { body: { state: "finished", progress: it.progress } }).catch(() => {});
+  delete CACHE["/dashboard"]; if (seg()[0] === "") routes.home();
+}
 function calCard(e) {
   return `<a class="wcard" href="#/show/${e.show_id}/e/${e.season}/${e.number}">
     <div class="wc-shot"><img loading="lazy" src="${POSTER(e.poster)}" alt="">
@@ -1024,6 +1098,8 @@ function renderHome(d, animate = true) {
     <div class="home-hi"><h1>${greeting}, ${esc((ME.display_name || ME.username).split(" ")[0])}</h1></div>
     ${d.up_next.length || (d.recent || []).length ? `${railHead("Up Next")}
       <div class="hrail up ${rv}">${pastStrip(d.recent)}${d.up_next.map(x => bigCard(x)).join("")}</div>` : ""}
+    ${(d.reading || []).length ? `${railHead("Continue reading", "#/reading")}
+      <div class="hrail ${rv}">${d.reading.map(homeReadCard).join("")}</div>` : ""}
     ${d.up_next.length ? "" : (d.watchlist || []).length
       ? `<a class="lib-pick home-nudge" href="#/shows/watchlist">${I.check}<span><b>All caught up.</b> ${d.watchlist.length} show${d.watchlist.length === 1 ? "" : "s"} waiting on your watchlist</span>${I.chevS}</a>`
       : (d.recent || []).length ? `<div class="empty">Nothing in the queue — everything is crossed off.</div>`
@@ -1043,6 +1119,14 @@ function renderHome(d, animate = true) {
             ${r.body ? `<div class="hrev-x">${esc(r.body)}</div>` : ""}</div></a>`).join("")}</div>` : ""}`;
 
   anchorUpRail();
+  if ((d.reading || []).length)                   // which of those is being read right now
+    api("/reading/active").then(a => {
+      RD_ACTIVE = a.sessions || [];
+      if (seg()[0] !== "") return;
+      $$(".rcard").forEach(c => { const it = d.reading.find(x => x.id === +c.dataset.id && x.kind === c.dataset.kind);
+        if (it) { const n = document.createElement("div"); n.innerHTML = homeReadCard(it); c.replaceWith(n.firstElementChild); } });
+      rdTickTimers();
+    }).catch(() => {});
 
   homePunchHandler();
   // lazy Recommended rail from discover
@@ -1061,6 +1145,8 @@ function renderHome(d, animate = true) {
 
 function homePunchHandler() {
   view.onclick = async e => {
+    const rp = e.target.closest(".rpunch"), rb = !rp && e.target.closest(".rc-bar");
+    if (rp || rb) { e.preventDefault(); homeReadAction((rp || rb).closest(".rcard"), rp ? rp.dataset.a : "log"); return; }
     const b = e.target.closest(".punch");
     if (!b) return;
     e.preventDefault();
@@ -1148,7 +1234,15 @@ function renderUpcoming(d, animate = true) {
         <div class="mid"><div class="t">${esc(m.title)}</div><div class="s">release day</div></div>
         <span class="tag">MOVIE</span><span class="go">${I.chevS}</span></a>` })),
   ].sort((a, b) => a.date.localeCompare(b.date));
-  if (!items.length) { view.innerHTML = `<h1>Upcoming</h1><div class="empty">Nothing scheduled in the next 90 days.</div>`; return; }
+  // manga doesn't announce dates, so the reading side of Upcoming is what's already
+  // out that you haven't read yet
+  const ch = (d.chapters || []).length ? `<div class="day"><h3>New chapters out</h3>${d.chapters.map(m => `
+      <a class="up-row" href="#/manga/${m.id}">
+        <img loading="lazy" src="${POSTER(m.cover)}" alt="">
+        <div class="mid"><div class="t">${esc(m.title)}</div>
+        <div class="s">Chapter ${num(m.latest_ch)} · you’re ${num(m.latest_ch - (m.progress || 0))} behind</div></div>
+        <span class="tag">MANGA</span><span class="go">${I.chevS}</span></a>`).join("")}</div>` : "";
+  if (!items.length) { view.innerHTML = `<h1>Upcoming</h1>${ch}<div class="empty">Nothing scheduled in the next 90 days.</div>`; return; }
   const days = {};
   items.forEach(i => (days[i.date] = days[i.date] || []).push(i.html));
   const today = nowStamp().slice(0, 10);
@@ -1158,8 +1252,8 @@ function renderUpcoming(d, animate = true) {
     if (diff < 7) return new Date(d0 + "T00:00").toLocaleDateString(undefined, { weekday: "long" });
     return fmtDate(d0);
   };
-  view.innerHTML = `<h1>Upcoming</h1><div class="${animate ? "reveal" : ""}">` + Object.entries(days).map(([d0, rows]) =>
-    `<div class="day"><h3>${label(d0)} <small>· ${fmtDate(d0)}</small></h3>${rows.join("")}</div>`).join("") + "</div>";
+  view.innerHTML = `<h1>Upcoming</h1>${ch}<div class="${animate ? "reveal" : ""}">` + Object.entries(days).map(([d0, rows]) =>
+    `<div class="day"><h3>${label(d0)}${label(d0) !== fmtDate(d0) ? ` <small>· ${fmtDate(d0)}</small>` : ""}</h3>${rows.join("")}</div>`).join("") + "</div>";
 }
 routes.upcoming = () => {
   const c = cached("/upcoming");
@@ -2101,12 +2195,7 @@ function renderLibrary(kind, d, shelf, animate = true) {
   const lay = libView(kind, shelf);
   const canPick = shelf === "watchlist" && all.filter(x => libGroupOf(kind, x) !== "soon").length >= 3;
   view.innerHTML = `
-    <div class="lib-head"><h1>Library</h1>
-      <div class="libswitch" role="tablist" aria-label="Library">
-        <button data-k="shows" class="${kind === "shows" ? "on" : ""}" role="tab" aria-selected="${kind === "shows"}">Shows</button>
-        <button data-k="movies" class="${kind === "movies" ? "on" : ""}" role="tab" aria-selected="${kind === "movies"}">Movies</button>
-        ${(ME.features || {}).books || (ME.features || {}).manga ? `<a href="#/reading" role="tab">${READ_LABEL()}</a>` : ""}
-      </div></div>
+    ${libHeadHTML(kind)}
     <div class="tabs scroll" role="tablist">${libCountsHTML(kind, d, shelf)}</div>
     ${all.length ? `<div class="lib-tools">
       ${all.length > 6 ? `<label class="lib-filter"><svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m15.4 15.4 5.2 5.2" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg>
@@ -2122,12 +2211,7 @@ function renderLibrary(kind, d, shelf, animate = true) {
     <div id="libgrid">${libBodyHTML(kind, d, shelf, animate)}</div>`;
   const grid = $("#libgrid");
   const regrid = () => { grid.innerHTML = libBodyHTML(kind, d, shelf, false); paintListMarks(grid); libFillProviders(kind, d, grid); };
-  $$(".libswitch button", view).forEach(b => b.onclick = () => {
-    if (b.dataset.k === kind) return;
-    libSave("kind", b.dataset.k);
-    history.replaceState(history.state, "", `#/${b.dataset.k}`);
-    routes[b.dataset.k]();
-  });
+  wireLibHead(kind);
   $$(".tabs button").forEach(b => b.onclick = () => {
     libSave(kind + ".shelf", b.dataset.t);
     history.replaceState(history.state, "", `#/${kind}/${b.dataset.t}`);
@@ -2283,6 +2367,24 @@ function libFillProviders(kind, d, root) {
     }
   };
 }
+/* the Library header: Shows | Movies | Reading — one place for everything you track.
+   Switching sides is a replace, not a new history entry, so Back still leaves Library */
+function libHeadHTML(kind) {
+  const f = (ME && ME.features) || {};
+  const seg = (k, label) => `<button data-k="${k}" class="${kind === k ? "on" : ""}" role="tab" aria-selected="${kind === k}">${label}</button>`;
+  return `<div class="lib-head"><h1>Library</h1>
+    <div class="libswitch" role="tablist" aria-label="Library">
+      ${seg("shows", "Shows")}${seg("movies", "Movies")}${f.books || f.manga ? seg("reading", READ_LABEL()) : ""}
+    </div></div>`;
+}
+function wireLibHead(kind) {
+  $$(".libswitch button", view).forEach(b => b.onclick = () => {
+    if (b.dataset.k === kind) return;
+    libSave("kind", b.dataset.k);
+    history.replaceState(history.state, "", `#/${b.dataset.k}`);
+    routes[b.dataset.k]();
+  });
+}
 const READ_LABEL = () => { const f = (ME && ME.features) || {};
   return f.books && f.manga ? "Reading" : f.books ? "Books" : "Manga"; };
 const DICE_ICO = `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="3.5" width="17" height="17" rx="4" stroke="currentColor" stroke-width="1.8"/><circle cx="8.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="8.5" cy="15.5" r="1.4" fill="currentColor"/></svg>`;
@@ -2369,25 +2471,19 @@ function libRoute(kind, shelf) {
 routes.shows = shelf => libRoute("shows", shelf);
 routes.movies = shelf => libRoute("movies", shelf);
 routes.library = () => {
-  const kind = libPref("kind", "shows") === "movies" ? "movies" : "shows";
+  const f = (ME && ME.features) || {};
+  const pref = libPref("kind", "shows");
+  const kind = pref === "movies" ? "movies" : pref === "reading" && (f.books || f.manga) ? "reading" : "shows";
   history.replaceState(history.state, "", `#/${kind}`);
   routes[kind]();
 };
 
 /* ---------- reading (books + manga/manhwa/manhua) — per-user opt-in ---------- */
 const BOOK_ICO = `<svg viewBox="0 0 24 24"><path d="M4 5.5C6.7 4.6 9.6 4.9 12 6.6c2.4-1.7 5.3-2 8-1.1v12.9c-2.7-.9-5.6-.6-8 1.1-2.4-1.7-5.3-2-8-1.1z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="M12 6.6v12.9" stroke="currentColor" stroke-width="1.9"/></svg>`;
-// the Reading destination only exists in the DOM for users who switched a tracking
-// feature on — everyone else's nav is untouched
+// Reading lives in Library (Shows | Movies | Reading) and on Home — not as a sixth tab.
+// Older builds injected a nav link; clear any that a cached shell still carries.
 function applyFeatureNav() {
   $$('a[data-r="reading"]').forEach(a => a.remove());
-  const f = (ME && ME.features) || {};
-  if (!f.books && !f.manga) return;
-  const label = f.books && f.manga ? "Reading" : f.books ? "Books" : "Manga";
-  const link = `<a href="#/reading" data-r="reading">${BOOK_ICO}<span>${label}</span></a>`;
-  const moviesPill = $('#nav a[data-r="library"]');
-  if (moviesPill) moviesPill.insertAdjacentHTML("afterend", link);
-  const tabAvatar = $("#tabavatar");
-  if (tabAvatar) tabAvatar.insertAdjacentHTML("beforebegin", link);
 }
 
 /* author / series browse links — every name on a book page is a door into the rest
@@ -2409,6 +2505,14 @@ function rdProgLabel(it, kind) {
     return `ch ${rdChOf(it)}/${it.chapters}`;
   return `${it.progress || 0}${total ? "/" + total : ""} ${kind === "book" ? "p" : "ch"}`;
 }
+// the line that makes a reading card useful: new chapters you haven't read, or when
+// you'll finish at the pace you've actually been reading
+function rdPaceLine(it, kind) {
+  const behind = kind === "manga" && it.latest_ch && it.latest_ch > (it.progress || 0) ? it.latest_ch - (it.progress || 0) : 0;
+  if (behind) return `<b class="amb">${behind} new chapter${behind === 1 ? "" : "s"}</b>`;
+  if (it.finish_days) return `~${it.finish_days} day${it.finish_days === 1 ? "" : "s"} left at your pace`;
+  return "";
+}
 /* "Reading now" card — same construction as the home page's Up Next bcards:
    poster-filling art, scrim, info + progress bar overlaid inside the artwork */
 function rdBigCard(it, kind) {
@@ -2418,11 +2522,12 @@ function rdBigCard(it, kind) {
   return `<div class="bcard rdcard" data-id="${it.id}" data-kind="${kind}">
     <img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
     <div class="scrim"></div>
-    <button class="punch" data-a="${plusable ? "plus" : "finish"}"
-      title="${plusable ? "+1 chapter" : "Finished it"}">${plusable ? I.plus : I.check}</button>
+    <button class="punch" data-a="${plusable ? "plus" : "log"}"
+      aria-label="${plusable ? "+1 chapter" : "Log progress"}" title="${plusable ? "+1 chapter" : "Log progress"}">${plusable ? I.plus : I.edit}</button>
     <div class="info">
       <div class="t">${esc(it.title)}</div>
       <div class="ep">${kind === "book" ? esc(it.author || "") : esc(it.origin || "manga")}${total ? "" : ` · ${rdProgLabel(it, kind)}`}</div>
+      ${rdPaceLine(it, kind) ? `<div class="sub">${rdPaceLine(it, kind)}</div>` : ""}
       ${total ? `<div class="pbar" title="${rdProgLabel(it, kind)}">
         <div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div>
         <div class="pbar-num">${pct}%</div></div>` : ""}
@@ -2438,11 +2543,13 @@ function rdCard(it, kind, section, opts = {}) {
   const acts =
     section === "reading" ? (plusable ? `<button title="+1 chapter" data-a="plus">${I.plus}</button>` : "")
       + `<button title="Finished it" data-a="finish">${I.check}</button>`
-    : section === "want" ? `<button title="Start ${kind === "book" ? "reading" : "it"}" data-a="start">${I.eye}</button>
-        <button title="Remove" data-a="none">${I.x}</button>`
-    : `<button title="Remove" data-a="none">${I.x}</button>`;
+    : section === "want" || section === "paused" ? `<button title="${section === "paused" ? "Pick it back up" : `Start ${kind === "book" ? "reading" : "it"}`}" aria-label="Start ${esc(it.title)}" data-a="start">${I.eye}</button>
+        <button title="Remove" aria-label="Remove ${esc(it.title)}" data-a="none">${I.x}</button>`
+    : `<button title="Remove" aria-label="Remove ${esc(it.title)}" data-a="none">${I.x}</button>`;
   const status = it.state === "finished" ? ["read", "Read", I.check]
     : it.state === "reading" ? ["reading", "Reading", null]
+    : it.state === "paused" ? ["unread", "Paused", null]
+    : it.state === "dnf" ? ["unread", "Didn’t finish", null]
     : ["unread", "Not read", null];
   return `<div class="pcard rdcard" data-id="${it.id}" data-kind="${kind}">
     <div class="pshot"><img class="poster" loading="lazy" src="${POSTER(it.cover)}" alt="">
@@ -2451,9 +2558,9 @@ function rdCard(it, kind, section, opts = {}) {
       <span class="rd-status ${status[0]}">${status[2] || ""}${status[1]}</span>
       ${opts.acts === false ? "" : `<div class="act">${acts}</div>`}
     </div>
-    <a class="t" href="#/reading">${esc(it.title)}</a>
-    <div class="y">${sub}${section === "reading" ? ` · ${rdProgLabel(it, kind)}` : ""}
-      ${section === "finished" && it.finished_at ? esc(fmtDate(it.finished_at.slice(0, 10))) : ""}</div>
+    <a class="t" href="#/${kind}/${it.id}">${esc(it.title)}</a>
+    <div class="y">${sub}${section === "reading" || section === "paused" || section === "dnf" ? ` · ${rdProgLabel(it, kind)}` : ""}${
+      section === "finished" && it.finished_at ? ` · ${esc(fmtDate(it.finished_at.slice(0, 10)))}` : ""}</div>
     ${section === "reading" && total ? `<div class="pbar" title="${rdProgLabel(it, kind)}">
       <div class="pbar-track"><div class="pbar-fill" style="--p:${pct}%"></div></div>
       <div class="pbar-num">${pct}%</div></div>` : ""}
@@ -2467,12 +2574,16 @@ function patchShelf(kind, id, fn) {
   const c = CACHE["/reading"]; if (!c) return;
   const dd = c[kind === "book" ? "books" : "manga"];
   let it = null;
-  for (const k of ["reading", "want", "finished"]) {
+  const shelves = ["reading", "want", "paused", "finished", "dnf"];
+  for (const k of shelves) {
+    dd[k] = dd[k] || [];
     const i = dd[k].findIndex(x => x.id === id);
     if (i > -1) { it = dd[k].splice(i, 1)[0]; break; }
   }
-  it = fn(it) || it;
-  if (it && ["reading", "want", "finished"].includes(it.state)) dd[it.state].unshift(it);
+  const out = fn(it);
+  if (out === null) return;                 // removed — the old `fn(it) || it` put it straight back
+  it = out || it;
+  if (it && shelves.includes(it.state)) dd[it.state].unshift(it);
 }
 
 /* ---------- full-screen detail page for a book / manga (shelf item or search hit) --- */
@@ -2522,8 +2633,11 @@ function renderRDetail(d) {
       </div></div>
     <div class="rdt-body reveal">
       ${d.tracked ? `
-      <div class="rd-states" id="rdtstates">${["want", "reading", "finished"].map(x =>
-        `<button class="rd-st ${st.state === x ? "on" : ""}" data-st="${x}">${x === "want" ? "Want to read" : x === "reading" ? "Reading" : "Finished"}</button>`).join("")}</div>
+      <div id="rdtstates">
+        <div class="rd-states">${[["want", "Want to read"], ["reading", "Reading"], ["finished", "Finished"]].map(([x, l]) =>
+          `<button class="rd-st ${st.state === x ? "on" : ""}" data-st="${x}" aria-pressed="${st.state === x}">${l}</button>`).join("")}</div>
+        <div class="rd-states rd-states2">${[["paused", "Paused"], ["dnf", "Didn’t finish"]].map(([x, l]) =>
+          `<button class="rd-st ${st.state === x ? "on" : ""}" data-st="${x}" aria-pressed="${st.state === x}">${l}</button>`).join("")}</div></div>
       ${st.state !== "want" ? (() => {
         const mode = st.mode || (kind === "manga" ? "chapters" : "pages");
         const chAvail = kind === "book" && it.chapters && it.pages;
@@ -2532,7 +2646,7 @@ function renderRDetail(d) {
           : [["chapters", "Chapters"], ...(total ? [["pct", "%"]] : [])];
         return `
       <button class="rdt-progress" id="rdbar" aria-label="Update progress">
-        <div class="rdt-bar big"><i id="rdbarfill" style="width:${pct}%"></i></div>
+        ${total ? `<div class="rdt-bar big"><i id="rdbarfill" style="width:${pct}%"></i></div>` : ""}
         <div class="rdt-blabel"><b id="rdbig"></b><span class="rdt-upd">${I.edit} Update</span></div>
       </button>
       ${modes.length > 1 ? `<div class="tabs unitpick rdt-mode">${modes.map(([m, l]) =>
@@ -2556,12 +2670,17 @@ function renderRDetail(d) {
         const N = it.chapters || Math.max(...it.chlist.map(c => c[0]));
         const titles = Object.fromEntries(it.chlist || []);
         const cur = st.progress || 0;
+        // a 1,100-chapter series is 1,100 buttons — show where you are, the rest on ask
+        const lo = N > 80 && !it._allch ? Math.max(1, cur - 4) : 1;
+        const hi = N > 80 && !it._allch ? Math.min(N, cur + 40) : N;
         return `<div class="sub-h" style="margin-top:22px">Chapters · ${N}
           <i class="rdt-edithint">tap to mark read up to there</i></div>
-        <div class="rdt-chs" id="rdchs">${Array.from({ length: N }, (_, i) => { const n = i + 1;
+        ${lo > 1 ? `<button class="btn rdt-chmore" data-ch="all">Show chapters 1–${lo - 1}</button>` : ""}
+        <div class="rdt-chs" id="rdchs">${Array.from({ length: hi - lo + 1 }, (_, i) => { const n = lo + i;
           return `<button class="rdt-ch ${n <= cur ? "read" : ""}" data-n="${n}">
             <i>${n}</i><span>${titles[n] ? esc(titles[n]) : "Chapter " + n}</span>
-            ${n <= cur ? `<b>${I.check}</b>` : ""}</button>`; }).join("")}</div>`;
+            ${n <= cur ? `<b>${I.check}</b>` : ""}</button>`; }).join("")}</div>
+        ${hi < N ? `<button class="btn rdt-chmore" data-ch="all">Show all ${N} chapters</button>` : ""}`;
       })() : ""}
       ${it.desc ? `<div class="sub-h" style="margin-top:22px">About</div><p class="overview">${esc(it.desc)}</p>` : ""}
       ${(it.subjects || []).length ? `<div class="rdt-chips" style="margin-top:10px">${it.subjects.map(x => `<span class="chip">${esc(x)}</span>`).join("")}</div>` : ""}
@@ -2642,6 +2761,7 @@ function renderRDetail(d) {
       },
     });
     if ($("#rdbar")) $("#rdbar").onclick = openScrub;
+    $$(".rdt-chmore", view).forEach(b => b.onclick = () => { it._allch = true; renderRDetail(d); });
     $$(".rdt-ch", view).forEach(row => row.onclick = () => {
       const n = +row.dataset.n;
       sparks(row);
@@ -2677,9 +2797,15 @@ function renderRDetail(d) {
         title: it.title, cover: it.cover }, rerun);
     if ($("#rdtfix")) $("#rdtfix").onclick = () => rdFixMatch(it);
     $("#rdtremove").onclick = async () => {
-      await api(`/${kind}/${it.id}/state`, { body: { state: "none" } }).catch(() => {});
+      const snap = { state: st.state, progress: st.progress, rating: st.rating, mode: st.mode,
+        started_at: st.started_at, finished_at: st.finished_at };
+      if (await api(`/${kind}/${it.id}/state`, { body: { state: "none" } }).then(() => false, () => true)) return;
       patchShelf(kind, it.id, () => null);
-      location.hash = "#/reading";
+      undoToast(`Removed ${it.title}`, async () => {
+        await api(`/${kind}/${it.id}/restore`, { body: snap }).catch(() => {});
+        delete CACHE["/reading"]; location.hash = `#/${kind}/${it.id}`;
+      });
+      if (NAV_DEPTH > 0) history.back(); else location.hash = "#/reading";
     };
   } else {
     $$("[data-add]").forEach(b => b.onclick = async () => {
@@ -2701,7 +2827,7 @@ function renderRDetail(d) {
     if (s) rdSessionSheet(s, { unit, mode: modeNow, total,
       chapters: it.chapters, pages: it.pages }, rerun);
   });
-  if (it.id) reviewsBlock(kind, it.id).then(el => { const c = $("#rd-reviews"); if (c) c.appendChild(el); });
+  if (it.id) reviewsBlock(kind, it.id, { watched: st.state === "finished" }).then(el => { const c = $("#rd-reviews"); if (c) c.appendChild(el); });
   rdTickTimers();
 }
 
@@ -2873,10 +2999,19 @@ let RD_ACTIVE = [];
 const PLAY_ICO = `<svg viewBox="0 0 24 24"><path d="m8 5.5 10 6.5-10 6.5z" fill="currentColor"/></svg>`;
 const rdElapsed = t => { const m = Math.max(1, Math.round((Date.now() - new Date(t).getTime()) / 60000));
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`; };
+// what a session's progress is counted in — chapters for manga and chapter-mode books,
+// percent in % mode, pages otherwise (the toast used to say "pages" for everything)
+const rdUnit = (it, n) => {
+  const u = it.kind === "manga" || it.mode === "chapters" ? "chapter" : it.mode === "pct" ? "%" : "page";
+  return u === "%" ? "%" : u + (n === 1 ? "" : "s");
+};
 function rdTickTimers() {
   clearInterval(window._rdT);
-  window._rdT = setInterval(() => $$(".rd-el").forEach(el =>
-    { el.textContent = rdElapsed(el.dataset.t); }), 30000);
+  window._rdT = setInterval(() => {
+    const els = $$(".rd-el");
+    if (!els.length) { clearInterval(window._rdT); return; }   // nothing live on screen
+    els.forEach(el => { el.textContent = rdElapsed(el.dataset.t); });
+  }, 30000);
   $$(".rd-el").forEach(el => { el.textContent = rdElapsed(el.dataset.t); });
 }
 /* ---- the scrubber: one thumb-sized sheet for "where am I up to?" ----
@@ -3017,11 +3152,12 @@ function rdEndSession(ses, refresh) {
     cur: Math.max(ses.cur ?? 0, ses.start_pos || 0),
     session: { started_at: ses.started_at, start_pos: ses.start_pos || 0 },
     onSave: async (pos, fx) => {
-      await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { pos } }).catch(() => {});
+      const ok = await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { pos } }).then(() => true, () => false);
+      if (!ok) { refresh(); return; }             // api() already said why; don't claim success
       if (fx.finished)
         await api(`/${ses.kind}/${ses.item_id}/state`, { body: { state: "finished", progress: pos } }).catch(() => {});
       const dp = pos - (ses.start_pos || 0);
-      toast(`Nice session — ${rdElapsed(ses.started_at)}${dp > 0 ? ` · ${dp} ${isBook ? "pages" : "chapters"}` : ""}${fx.finished ? " · finished!" : ""}`);
+      toast(`Nice session — ${rdElapsed(ses.started_at)}${dp > 0 ? ` · ${dp} ${rdUnit(ses, dp)}` : ""}${fx.finished ? " · finished!" : ""}`);
       delete CACHE["/reading"]; delete CACHE["/reading/stats"]; refresh();
     },
     onDiscard: async () => {
@@ -3044,7 +3180,9 @@ function paintLive(refresh) {
   if (box) $$(".rd-livebar button", box).forEach(b => b.onclick = async () => {
     const ses = RD_ACTIVE.find(s => s.id === +b.closest(".rd-livebar").dataset.sid);
     if (b.dataset.a === "end") rdEndSession(ses, refresh);
-    else { await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { discard: true } }).catch(() => {});
+    else {
+      if (await ask(`Throw away this ${rdElapsed(ses.started_at)} session? Nothing from it is saved.`, "Discard session", null) !== "primary") return;
+      await api(`/${ses.kind}/${ses.item_id}/session/end`, { body: { discard: true } }).catch(() => {});
       toast("Session discarded"); refresh(); }
   });
   rdTickTimers();
@@ -3222,12 +3360,20 @@ function rdGroupSheet(all, kind, apply) {
     RD_VIEW.group = b.dataset.g; s.close(); apply();
   });
 }
+// Books / Manga / Stats are one screen: swap in place, but keep the URL honest so a
+// reload (or Back from a book) lands on the same tab
+function wireReadingTabs() {
+  $$(".tabs.rdtabs button", view).forEach(b => b.onclick = () => {
+    history.replaceState(history.state, "", `#/reading/${b.dataset.t}`);
+    routes.reading(b.dataset.t);
+  });
+}
 function readingTabs(tab, f) {
   const pills = [];
   if (f.books) pills.push(["books", "Books"]);
   if (f.manga) pills.push(["manga", "Manga"]);
   pills.push(["stats", "Stats"]);
-  return pills.length > 1 ? `<div class="tabs">${pills.map(([t, l]) =>
+  return pills.length > 1 ? `<div class="tabs rdtabs">${pills.map(([t, l]) =>
     `<button data-t="${t}" class="${tab === t ? "on" : ""}">${l}</button>`).join("")}</div>` : "";
 }
 function renderReading(d, tab, animate = true) {
@@ -3243,13 +3389,16 @@ function renderReading(d, tab, animate = true) {
       ? `<div class="sub-h">${title} · ${arr.length}</div><div class="rd-biggrid ${rv}">${arr.map(x =>
           rdBigCard(x, kind)).join("")}</div>`
       : `<div class="sub-h">${title} · ${arr.length}</div><div class="pgrid ${rv}">${arr.map(x =>
-          rdCard(x, kind, sec || (x.state === "want" ? "want" : x.state))).join("")}</div>`) : "";
-  const allShelf = [...dd.reading, ...dd.want, ...dd.finished];
+          rdCard(x, kind, sec || x.state)).join("")}</div>`) : "";
+  ["paused", "dnf"].forEach(k => { dd[k] = dd[k] || []; });     // older server: no such shelves
+  const allShelf = [...dd.reading, ...dd.want, ...dd.paused, ...dd.finished, ...dd.dnf];
   const group = RD_VIEW.group || "status";
   const sectionsHtml = group === "status"
     ? section("Reading now", rdApplyView(dd.reading, kind), "reading")
       + section("Want to read", rdApplyView(dd.want, kind), "want")
+      + section("Paused", rdApplyView(dd.paused || [], kind), "paused")
       + section("Finished", rdApplyView(dd.finished, kind), "finished")
+      + section("Didn’t finish", rdApplyView(dd.dnf || [], kind), "dnf")
     : (() => {
       const keyFn = {
         author: x => x.author || "Unknown author",
@@ -3270,11 +3419,11 @@ function renderReading(d, tab, animate = true) {
         : group === "year" ? (k || "Unknown year") : esc(String(k)),
         m.get(k), null)).join("");
     })();
-  view.innerHTML = `<h1>${both ? "Reading" : tab === "books" ? "Books" : "Manga"}</h1>
+  view.innerHTML = `${libHeadHTML("reading")}
     ${readingTabs(tab, f)}
     <div id="rdlive"></div>
     <div class="rd-search"><input id="rdq" type="search" enterkeyhint="search"
-        placeholder="${tab === "books" ? "Add a book — search Open Library" : "Add manga · manhwa · manhua — search AniList"}">
+        placeholder="${tab === "books" ? "Search books to add" : "Search manga, manhwa, manhua"}">
       <button class="btn" id="rdgo">${I.plus} Add</button></div>
     <div id="rdresults"></div>
     ${(() => { const n = [...dd.reading, ...dd.finished].filter(rdNeedsDates).length;
@@ -3290,10 +3439,10 @@ function renderReading(d, tab, animate = true) {
   // hard = refetch everything; soft = redraw from local data (modals & quick actions
   // patch items in place, so closing a sheet never reloads the library)
   const hard = () => { delete CACHE["/reading"]; delete CACHE["/reading/stats"]; routes.reading(tab); };
+  const SHELVES = ["reading", "want", "paused", "finished", "dnf"];
   const regroup = it => {
-    ["reading", "want", "finished"].forEach(k => {
-      const i = dd[k].indexOf(it); if (i > -1) dd[k].splice(i, 1); });
-    if (["reading", "want", "finished"].includes(it.state)) dd[it.state].unshift(it);
+    SHELVES.forEach(k => { const i = dd[k].indexOf(it); if (i > -1) dd[k].splice(i, 1); });
+    if (SHELVES.includes(it.state)) dd[it.state].unshift(it);
   };
   const soft = () => { renderReading(d, tab, false); paintLive(hard); };
   const vw = { soft, hard, regroup };
@@ -3303,7 +3452,7 @@ function renderReading(d, tab, animate = true) {
   if ($("#rdsort")) $("#rdsort").onchange = () => { RD_VIEW.sort = $("#rdsort").value; soft(); };
   if ($("#rdfilter")) $("#rdfilter").onclick = () => rdFilterSheet(allShelf, kind, soft);
   if ($("#rdgroup")) $("#rdgroup").onclick = () => rdGroupSheet(allShelf, kind, soft);
-  $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
+  wireLibHead("reading"); wireReadingTabs();
 
   const addResult = async (x, state, btn) => {
     if (btn) { btn.disabled = true; sparks(btn); }
@@ -3392,11 +3541,11 @@ function renderReading(d, tab, animate = true) {
   } else if (RD_SEARCH.tab !== tab) RD_SEARCH = {};
 
   $$(".rdcard", view).forEach(card => {
-    const it = [...dd.reading, ...dd.want, ...dd.finished].find(x => x.id === +card.dataset.id);
+    const it = allShelf.find(x => x.id === +card.dataset.id);
     card.onclick = e => {
       const b = e.target.closest(".act button, .punch");
       e.preventDefault();
-      if (!b && e.target.closest(".pbar")) {      // tap the bar = update progress right here
+      if ((!b && e.target.closest(".pbar")) || (b && b.dataset.a === "log")) {   // bar or ✎ = update progress here
         rdScrubber({ kind, title: it.title, cover: it.cover,
           total: kind === "book" ? it.pages : it.chapters,
           pages: it.pages, chapters: it.chapters, mode: it.mode,
@@ -3415,6 +3564,17 @@ function renderReading(d, tab, animate = true) {
       if (!b) { location.hash = kind === "book" ? `#/book/${it.id}` : `#/manga/${it.id}`; return; }
       const a = b.dataset.a;
       const total = kind === "book" ? it.pages : it.chapters;
+      if (a === "none") {                        // remove: instant, with the way back
+        const snap = { state: it.state, progress: it.progress, rating: it.rating, mode: it.mode,
+          started_at: it.started_at, finished_at: it.finished_at };
+        api(`/${kind}/${it.id}/state`, { body: { state: "none" } }).catch(() => hard());
+        it.state = "none"; regroup(it); soft();
+        undoToast(`Removed ${it.title}`, () => {
+          Object.assign(it, snap); regroup(it); soft();
+          api(`/${kind}/${it.id}/restore`, { body: snap }).catch(() => hard());
+        });
+        return;
+      }
       const body = a === "plus" ? (kind === "book" && it.mode === "chapters" && it.chapters && it.pages
           ? { progress: Math.min(it.pages, Math.round((rdChOf(it) + 1) / it.chapters * it.pages)) }
           : { progress: Math.min(total || 1e9, (it.progress || 0) + 1) })
@@ -3467,7 +3627,7 @@ function renderReadingStats(d, animate = true) {
       ${tile("big", "amber", `${T.month.toLocaleString()}<small class="unit">${unit} / 30d</small>`,
         `${unit} this month`, `${T.week} this week · ${T.all.toLocaleString()} all-time${T.hours_month ? ` · ${T.hours_month}h in sessions` : ""}`)}
       ${tile("", "blue", s.finished.year, `finished this year`, `${s.finished.all} all-time · ${s.reading_now} in progress`)}
-      ${tile("", "green", `${s.streak.current}<small class="unit">days</small>`, "reading streak", `best ${s.streak.longest} days`)}
+      ${tile("", "green", `${s.streak.current}<small class="unit">day${s.streak.current === 1 ? "" : "s"}</small>`, "reading streak", `best ${s.streak.longest} day${s.streak.longest === 1 ? "" : "s"}`)}
       ${s.pace ? tile("", "violet", `${s.pace}<small class="unit">${unit}/hr</small>`, "reading pace",
           s.avg_session_min ? `avg session ${s.avg_session_min} min · ${T.timed_sessions} timed` : "")
         : tile("", "violet", T.sessions, "progress updates", `${T.timed_sessions} timed sessions`)}
@@ -3493,27 +3653,28 @@ function renderReadingStats(d, animate = true) {
       ${colBar(Array.from({ length: 10 }, (_, i) => ({ label: `${i + 1}/10`, xlabel: String(i + 1),
         v: s.rating_hist[i + 1] || 0, color: "var(--c-amber)" })))}</div>` : ""}`;
   };
-  view.innerHTML = `<h1>Reading</h1>${readingTabs("stats", f)}
+  view.innerHTML = `${libHeadHTML("reading")}${readingTabs("stats", f)}
     <div class="stats-wrap" id="rdstats">
     ${f.books ? block("Books", d.books, "pages") : ""}
     ${f.manga ? block("Manga", d.manga, "chapters") : ""}</div>`;
-  $$(".tabs button", view).forEach(b => b.onclick = () => routes.reading(b.dataset.t));
+  wireLibHead("reading"); wireReadingTabs();
   wireStats($("#rdstats"));
 }
 routes.reading = (tab) => {
   const f = (ME && ME.features) || {};
   if (!f.books && !f.manga) { location.hash = "#/"; return; }
+  libSave("kind", "reading");
   tab = tab || (f.books ? "books" : "manga");
   if (tab === "stats") {
     const c = cached("/reading/stats");
     if (c.stale) renderReadingStats(c.stale);
-    else view.innerHTML = `<h1>Reading</h1><div class="tiles">${Array.from({ length: 4 }, () => `<div class="sk tile-sk"></div>`).join("")}</div>`;
+    else view.innerHTML = `${libHeadHTML("reading")}<div class="tiles">${Array.from({ length: 4 }, () => `<div class="sk tile-sk"></div>`).join("")}</div>`;
     c.refresh(() => seg()[0] === "reading", d => renderReadingStats(d, !c.stale));
     return;
   }
   const c = cached("/reading");
   if (c.stale) renderReading(c.stale, tab);
-  else view.innerHTML = `<h1>Reading</h1><div class="pgrid">${Array.from({ length: 6 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
+  else view.innerHTML = `${libHeadHTML("reading")}<div class="pgrid">${Array.from({ length: 6 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
   c.refresh(() => seg()[0] === "reading", d => renderReading(d, tab, !c.stale));
   api("/reading/active").then(a => {
     RD_ACTIVE = a.sessions || [];
@@ -4641,6 +4802,34 @@ function wireTiles(root, after) {
   });
 }
 
+/* a book or manga in search results: opens its page; + puts it on Want to read */
+function readTile(x, kind) {
+  const href = kind === "book" ? `#/book/hc/${x.hc_id}` : `#/manga/${x.id}`;
+  const score = x.community_rating || x.score;
+  return `<div class="pcard rtile" data-kind="${kind}" data-id="${kind === "book" ? x.hc_id : x.id}">
+    <div class="pshot"><a href="${href}"><img class="poster" loading="lazy" src="${POSTER(x.cover)}" alt=""></a>
+      <span class="badge">${kind === "book" ? "BOOK" : esc((x.origin || "manga").toUpperCase())}</span>
+      ${score ? `<span class="votebadge">${I.star} ${num(score)}</span>` : ""}
+      <div class="act">${x.tracked || x._added ? `<div class="have" title="On your shelf">${I.check}</div>`
+        : `<button data-r="want" title="Want to read" aria-label="Add ${esc(x.title)} to Want to read">${I.plus}</button>`}</div></div>
+    <a class="t" href="${href}">${esc(x.title)}</a>
+    <div class="y">${esc(kind === "book" ? x.author || "" : x.status || "")}${x.year ? ` · ${num(x.year)}` : ""}</div></div>`;
+}
+function wireReadTiles(root, books, manga) {
+  $$(".rtile .act button[data-r]", root).forEach(b => b.onclick = async e => {
+    e.preventDefault();
+    const c = b.closest(".rtile"), kind = c.dataset.kind;
+    const x = (kind === "book" ? books.find(y => String(y.hc_id) === c.dataset.id) : manga.find(y => String(y.id) === c.dataset.id));
+    if (!x) return;
+    b.disabled = true; sparks(b);
+    const r = await api(kind === "book" ? "/books/add" : "/manga/add",
+      { body: kind === "book" ? { hc_id: x.hc_id, title: x.title, author: x.author, cover: x.cover, state: "want" } : { id: x.id, state: "want" } }).catch(() => null);
+    if (!r) { b.disabled = false; return; }
+    x._added = true; delete CACHE["/reading"]; delete CACHE["/reading/stats"];
+    $(".act", c).innerHTML = `<div class="have" title="On your shelf">${I.check}</div>`;
+    undoToast("On your Want to read shelf", () => { location.hash = `#/reading/${kind === "book" ? "books" : "manga"}`; }, "See it");
+  });
+}
 function renderDiscover(d) {
   const box = $("#res");
   box.innerHTML = d.sections.map(sec => `
@@ -4655,7 +4844,9 @@ routes.search = () => {
   navHere("Search");
   view.innerHTML = `<h1>Discover</h1>
     <div class="searchbar"><span class="s-ico"><svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m15.4 15.4 5.2 5.2" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg></span>
-      <input id="q" placeholder="Search shows & movies…" autocomplete="off"></div>
+      <input id="q" type="search" enterkeyhint="search" placeholder="${
+        (ME.features || {}).books || (ME.features || {}).manga ? `Search shows, movies & ${READ_LABEL() === "Manga" ? "manga" : "books"}…` : "Search shows & movies…"}" autocomplete="off"></div>
+    <div id="sfilt"></div>
     <div id="res"></div>`;
   const q = $("#q");
   const box = $("#res");
@@ -4669,15 +4860,35 @@ routes.search = () => {
       <div class="rail">${Array.from({ length: 6 }, () => `<div class="sk pcard-sk" style="width:120px;flex:none"></div>`).join("")}</div></div>`).join("");
     c.refresh(() => seg()[0] === "search" && !q.value.trim(), renderDiscover);
   };
+  // one search box for everything you track: TV/film from TMDB, and — for people who
+  // read — books (Hardcover) and manga (AniList) in the same results
+  const f = ME.features || {};
+  const kinds = [["all", "All"], ["screen", "Shows & films"], ...(f.books ? [["books", "Books"]] : []), ...(f.manga ? [["manga", "Manga"]] : [])];
+  let SF = "all";
   const runSearch = async () => {
     const term = q.value.trim();
+    $("#sfilt").innerHTML = kinds.length > 2 ? `<div class="tabs scroll sfilt">${kinds.map(([k, l]) =>
+      `<button data-f="${k}" class="${SF === k ? "on" : ""}">${l}</button>`).join("")}</div>` : "";
+    $$("#sfilt button").forEach(b => b.onclick = () => { SF = b.dataset.f; runSearch(); });
     box.innerHTML = `<div class="pgrid">${Array.from({ length: 12 }, () => `<div class="sk pcard-sk"></div>`).join("")}</div>`;
-    const d = await api(`/search?q=${encodeURIComponent(term)}`).catch(() => null);
-    if (!d || q.value.trim() !== term || !q.isConnected) return;   // a newer search (or none) owns the box
-    box.innerHTML = d.results.length
-      ? `<div class="pgrid reveal">${d.results.map(posterTile).join("")}</div>`
-      : `<div class="empty">No matches for “${esc(q.value.trim())}”.</div>`;
+    const want = k => SF === "all" || SF === k;
+    const enc = encodeURIComponent(term);
+    const [d, bk, mg] = await Promise.all([
+      want("screen") ? api(`/search?q=${enc}`).catch(() => null) : null,
+      f.books && want("books") ? api(`/books/search?q=${enc}`, { quiet: true }).catch(() => null) : null,
+      f.manga && want("manga") ? api(`/manga/search?q=${enc}`, { quiet: true }).catch(() => null) : null]);
+    if (q.value.trim() !== term || !q.isConnected) return;   // a newer search (or none) owns the box
+    const screen = (d && d.results) || [], books = ((bk && bk.results) || []).slice(0, SF === "all" ? 6 : 30),
+          manga = ((mg && mg.results) || []).slice(0, SF === "all" ? 6 : 30);
+    const sec = (title, html, more) => html ? `${SF === "all" && kinds.length > 2 ? `<div class="rail-head"><h2>${title}</h2>${
+      more ? `<button class="rail-more" data-f="${more}">More ${I.chevR}</button>` : ""}</div>` : ""}<div class="pgrid reveal">${html}</div>` : "";
+    const html = sec("Shows & films", screen.map(posterTile).join(""))
+      + sec("Books", books.map(x => readTile(x, "book")).join(""), "books")
+      + sec("Manga", manga.map(x => readTile(x, "manga")).join(""), "manga");
+    box.innerHTML = html || `<div class="empty">No matches for “${esc(term)}”.</div>`;
+    $$(".rail-more[data-f]", box).forEach(b => b.onclick = () => { SF = b.dataset.f; runSearch(); });
     wireTiles(box, runSearch);
+    wireReadTiles(box, books, manga);
   };
   q.oninput = () => {
     clearTimeout(t);
@@ -5639,7 +5850,7 @@ routes.settings = async () => {
     applyFeatureNav();
     if ($("#grblock")) $("#grblock").hidden = !ME.features.books;
     delete CACHE["/reading"]; delete CACHE["/reading/stats"];
-    toast(on ? `${btn.dataset.feat === "books" ? "Books" : "Manga"} tracking is on — check your menu` : "Turned off");
+    toast(on ? `${btn.dataset.feat === "books" ? "Books" : "Manga"} tracking is on — it’s in Library, and on Home while you read` : "Turned off");
   });
   if ($("#grcsv")) $("#grcsv").onchange = async () => {
     const f = $("#grcsv").files[0]; if (!f) return;
