@@ -3212,6 +3212,100 @@ async def delete_custom_episode(show_id: int, request: Request, user=Depends(adm
     return {"ok": True, "deleted": bool(r.rowcount)}
 
 
+@app.post("/api/show/{show_id}/episodes/custom/sync")
+async def sync_custom_episodes(show_id: int, request: Request):
+    """Machine endpoint for a hand-built show whose source keeps re-cutting itself
+    (One Pace). The caller sends whole seasons; each episode says which old episode
+    number it came `from` (null = new). Watches follow the episode they belong to,
+    so a renumbered or re-split arc never loses, or invents, history:
+
+      * an episode keeps the watch (and timestamp) of the one it came from
+      * a new episode flagged `carry` counts as watched for anyone who had finished
+        that season, or who is already past it within the season — a re-split of
+        something they have seen. It borrows the timestamp of the episode before it.
+      * anything else new stays unwatched (genuinely new content)
+
+    Auth is the `custom_sync_secret` setting in an X-Sync-Secret header; without
+    the setting the endpoint is closed."""
+    with db() as con:
+        secret = setting(con, "custom_sync_secret")
+    if not secret or not hmac.compare_digest(request.headers.get("x-sync-secret") or "", secret):
+        raise HTTPException(403, "bad secret")
+    body = await request.json()
+    out = {}
+    with db() as con:
+        show = con.execute("SELECT details FROM shows WHERE id=?", (show_id,)).fetchone()
+        if not show:
+            raise HTTPException(404, "unknown show")
+        for skey, eps in (body.get("seasons") or {}).items():
+            season = int(skey)
+            eps = sorted(eps, key=lambda e: int(e["number"]))
+            nums = [int(e["number"]) for e in eps]
+            if nums != list(range(1, len(nums) + 1)):
+                raise HTTPException(400, f"season {season}: episodes must be numbered 1..n")
+            old = {r["number"]: dict(r) for r in con.execute(
+                "SELECT * FROM episodes WHERE show_id=? AND season=?", (show_id, season))}
+            if any((r.get("source") or "tmdb") != "custom" for r in old.values()):
+                raise HTTPException(409, f"season {season} has catalogue episodes; refusing")
+            froms = [int(e["from"]) for e in eps if e.get("from") is not None]
+            if len(froms) != len(set(froms)) or any(f not in old for f in froms):
+                raise HTTPException(400, f"season {season}: bad `from` mapping")
+            seen_by = {}
+            for w in con.execute("SELECT user_id, number, watched_at FROM watches "
+                                 "WHERE show_id=? AND season=?", (show_id, season)):
+                seen_by.setdefault(w["user_id"], {})[w["number"]] = w["watched_at"]
+            carried_total = 0
+            new_watches = []
+            for uid, seen in seen_by.items():
+                complete = bool(old) and all(n in seen for n in old)
+                mine = {int(e["number"]): seen[int(e["from"])] for e in eps
+                        if e.get("from") is not None and int(e["from"]) in seen}
+                furthest = max(mine) if mine else 0
+                for e in eps:
+                    n = int(e["number"])
+                    if e.get("from") is not None or not e.get("carry"):
+                        continue
+                    if complete or n < furthest:
+                        before = [mine[k] for k in sorted(mine) if k < n]
+                        mine[n] = before[-1] if before else min(seen.values())
+                        carried_total += 1
+                new_watches += [(uid, show_id, season, n, at) for n, at in mine.items()]
+            con.execute("DELETE FROM episodes WHERE show_id=? AND season=?", (show_id, season))
+            for e in eps:
+                base = old.get(int(e["from"])) if e.get("from") is not None else {}
+                base = base or {}
+                con.execute("""INSERT INTO episodes(show_id,season,number,title,air_date,runtime,
+                    overview,still,source,details,rating,imdb_rating,imdb_votes)
+                    VALUES(?,?,?,?,?,?,?,?,'custom',?,?,?,?)""",
+                    (show_id, season, int(e["number"]),
+                     (e.get("title") or "").strip() or base.get("title") or f"Episode {e['number']}",
+                     e.get("air_date") or base.get("air_date"),
+                     e.get("runtime") or base.get("runtime"),
+                     e.get("overview") or base.get("overview"),
+                     base.get("still"), base.get("details"), base.get("rating"),
+                     base.get("imdb_rating"), base.get("imdb_votes")))
+            con.execute("DELETE FROM watches WHERE show_id=? AND season=?", (show_id, season))
+            con.executemany("INSERT INTO watches(user_id,show_id,season,number,watched_at) "
+                            "VALUES(?,?,?,?,?)", new_watches)
+            out[str(season)] = {"episodes": len(eps), "was": len(old), "carried": carried_total}
+        names = body.get("season_names") or {}
+        if names or out:
+            try:
+                det = json.loads(show["details"] or "{}")
+            except ValueError:
+                det = {}
+            det.setdefault("season_names", {}).update({str(k): v for k, v in names.items()})
+            c = con.execute("""SELECT COUNT(DISTINCT season) s, COUNT(*) n FROM episodes
+                WHERE show_id=? AND season>0""", (show_id,)).fetchone()
+            det["n_seasons"], det["n_episodes"] = c["s"], c["n"]
+            con.execute("UPDATE shows SET details=? WHERE id=?", (json.dumps(det), show_id))
+        # a season that is complete after a re-cut was already celebrated (or is being
+        # completed by carry, not by watching): record it as seen, no confetti
+        for f in con.execute("SELECT user_id FROM follows WHERE show_id=?", (show_id,)).fetchall():
+            record_milestones(con, f["user_id"], show_id, seen=True)
+    return {"ok": True, "seasons": out}
+
+
 _ratings_tried = {}
 
 
