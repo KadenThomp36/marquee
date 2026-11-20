@@ -6,6 +6,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.padding
 import dev.kadenthompson.marquee.design.C
 import dev.kadenthompson.marquee.design.ScreenScaffold
 import dev.kadenthompson.marquee.design.T
@@ -29,7 +30,10 @@ object Screens {
     @Composable fun BookStats(id: Int) = dev.kadenthompson.marquee.features.reading.BookStatsScreen(id)
     @Composable fun BookBrowse(by: String, name: String) = dev.kadenthompson.marquee.features.reading.BookBrowseScreen(by, name)
     @Composable fun BookRequests(query: String?) = dev.kadenthompson.marquee.features.reading.BookRequestsScreen(query)
-    @Composable fun ReadingShelf(kind: String, state: String?) = Todo("Shelf", true)
+    @Composable fun ReadingShelf(kind: String, state: String?) {
+        val nav = LocalNav.current
+        ScreenScaffold("Reading", { nav.popBackStack() }) { pad -> androidx.compose.foundation.layout.Box(Modifier.padding(top = pad.calculateTopPadding())) { dev.kadenthompson.marquee.features.reading.ReadingShelf("") } }
+    }
     @Composable fun ReadingStats() = dev.kadenthompson.marquee.features.reading.ReadingStatsScreen()
     @Composable fun Profile(username: String) = dev.kadenthompson.marquee.features.you.ProfileScreen(username)
     @Composable fun Recap(year: Int, username: String?) = dev.kadenthompson.marquee.features.recap.RecapScreen(year, username)

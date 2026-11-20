@@ -191,6 +191,8 @@ fun SettingsScreen() {
                     }
                 }
             }
+            item { DeviceNotificationsGroup() }
+            item { HomeScreenGroup() }
             item {
                 SettingsGroup("Plex", "Linking lets the server mark what you watch on Plex automatically.") {
                     val p = plex
@@ -220,7 +222,7 @@ fun SettingsScreen() {
             }
             prefs?.takeIf { it.isNotEmpty() }?.let { ps ->
                 item {
-                    SettingsGroup("Notifications", "Delivered to the inbox. Push notifications on Android are a follow-up.") {
+                    SettingsGroup("What you hear about", "Applies to the inbox and to notifications on every device.") {
                         ps.forEachIndexed { i, p ->
                             ToggleRow(p.label, p.help, p.enabled == true) { setPref(p, it, p.value) }
                             if (p.hasDays == true && p.enabled == true) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

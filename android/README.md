@@ -68,9 +68,35 @@ Keystore** and stored in DataStore. They're excluded from cloud backup and devic
 transfer, and never logged. **Unpair** revokes the token on the server first, then
 forgets everything locally, cached screens included.
 
+## Widgets, notifications and shortcuts
+
+- **Widgets** (Glance): **Up Next** (one show, two rows, three across or four rows,
+  depending on size), **Episodes waiting**, and **Reading**. The punch and +1 buttons
+  work without opening the app. Widgets redraw when Home loads, after a widget or
+  shortcut action, after a push, and every half hour. Poster art is downscaled to files
+  in app storage and deleted on unpair. Add one from the launcher, or from
+  Settings › Home screen.
+- **Notifications**: Settings › Notifications on this device.
+  - **Push** through [UnifiedPush](https://unifiedpush.org) when a distributor is
+    installed (ntfy, NextPush, Sunup…). The server already sends standard Web Push
+    (VAPID, aes128gcm) to every subscription in `push_subscriptions`. The app registers
+    with the distributor using the server's VAPID key from `/api/push/pubkey` and posts
+    the endpoint and keys to `/api/push/subscribe`. The connector decrypts each message
+    on the device, and the distributor only ever sees ciphertext. There's no Firebase and
+    no server change. Unpairing unsubscribes first.
+  - **Otherwise** a WorkManager job checks `/api/notifications` every half hour and posts
+    anything new. The first check sets a baseline, so switching this on never replays the
+    backlog.
+  - Debug builds have `marquee://debug/refresh`, which runs that check now.
+- **Shortcuts**: long-press the icon. **Up Next** and **Search** are static. The dynamic
+  ones follow your queue: "S2E5 The Bear" marks that episode without opening the app,
+  and "Read …" starts a reading session. Both confirm with a toast and refresh the
+  widgets. `shortcuts.xml` also declares an Assistant `OPEN_APP_FEATURE` capability
+  ("open my reading in Marquee"), mapped by `marquee://feature?name=…`.
+
 ## Privacy
 
-There are no analytics, no crash reporter and no third-party SDKs. The app talks to
+There are no analytics, no crash reporter and no third-party SDKs that phone home. The UnifiedPush connector talks only to the distributor app on the same device. The app talks to
 exactly one host, the one you paired it with, plus the image CDNs that host's API points
 at. It never authenticates to TMDB, IMDb, Plex, Overseerr, Hardcover, AniList or
 Shelfmark: your server holds those keys.

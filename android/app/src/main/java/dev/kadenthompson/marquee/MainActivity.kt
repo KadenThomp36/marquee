@@ -31,6 +31,10 @@ class MainActivity : ComponentActivity() {
 
     private fun handle(intent: Intent?) {
         val uri = intent?.data ?: return
+        // Debug builds: run the background refresh (widgets + inbox check) now, for testing.
+        if (BuildConfig.DEBUG && uri.toString() == "marquee://debug/refresh") {
+            dev.kadenthompson.marquee.notify.RefreshWorker.now(this, widgetsOnly = false); return
+        }
         Navigator.route(uri)?.let(Navigator::open)
     }
 }

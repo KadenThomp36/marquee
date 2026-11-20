@@ -129,6 +129,7 @@ fun MainShell() {
         val tab = Navigator.tabFor(route)
         if (tab != current) select(tab, reselect = false)
         when (route) {
+            NextHome, UpcomingHome, YouHome, is LibraryHome -> if (tab == current) select(tab)
             is SearchHome -> nav.navigate(route) { launchSingleTop = true }
             else -> nav.push(route)
         }

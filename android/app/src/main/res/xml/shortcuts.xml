@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="upnext" android:enabled="true" android:icon="@drawable/ic_shortcut_upnext"
+        android:shortcutShortLabel="@string/shortcut_upnext">
+        <intent android:action="android.intent.action.VIEW" android:data="marquee://next"
+            android:targetPackage="dev.kadenthompson.marquee" android:targetClass="dev.kadenthompson.marquee.MainActivity" />
+    </shortcut>
+    <shortcut android:shortcutId="search" android:enabled="true" android:icon="@drawable/ic_shortcut_search"
+        android:shortcutShortLabel="@string/shortcut_search">
+        <intent android:action="android.intent.action.VIEW" android:data="marquee://search"
+            android:targetPackage="dev.kadenthompson.marquee" android:targetClass="dev.kadenthompson.marquee.MainActivity" />
+    </shortcut>
+    <!-- Assistant: "Open Up Next in Marquee", "Open my reading in Marquee". -->
+    <capability android:name="actions.intent.OPEN_APP_FEATURE">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="dev.kadenthompson.marquee" android:targetClass="dev.kadenthompson.marquee.MainActivity">
+            <url-template android:value="marquee://feature{?name}" />
+            <parameter android:name="feature" android:key="name" />
+        </intent>
+    </capability>
+</shortcuts>

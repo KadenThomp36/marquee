@@ -19,7 +19,30 @@ object Navigator {
     fun open(route: Any) { pending = route }
     fun consume(): Any? = pending.also { pending = null }
 
+    /** Assistant's OPEN_APP_FEATURE names: "up next", "my reading", "book requests"… */
+    private fun feature(name: String?): Any? {
+        val n = name?.lowercase()?.trim() ?: return NextHome
+        return when {
+            "next" in n || "watch" in n -> NextHome
+            "upcoming" in n || "calendar" in n -> UpcomingHome
+            "request" in n -> BookRequestsRoute()
+            "read" in n || "book" in n -> ReadingShelfRoute("book")
+            "library" in n || "show" in n || "film" in n || "movie" in n -> LibraryHome()
+            "search" in n || "discover" in n -> SearchHome()
+            "history" in n -> HistoryRoute
+            "list" in n -> ListsRoute
+            "notification" in n || "inbox" in n -> NotificationsRoute
+            "setting" in n -> SettingsRoute
+            "recap" in n || "review" in n -> YouHome
+            else -> YouHome
+        }
+    }
+
     fun tabFor(route: Any): Tab = when (route) {
+        NextHome -> Tab.NEXT
+        UpcomingHome -> Tab.UPCOMING
+        is LibraryHome -> Tab.LIBRARY
+        YouHome -> Tab.YOU
         is ShowRoute, is EpisodeRoute -> Tab.NEXT
         is MovieRoute, is BookRoute, is BookStatsRoute, is BookBrowseRoute, is MangaRoute, is ReadingShelfRoute -> Tab.LIBRARY
         is SearchHome, is PersonRoute -> Tab.SEARCH
@@ -30,11 +53,11 @@ object Navigator {
     fun route(uri: Uri): Any? {
         val path = if (uri.scheme == "marquee") listOfNotNull(uri.host) + uri.pathSegments
         else (uri.fragment ?: uri.path ?: "").trim('#', '/').split('/')
-        return route(path.joinToString("/"))
+        return route(path.joinToString("/") + (uri.encodedQuery?.let { "?$it" } ?: ""))
     }
 
     fun route(link: String): Any? {
-        val parts = link.trim('#', '/', ' ').split('/').filter { it.isNotEmpty() }
+        val parts = link.trim('#', '/', ' ').substringBefore('?').split('/').filter { it.isNotEmpty() }
         val first = parts.firstOrNull() ?: return null
         fun int(i: Int) = parts.getOrNull(i)?.toIntOrNull()
         return when (first) {
@@ -58,6 +81,11 @@ object Navigator {
             "settings" -> SettingsRoute
             "recap" -> int(1)?.let { RecapRoute(it) }
             "search" -> SearchHome(parts.drop(1).joinToString("/").let(Uri::decode).ifEmpty { null })
+            "next" -> NextHome
+            "upcoming" -> UpcomingHome
+            "you" -> YouHome
+            "library" -> if (parts.getOrNull(1) == "reading") ReadingShelfRoute("book") else LibraryHome()
+            "feature" -> feature(Uri.parse("marquee://$link").getQueryParameter("name") ?: parts.getOrNull(1))
             "debug" -> if (parts.getOrNull(1) == "requests") RequestStatesRoute else null
             else -> null
         }

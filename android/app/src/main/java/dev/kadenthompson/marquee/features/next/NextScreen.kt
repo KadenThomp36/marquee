@@ -121,6 +121,13 @@ fun NextScreen() {
         active = if (session.tracksReading) runCatching { c.get<ActiveSessionsResponse>("reading/active").sessions }.getOrDefault(active) else emptyList()
     }
     LaunchedEffect(session.watchRevision, session.readingRevision) { loadSide() }
+    // Keep the home-screen widgets and launcher shortcuts in step with what Home shows.
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    LaunchedEffect(data.value, data.stale) {
+        val d = data.value ?: return@LaunchedEffect
+        val c = session.client ?: return@LaunchedEffect
+        if (!data.stale) runCatching { dev.kadenthompson.marquee.widget.WidgetData.publish(appContext, d, c) }
+    }
 
     fun live(item: ReadingItem) = active.firstOrNull { it.kind == item.readingKind.path && it.itemId == item.id }
 

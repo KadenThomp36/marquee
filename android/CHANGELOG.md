@@ -1,5 +1,33 @@
 # Android changelog
 
+## 0.2.0 — widgets, notifications, shortcuts (Unreleased)
+
+- **Home-screen widgets.**
+  - **Up Next** adapts to its size: one show with its art, two rows at 2×2, three across
+    when wide, four rows when tall. The brass check marks the episode watched without
+    opening the app, and the widget moves on to the next one.
+  - **Episodes waiting** shows how many episodes you're behind, and what's next.
+  - **Reading** shows what's on the go with progress, plus +1 for manga.
+  - Settings › Home screen pins any of the three. "Not paired" and "All caught up"
+    faces cover the empty states.
+- **Notifications.**
+  - Real push through UnifiedPush (ntfy and other distributors), using the Web Push
+    the server already sends. Messages are end-to-end encrypted and need no Firebase or
+    server change.
+  - Without a distributor, Marquee checks the inbox every half hour instead.
+  - Tapping a notification opens what it's about. "Send a test" and system-settings
+    shortcuts sit in Settings.
+  - Unpairing unsubscribes the device from the server before the token is revoked.
+- **Launcher shortcuts.**
+  - Up Next and Search, plus shortcuts that follow your queue: mark the next episode of
+    your top show, or start a reading session, without opening the app.
+  - An Assistant capability lets you say "open my reading in Marquee" (Up Next,
+    upcoming, reading, book requests, history, lists, settings).
+- **Fix:** widgets that were already running didn't redraw with fresh data. Updates now
+  bump each widget's state so it re-reads the snapshot.
+- When Up Next is empty, the widgets also list shows from "Haven't watched in a while",
+  so a backlog doesn't read as "All caught up".
+
 ## 0.1.0 — first build, at parity with iOS (Unreleased)
 
 Needs a Marquee server on build `20260727a` or newer to pair. Book requests and request
@@ -127,12 +155,11 @@ details need web build `20261120i`, the Year in Review needs `20261120d` and Fol
   banked server-side (Plex overnight) celebrate on the next launch.
 
 ### Not yet (follow-ups)
-- Home-screen widgets and push notifications (FCM or UnifiedPush; notifications reach
-  the inbox meanwhile).
 - An offline write queue: iOS queues marks made offline and replays them. Android
   shows the error and refreshes instead.
 - The screening room and curtain (iOS's half-open Duo modes). Tabletop posture is
   detected (`isTabletop()`) but nothing uses it yet.
-- App shortcuts / intents (iOS App Intents), and a Live Update for downloads.
+- A Live Update for downloads, and ending a reading session at a page from a shortcut
+  ("I'm on page 214"); the shortcut for that opens the book instead.
 - Imports (TV Time zip, Goodreads CSV) and household admin aren't in iOS Settings
   either; they stay in the web app.

@@ -71,6 +71,7 @@ class Session(private val context: Context) {
         install(stored)
         me = Person(username = stored.username, displayName = stored.displayName, isAdmin = stored.isAdmin, isMe = true)
         phase = Phase.READY
+        dev.kadenthompson.marquee.notify.RefreshWorker.schedule(context)
         refreshMe()
     }
 
@@ -102,17 +103,25 @@ class Session(private val context: Context) {
         me = person ?: Person(username = s.username, displayName = s.displayName, isAdmin = s.isAdmin, isMe = true)
         signedOutReason = null
         phase = Phase.READY
+        dev.kadenthompson.marquee.notify.RefreshWorker.schedule(context)
         refreshMe()
     }
 
     /** Unpair: revoke server-side first so the token dies even if the app is deleted. */
     suspend fun unpair() {
+        // Stop the server pushing to this device before its token dies.
+        runCatching { dev.kadenthompson.marquee.notify.PushSetup.disable(context) }
         runCatching { client?.send("logout") }
         signOutLocally(null)
     }
 
     fun signOutLocally(reason: String?) {
-        scope.launch { vault.clear() }
+        scope.launch {
+            vault.clear()
+            dev.kadenthompson.marquee.widget.WidgetData.clear(context)
+        }
+        dev.kadenthompson.marquee.notify.RefreshWorker.cancel(context)
+        dev.kadenthompson.marquee.notify.NotifyPrefs.clear(context)
         ScreenCache.clear(context)
         install(null)
         me = null

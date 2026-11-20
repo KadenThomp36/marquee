@@ -3,6 +3,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".MarqueeApp"
@@ -33,6 +34,38 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="marquee" />
             </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Shortcut actions that don't need the app on screen: mark the next episode, start a sitting. -->
+        <activity
+            android:name=".shortcuts.ActionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- UnifiedPush: real push via a distributor (ntfy, …) speaking Web Push to the server's VAPID sender. -->
+        <service
+            android:name=".notify.MarqueePushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
+        <receiver android:name=".widget.UpNextWidgetReceiver" android:exported="true" android:label="@string/widget_upnext">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_upnext" />
+        </receiver>
+        <receiver android:name=".widget.WaitingWidgetReceiver" android:exported="true" android:label="@string/widget_waiting">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_waiting" />
+        </receiver>
+        <receiver android:name=".widget.ReadingWidgetReceiver" android:exported="true" android:label="@string/widget_reading">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_reading" />
+        </receiver>
     </application>
 </manifest>

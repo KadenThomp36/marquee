@@ -11,6 +11,7 @@ class MarqueeApp : Application() {
     override fun onCreate() {
         super.onCreate()
         ScreenCache.init(this)
+        dev.kadenthompson.marquee.notify.Notifier.createChannels(this)
         session = Session(this)
     }
 }

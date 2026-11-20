@@ -5,3 +5,7 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 -dontwarn org.slf4j.**
+
+# Glance instantiates widget action callbacks by class name.
+-keep class * implements androidx.glance.appwidget.action.ActionCallback { <init>(); }
+-keep class dev.kadenthompson.marquee.widget.** { *; }
