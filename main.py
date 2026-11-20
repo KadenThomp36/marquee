@@ -139,6 +139,17 @@ CREATE TABLE IF NOT EXISTS reading_sessions(
 CREATE INDEX IF NOT EXISTS idx_rsessions_user ON reading_sessions(user_id, ended_at);
 CREATE TABLE IF NOT EXISTS reading_goals(
   user_id INTEGER, year INTEGER, books INTEGER, updated_at TEXT, PRIMARY KEY(user_id, year));
+CREATE TABLE IF NOT EXISTS folio_settings(
+  user_id INTEGER PRIMARY KEY, enabled INTEGER DEFAULT 0, auto_capture INTEGER DEFAULT 1,
+  updated_at TEXT);
+CREATE TABLE IF NOT EXISTS folio_devices(
+  id INTEGER PRIMARY KEY, user_id INTEGER, token TEXT, name TEXT, platform TEXT,
+  app_version TEXT, paired_at TEXT, last_sync_at TEXT, revoked_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_folio_devices_user ON folio_devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_folio_devices_token ON folio_devices(token);
+CREATE TABLE IF NOT EXISTS book_identities(
+  user_id INTEGER, ident TEXT, book_id INTEGER, matched_by TEXT, created_at TEXT,
+  PRIMARY KEY(user_id, ident));
 """
 
 
@@ -1053,13 +1064,16 @@ def prune_dead_sessions(con):
     now = datetime.now()
     idle = (now - timedelta(days=SESSION_IDLE_DAYS)).isoformat()
     unused = (now - timedelta(days=1)).isoformat()
+    # A paired Folio reader is offline-first: it can sit in a drawer for a month and
+    # then upload, so its token only ends when someone unpairs it.
+    spare = "token NOT IN (SELECT token FROM folio_devices WHERE token IS NOT NULL)"
     try:
-        con.execute("DELETE FROM sessions WHERE COALESCE(last_seen, created_at) < ?",
+        con.execute(f"DELETE FROM sessions WHERE COALESCE(last_seen, created_at) < ? AND {spare}",
                     (idle,))
-        con.execute("""DELETE FROM sessions WHERE last_seen IS NOT NULL
-                       AND last_seen = created_at AND created_at < ?""", (unused,))
+        con.execute(f"""DELETE FROM sessions WHERE last_seen IS NOT NULL
+                       AND last_seen = created_at AND created_at < ? AND {spare}""", (unused,))
     except sqlite3.OperationalError:          # pre-migration schema
-        con.execute("DELETE FROM sessions WHERE created_at < ?", (idle,))
+        con.execute(f"DELETE FROM sessions WHERE created_at < ? AND {spare}", (idle,))
 
 
 @app.get("/api/sessions")
@@ -3056,13 +3070,10 @@ def _reading_milestone_payload(con, m):
     except ValueError:
         pass
     mins = 0.0
-    for s in con.execute("""SELECT started_at, ended_at FROM reading_sessions WHERE user_id=?
-            AND kind=? AND item_id=? AND ended_at IS NOT NULL""", (uid, m["kind"], m["show_id"])):
-        try:
-            mins += max(0.0, (datetime.fromisoformat(s["ended_at"])
-                              - datetime.fromisoformat(s["started_at"])).total_seconds() / 60)
-        except (ValueError, TypeError):
-            pass
+    for s in con.execute("""SELECT started_at, ended_at, active_seconds FROM reading_sessions
+            WHERE user_id=? AND kind=? AND item_id=? AND ended_at IS NOT NULL""",
+            (uid, m["kind"], m["show_id"])):
+        mins += _ses_seconds(s) / 60
     fa = r["finished_at"] or ""
     nth = con.execute(f"""SELECT COUNT(*) c FROM {tbl} WHERE user_id=? AND state='finished'
         AND substr(finished_at,1,4)=? AND finished_at<=?""", (uid, fa[:4], fa)).fetchone()["c"]
@@ -4154,7 +4165,14 @@ async def manga_add(request: Request, user=Depends(current_user)):
 READING_STATES = ("want", "reading", "finished", "paused", "dnf")
 
 
-def _update_reading_state(kind, item_id, body, uid):
+def client_source(request):
+    """'ios' for the native app (URLSession's user agent names CFNetwork), else 'web'.
+    Folio sessions say so themselves; rows from before this was recorded have none."""
+    ua = request.headers.get("user-agent") or ""
+    return "ios" if ("CFNetwork" in ua or "Darwin/" in ua) else "web"
+
+
+def _update_reading_state(kind, item_id, body, uid, source=None):
     """Apply a shelf edit. Returns any celebrations it earned (a finish, the yearly goal)."""
     tbl, col = ("book_states", "book_id") if kind == "book" else ("manga_states", "manga_id")
     now = datetime.now().isoformat()
@@ -4198,8 +4216,8 @@ def _update_reading_state(kind, item_id, body, uid):
         # +1 punches / stepper / ad-hoc updates all feed the reading stats
         if (progress or 0) != (cur["progress"] or 0):
             con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,
-                ended_at,start_pos,end_pos) VALUES(?,?,?,?,?,?,?)""",
-                (uid, kind, item_id, now, now, cur["progress"] or 0, progress or 0))
+                ended_at,start_pos,end_pos,source) VALUES(?,?,?,?,?,?,?,?)""",
+                (uid, kind, item_id, now, now, cur["progress"] or 0, progress or 0, source))
         # just finished → the moment (a backdated finish is recorded silently)
         made = []
         if state == "finished" and cur["state"] != "finished":
@@ -4211,31 +4229,33 @@ def _update_reading_state(kind, item_id, body, uid):
 
 @app.post("/api/book/{book_id}/state")
 async def book_state(book_id: int, request: Request, user=Depends(current_user)):
-    return {"ok": True, "celebrate": _update_reading_state("book", book_id, await request.json(), user["id"])}
+    return {"ok": True, "celebrate": _update_reading_state("book", book_id, await request.json(), user["id"],
+                                                           client_source(request))}
 
 
 @app.post("/api/manga/{manga_id}/state")
 async def manga_state(manga_id: int, request: Request, user=Depends(current_user)):
-    return {"ok": True, "celebrate": _update_reading_state("manga", manga_id, await request.json(), user["id"])}
+    return {"ok": True, "celebrate": _update_reading_state("manga", manga_id, await request.json(), user["id"],
+                                                           client_source(request))}
 
 
 # --- full detail pages (shelf items AND search-result previews) -------------------
 
 def _sessions_for(uid, kind, item_id):
     with db() as con:
-        rows = con.execute("""SELECT id, started_at, ended_at, start_pos, end_pos
-            FROM reading_sessions WHERE user_id=? AND kind=? AND item_id=?
-            AND ended_at IS NOT NULL ORDER BY started_at DESC LIMIT 30""",
+        rows = con.execute("""SELECT rs.*, d.name AS device_name
+            FROM reading_sessions rs LEFT JOIN folio_devices d ON d.id=rs.device_id
+            WHERE rs.user_id=? AND rs.kind=? AND rs.item_id=?
+            AND rs.ended_at IS NOT NULL ORDER BY rs.started_at DESC LIMIT 30""",
             (uid, kind, item_id)).fetchall()
     out = []
     for r in rows:
-        try:
-            m = (datetime.fromisoformat(r["ended_at"])
-                 - datetime.fromisoformat(r["started_at"])).total_seconds() / 60
-        except (ValueError, TypeError):
-            m = 0
-        out.append({"id": r["id"], "date": r["started_at"], "minutes": round(m),
-                    "from": r["start_pos"] or 0, "to": r["end_pos"] or 0})
+        src, label = _ses_source(r)
+        out.append({"id": r["id"], "date": r["started_at"], "minutes": round(_ses_seconds(r) / 60),
+                    "from": r["start_pos"] or 0,
+                    "to": r["end_pos"] if r["end_pos"] is not None else (r["start_pos"] or 0),
+                    "source": src, "source_label": label,
+                    "start_fraction": r["start_fraction"], "end_fraction": r["end_fraction"]})
     return out
 
 
@@ -4256,16 +4276,34 @@ async def edit_session(sid: int, request: Request, user=Depends(current_user)):
             nd = date_or_none(str(body["date"])[:10])
             started = nd + (started[10:] if len(started) > 10 else "T20:00:00")
             ended = nd + (ended[10:] if len(ended) > 10 else "T20:00:00")
+        active = s["active_seconds"]
         if "minutes" in body:
             try:
-                ended = (datetime.fromisoformat(started)
-                         + timedelta(minutes=max(0, int(body["minutes"] or 0)))).isoformat()
+                mins = max(0, int(body["minutes"] or 0))
+                # a Folio session's time is its active time; its wall clock (with the
+                # idle gaps) only stretches if the new figure no longer fits inside it
+                if active is not None:
+                    if mins * 60 != round(active / 60) * 60:
+                        active = mins * 60
+                    if datetime.fromisoformat(started) + timedelta(seconds=active) > datetime.fromisoformat(ended):
+                        ended = (datetime.fromisoformat(started) + timedelta(seconds=active)).isoformat()
+                else:
+                    ended = (datetime.fromisoformat(started) + timedelta(minutes=mins)).isoformat()
             except (ValueError, TypeError):
                 pass
+        frm = int_or_400(body.get("from", s["start_pos"] or 0), "from")
+        to = int_or_400(body.get("to", s["end_pos"] or 0), "to")
+        sf, ef = s["start_fraction"], s["end_fraction"]
+        if (frm, to) != (s["start_pos"] or 0, s["end_pos"] or 0):
+            # positions edited by hand: Folio's fractions no longer describe the row
+            b = con.execute("SELECT pages FROM books WHERE id=?", (s["item_id"],)).fetchone() \
+                if s["kind"] == "book" else None
+            pages = b["pages"] if b else None
+            sf, ef = ((round(min(1, frm / pages), 5), round(min(1, to / pages), 5))
+                      if pages else (None, None))
         con.execute("""UPDATE reading_sessions SET started_at=?, ended_at=?,
-            start_pos=?, end_pos=? WHERE id=?""",
-            (started, ended, int_or_400(body.get("from", s["start_pos"] or 0), "from"),
-             int_or_400(body.get("to", s["end_pos"] or 0), "to"), sid))
+            start_pos=?, end_pos=?, active_seconds=?, start_fraction=?, end_fraction=?
+            WHERE id=?""", (started, ended, frm, to, active, sf, ef, sid))
     return {"ok": True}
 
 
@@ -4561,10 +4599,21 @@ def book_detail(book_id: int, user=Depends(current_user)):
     item["chapters"] = item.get("chapters") or (len(toc) or None)
     item.update({"desc": det.get("desc") or "", "subjects": det.get("subjects") or [],
                  "toc": toc})
+    summary = recent = None
+    if st:
+        with db() as con:
+            rows = con.execute("""SELECT started_at, ended_at, active_seconds, source
+                FROM reading_sessions WHERE user_id=? AND kind='book' AND item_id=?
+                AND ended_at IS NOT NULL""", (uid, book_id)).fetchall()
+            recent = recent_folio(con, uid, book_id)
+        secs = [_ses_seconds(r) for r in rows]
+        summary = {"minutes": round(sum(secs) / 60), "sessions": sum(1 for x in secs if x >= 180),
+                   "folio": sum(1 for r in rows if r["source"] == "folio")}
     return {"tracked": bool(st), "kind": "book", "item": item,
             "state": dict(st) if st else None,
             "sessions": _sessions_for(uid, "book", book_id) if st else [],
-            "household": _household_states(uid, "book", book_id)}
+            "household": _household_states(uid, "book", book_id),
+            "reading": summary, "recent_folio": recent}
 
 
 @app.get("/api/book/{book_id}/matches")
@@ -4703,7 +4752,7 @@ async def reading_restore(kind: str, item_id: int, request: Request, user=Depend
 
 
 @app.post("/api/{kind}/{item_id}/session/start")
-def session_start(kind: str, item_id: int, user=Depends(current_user)):
+def session_start(kind: str, item_id: int, request: Request, user=Depends(current_user)):
     tbl, col = _session_kind(kind)
     uid, now = user["id"], datetime.now().isoformat()
     with db() as con:
@@ -4720,8 +4769,8 @@ def session_start(kind: str, item_id: int, user=Depends(current_user)):
                 started_at=COALESCE(started_at,?), updated_at=? WHERE user_id=? AND {col}=?""",
                 (now, now, uid, item_id))
         cur_pos = cur["progress"] or 0
-        c = con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,start_pos)
-            VALUES(?,?,?,?,?)""", (uid, kind, item_id, now, cur_pos))
+        c = con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,start_pos,
+            source) VALUES(?,?,?,?,?,?)""", (uid, kind, item_id, now, cur_pos, client_source(request)))
         return {"ok": True, "session_id": c.lastrowid, "started_at": now}
 
 
@@ -4764,7 +4813,8 @@ def reading_active(user=Depends(current_user)):
             LEFT JOIN manga_states ms2 ON rs.kind='manga' AND ms2.manga_id=rs.item_id AND ms2.user_id=rs.user_id
             WHERE rs.user_id=? AND rs.ended_at IS NULL ORDER BY rs.started_at""",
             (user["id"],)).fetchall()
-    return {"sessions": [dict(r) for r in rows]}
+        recent = recent_folio(con, user["id"])
+    return {"sessions": [dict(r) for r in rows], "recent_folio": recent}
 
 
 @app.get("/api/reading/stats")
@@ -4799,9 +4849,9 @@ def compute_reading_stats(uid, kinds=("book", "manga")):
 
     def crunch(kind, states_tbl, items_tbl, id_col, total_col):
         with db() as con:
-            ses = con.execute("""SELECT item_id, started_at, ended_at, start_pos, end_pos
-                FROM reading_sessions WHERE user_id=? AND kind=? AND ended_at IS NOT NULL
-                ORDER BY item_id, started_at""", (uid, kind)).fetchall()
+            ses = con.execute("""SELECT item_id, started_at, ended_at, start_pos, end_pos,
+                active_seconds FROM reading_sessions WHERE user_id=? AND kind=?
+                AND ended_at IS NOT NULL ORDER BY item_id, started_at""", (uid, kind)).fetchall()
             st = con.execute(f"""SELECT s.*, i.title, i.{total_col} AS total
                 FROM {states_tbl} s JOIN {items_tbl} i ON i.id=s.{id_col}
                 WHERE s.user_id=?""", (uid,)).fetchall()
@@ -4833,7 +4883,7 @@ def compute_reading_stats(uid, kinds=("book", "manga")):
                 d_obj = date.fromisoformat(day)
             except ValueError:
                 continue
-            m = mins(s["started_at"], s["ended_at"])
+            m = _ses_seconds(s) / 60
             prev = prev_by_item.get(s["item_id"])
             if prev is None:
                 sa = start_by_item.get(s["item_id"]) or ""
@@ -4998,6 +5048,650 @@ async def set_reading_goal(request: Request, user=Depends(current_user)):
             # a goal you've already passed isn't news — mark it met without the fanfare
             record_goal_milestone(con, uid, seen=True)
         return reading_goal(con, uid)
+
+
+# ---------------------------------------------------------------- Folio (the e-reader)
+# Folio is the household's own reader app on a Boox Palma. It pairs once with the
+# ordinary pairing-code flow, then uploads finished reading sessions — sometimes days
+# later, it's offline-first — to the account that owns its token. The wire format is
+# fixed by docs/marquee-contract.md in the Folio repo: change both sides together.
+# The integration is per account: everyone enables it and pairs their own reader.
+
+FOLIO_BATCH_MAX = 200
+FOLIO_RECENT_HOURS = 36          # "just read on Boox Palma" — how long that stays news
+
+
+def _folio_err(status, msg):
+    """The contract's error shape ({"error": …}), with `detail` alongside so Marquee's
+    own clients, which read `detail`, still get the message. Returned rather than
+    raised: the SPA fallback rewrites every raised /api 404 to "not found"."""
+    return JSONResponse({"error": msg, "detail": msg}, status_code=status)
+
+
+def _bearer_token(request):
+    auth = request.headers.get("authorization") or ""
+    return auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+
+
+def folio_prefs(con, uid):
+    r = con.execute("SELECT enabled, auto_capture FROM folio_settings WHERE user_id=?",
+                    (uid,)).fetchone()
+    return {"enabled": bool(r and r["enabled"]),
+            "auto_capture": bool(r["auto_capture"]) if r else True}
+
+
+def folio_device_rows(con, uid):
+    rows = con.execute("""SELECT d.*, s.token IS NOT NULL AS signed_in,
+          (SELECT COUNT(*) FROM reading_sessions rs
+            WHERE rs.user_id=d.user_id AND rs.device_id=d.id) AS synced
+        FROM folio_devices d LEFT JOIN sessions s ON s.token=d.token
+        WHERE d.user_id=? AND d.revoked_at IS NULL ORDER BY d.paired_at""", (uid,)).fetchall()
+    return [{"id": r["id"], "name": r["name"], "platform": r["platform"],
+             "app_version": r["app_version"], "paired_at": (r["paired_at"] or "")[:19] or None,
+             "last_sync_at": (r["last_sync_at"] or "")[:19] or None, "sessions_synced": r["synced"],
+             # signed out from the general Devices list: still listed, so it can be
+             # unpaired properly or paired again
+             "signed_in": bool(r["signed_in"])} for r in rows]
+
+
+def folio_state(con, uid):
+    return {**folio_prefs(con, uid), "devices": folio_device_rows(con, uid)}
+
+
+def _folio_device_for_token(con, uid, tok):
+    if not tok:
+        return None
+    return con.execute("""SELECT * FROM folio_devices WHERE token=? AND user_id=?
+        AND revoked_at IS NULL""", (tok, uid)).fetchone()
+
+
+def _folio_register(con, uid, tok, name=None, platform=None, version=None):
+    """Same token → same device, always. Names the session row too, so the general
+    Devices list says "Boox Palma" rather than "Paired device"."""
+    d = _folio_device_for_token(con, uid, tok)
+    if d:
+        con.execute("""UPDATE folio_devices SET name=COALESCE(?,name),
+            platform=COALESCE(?,platform), app_version=COALESCE(?,app_version) WHERE id=?""",
+            (name, platform, version, d["id"]))
+        did = d["id"]
+    else:
+        s = con.execute("SELECT created_at FROM sessions WHERE token=?", (tok,)).fetchone()
+        cur = con.execute("""INSERT INTO folio_devices(user_id,token,name,platform,app_version,
+            paired_at) VALUES(?,?,?,?,?,?)""",
+            (uid, tok, name or "Folio", platform, version,
+             (s and s["created_at"]) or datetime.now().isoformat()))
+        did = cur.lastrowid
+    if name:
+        try:
+            con.execute("UPDATE sessions SET device_name=? WHERE token=?", (name, tok))
+        except sqlite3.OperationalError:
+            pass
+    return did
+
+
+async def _json_obj(request):
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "expected a JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected a JSON object")
+    return body
+
+
+@app.get("/api/integrations/folio")
+def folio_get(user=Depends(current_user)):
+    with db() as con:
+        return folio_state(con, user["id"])
+
+
+@app.post("/api/integrations/folio")
+async def folio_set(request: Request, user=Depends(current_user)):
+    body = await _json_obj(request)
+    with db() as con:
+        cur = folio_prefs(con, user["id"])
+        en = bool(body["enabled"]) if "enabled" in body else cur["enabled"]
+        ac = bool(body["auto_capture"]) if "auto_capture" in body else cur["auto_capture"]
+        con.execute("""INSERT INTO folio_settings(user_id,enabled,auto_capture,updated_at)
+            VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET enabled=excluded.enabled,
+              auto_capture=excluded.auto_capture, updated_at=excluded.updated_at""",
+            (user["id"], int(en), int(ac), datetime.now().isoformat()))
+        return folio_state(con, user["id"])
+
+
+@app.post("/api/integrations/folio/devices")
+async def folio_device_add(request: Request, user=Depends(current_user)):
+    """Folio calls this once after pairing. Only a paired device's own Bearer token
+    can register — a browser cookie registering itself would make "Unpair" sign the
+    browser out."""
+    tok = _bearer_token(request)
+    if not tok:
+        return _folio_err(400, "register with the device's own Bearer token")
+    body = await _json_obj(request)
+    txt = lambda k, n: (str(body.get(k)).strip()[:n] or None) if body.get(k) is not None else None
+    with db() as con:
+        did = _folio_register(con, user["id"], tok, txt("name", 60), txt("platform", 20),
+                              txt("app_version", 20))
+    return {"device_id": did}
+
+
+@app.delete("/api/integrations/folio/devices/{device_id}")
+def folio_device_remove(device_id: int, user=Depends(current_user)):
+    """Unpair: the device leaves the list and its session token stops working. The row
+    itself is kept (marked revoked) so past sessions can still say which reader they
+    came from."""
+    with db() as con:
+        d = con.execute("""SELECT * FROM folio_devices WHERE id=? AND user_id=?
+            AND revoked_at IS NULL""", (device_id, user["id"])).fetchone()
+        if not d:
+            return _folio_err(404, "no such device")
+        if d["token"]:
+            con.execute("DELETE FROM sessions WHERE token=?", (d["token"],))
+        con.execute("UPDATE folio_devices SET revoked_at=?, token=NULL WHERE id=?",
+                    (datetime.now().isoformat(), device_id))
+        return {"ok": True, **folio_state(con, user["id"])}
+
+
+# --- book identity: a file on the reader → a book in the catalogue -----------------
+
+def _folio_identity(raw):
+    raw = raw if isinstance(raw, dict) else {}
+    authors = raw.get("authors")
+    if isinstance(authors, str):
+        authors = [authors]
+    authors = [str(a).strip()[:120] for a in (authors or []) if str(a or "").strip()][:5]
+    isbns = raw.get("isbn")
+    if isinstance(isbns, (str, int)):
+        isbns = [isbns]
+    isbns = [re.sub(r"[^0-9X]", "", str(i).upper()) for i in (isbns or [])]
+    cal = raw.get("calibre_id")
+    return {"title": str(raw.get("title") or "").strip()[:300], "authors": authors,
+            "isbn": list(dict.fromkeys(i for i in isbns if len(i) in (10, 13)))[:6],
+            "calibre_id": int(cal) if isinstance(cal, int) or (isinstance(cal, str) and cal.isdigit()) else None}
+
+
+def _folio_title_key(t):
+    """Stricter than _book_key: a subtitle can be the whole difference between two
+    books in a series ("Northline" vs "Northline: Undertow"), so only the noise is
+    dropped — a trailing "(Series #2)" and a generic ": A Novel"."""
+    t = re.sub(r"\s*\([^)]*\)\s*$", "", t or "")
+    t = re.sub(r"\s*[:\-–—]\s*(a\s+)?(novel|memoir|thriller|novella)\s*$", "", t, flags=re.I)
+    return _norm_txt(t)
+
+
+def _folio_keys(ident):
+    """(matched_by, key) pairs, strongest first."""
+    keys = [("isbn", f"isbn:{i}") for i in ident["isbn"]]
+    if ident["calibre_id"] is not None:
+        keys.append(("calibre", f"calibre:{ident['calibre_id']}"))
+    if ident["title"]:
+        surname = (_norm_txt(ident["authors"][0]).split() or [""])[-1] if ident["authors"] else ""
+        keys.append(("title", f"title:{_folio_title_key(ident['title'])}|{surname}"))
+    return keys
+
+
+def _folio_book_out(con, bid, matched_by):
+    b = con.execute("SELECT id, title, author, cover, pages FROM books WHERE id=?", (bid,)).fetchone()
+    return {"book_id": b["id"], "title": b["title"], "author": b["author"],
+            "cover": b["cover"], "pages": b["pages"], "matched_by": matched_by}
+
+
+def folio_resolve(uid, ident):
+    """Find (or add from Hardcover) the book a reader file is. Returns (book_id,
+    matched_by) or (None, None). Order: this user's remembered mappings, the household
+    catalogue by title, Hardcover by ISBN, Hardcover by title — the same search and
+    catalogue helpers /api/books/search and /api/books/add use."""
+    keys = _folio_keys(ident)
+    if not keys:
+        return None, None
+    with db() as con:
+        for how, k in keys:
+            r = con.execute("""SELECT m.book_id FROM book_identities m JOIN books b ON b.id=m.book_id
+                WHERE m.user_id=? AND m.ident=?""", (uid, k)).fetchone()
+            if r:
+                return r["book_id"], how
+    bid = how = None
+    author = ident["authors"][0] if ident["authors"] else ""
+    if ident["title"]:
+        want = _folio_title_key(ident["title"])
+        with db() as con:
+            hits = [r for r in con.execute("SELECT id, title, author FROM books")
+                    if _folio_title_key(r["title"]) == want and _author_overlap(r["author"], author)]
+            if hits:
+                shelf = {r["book_id"] for r in con.execute(
+                    "SELECT book_id FROM book_states WHERE user_id=?", (uid,))}
+                bid = sorted(hits, key=lambda r: (r["id"] not in shelf, r["id"]))[0]["id"]
+                how = "title"
+    doc = None
+    if not bid:
+        for isbn in ident["isbn"][:2]:
+            for h in hc_search_rows(isbn, 5):
+                d = h.get("document") or {}
+                if not d.get("id"):
+                    continue
+                listed = [re.sub(r"[^0-9X]", "", str(x).upper()) for x in (d.get("isbns") or [])]
+                if isbn in listed or (not listed and ident["title"]
+                                      and _title_matches(_clean_title(ident["title"]), d.get("title") or "")):
+                    doc, how = d, "isbn"
+                    break
+            if doc:
+                break
+    if not bid and not doc and ident["title"]:
+        doc = hc_best(_clean_title(ident["title"]), author)
+        how = "search" if doc else None
+    if doc:
+        try:
+            item = hc_book_by_id(int(doc["id"]))
+        except Exception:  # noqa: BLE001 — Hardcover hiccup: the search doc will do
+            item = None
+        item = item or _hc_row(doc)
+        with db() as con:
+            existed = con.execute("SELECT 1 FROM books WHERE hardcover_id=?",
+                                  (item["hc_id"],)).fetchone()
+            bid = upsert_book(con, item)
+        if how == "search" and not existed:
+            how = "created"
+    if not bid:
+        return None, None
+    now = datetime.now().isoformat()
+    with db() as con:
+        for _, k in keys:
+            con.execute("""INSERT INTO book_identities(user_id,ident,book_id,matched_by,created_at)
+                VALUES(?,?,?,?,?) ON CONFLICT(user_id,ident) DO UPDATE SET
+                  book_id=excluded.book_id, matched_by=excluded.matched_by""", (uid, k, bid, how, now))
+    return bid, how
+
+
+@app.post("/api/reading/resolve")
+async def folio_resolve_ep(request: Request, user=Depends(current_user)):
+    """Map a reader file to a Marquee book, adding it to the catalogue if needed.
+    Never touches the shelf — the first session does that."""
+    ident = _folio_identity(await _json_obj(request))
+    bid, how = folio_resolve(user["id"], ident)
+    if not bid:
+        return _folio_err(404, "no match")
+    with db() as con:
+        return _folio_book_out(con, bid, how)
+
+
+# --- the batch upload ---------------------------------------------------------------
+
+def _folio_time(v, field):
+    """Naive household-local, as the contract says. An offset or a Z is tolerated by
+    converting into household time rather than storing UTC by mistake."""
+    s = str(v or "").strip()
+    if not s:
+        raise ValueError(f"missing {field}")
+    try:
+        d = datetime.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z") else s)
+    except ValueError:
+        raise ValueError(f"bad {field}")
+    if d.tzinfo:
+        d = d.astimezone().replace(tzinfo=None)
+    return d.replace(microsecond=0)
+
+
+def _frac(v):
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else round(min(1.0, max(0.0, f)), 5)
+
+
+def _nonneg_int(v):
+    try:
+        return max(0, int(v)) if v is not None and not isinstance(v, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _folio_parse(raw):
+    """One uploaded session → a clean dict, or ValueError with the reason Folio gets."""
+    started = _folio_time(raw.get("started_at"), "started_at")
+    ended = _folio_time(raw.get("ended_at"), "ended_at")
+    if ended < started:
+        raise ValueError("ended_at is before started_at")
+    if ended - started > timedelta(hours=24):
+        raise ValueError("session longer than a day")
+    if ended > datetime.now() + timedelta(hours=1):
+        raise ValueError("ended_at is in the future")
+    wall = int((ended - started).total_seconds())
+    active = _nonneg_int(raw.get("active_seconds"))
+    active = wall if active is None else min(active, wall)
+    st, en = raw.get("start") or {}, raw.get("end") or {}
+    st, en = (st if isinstance(st, dict) else {}), (en if isinstance(en, dict) else {})
+    chapters = []
+    for c in (raw.get("chapters") or [])[:200] if isinstance(raw.get("chapters"), list) else []:
+        if isinstance(c, dict) and str(c.get("title") or "").strip():
+            chapters.append({"title": str(c["title"]).strip()[:120],
+                             "seconds": _nonneg_int(c.get("seconds")) or 0,
+                             "pages_turned": _nonneg_int(c.get("pages_turned")) or 0})
+    meta = {k: v for k, v in (("start_chapter", str(st.get("chapter") or "").strip()[:120]),
+                              ("end_chapter", str(en.get("chapter") or "").strip()[:120]),
+                              ("chapters", chapters)) if v}
+    bid = raw.get("book_id")
+    return {"started": started.isoformat(), "ended": ended.isoformat(), "active": active,
+            "start_f": _frac(st.get("fraction")), "end_f": _frac(en.get("fraction")),
+            "pages_turned": _nonneg_int(raw.get("pages_turned")),
+            "finished": raw.get("finished") is True, "meta": meta,
+            "book_id": bid if isinstance(bid, int) and not isinstance(bid, bool) else None,
+            "book": _folio_identity(raw.get("book"))}
+
+
+def _folio_apply(con, uid, device_id, client_id, bid, s):
+    """Insert one session and move the shelf on. Returns milestone ids it earned."""
+    b = con.execute("SELECT pages FROM books WHERE id=?", (bid,)).fetchone()
+    pages = b["pages"] if b else None
+    pos = lambda f: round(f * pages) if pages and f is not None else None
+    start_pos, end_pos = pos(s["start_f"]), pos(s["end_f"])
+    if s["finished"] and pages:
+        end_pos = pages
+    con.execute("""INSERT INTO reading_sessions(user_id,kind,item_id,started_at,ended_at,
+        start_pos,end_pos,client_id,device_id,source,active_seconds,pages_turned,
+        start_fraction,end_fraction,meta) VALUES(?,'book',?,?,?,?,?,?,?,'folio',?,?,?,?,?)""",
+        (uid, bid, s["started"], s["ended"], start_pos, end_pos, client_id, device_id,
+         s["active"], s["pages_turned"], s["start_f"], s["end_f"],
+         json.dumps(s["meta"]) if s["meta"] else None))
+    cur = con.execute("SELECT * FROM book_states WHERE user_id=? AND book_id=?",
+                      (uid, bid)).fetchone()
+    if not cur:
+        state = "finished" if s["finished"] else "reading"
+        con.execute("""INSERT INTO book_states(user_id,book_id,state,progress,started_at,
+            finished_at,updated_at) VALUES(?,?,?,?,?,?,?)""",
+            (uid, bid, state, end_pos or 0, s["started"],
+             s["ended"] if s["finished"] else None, s["ended"]))
+        return record_reading_milestones(con, uid, "book", bid, again=True) if s["finished"] else []
+    state, finished_at = cur["state"], cur["finished_at"]
+    progress = max(cur["progress"] or 0, end_pos or 0)        # forward only
+    newer = s["ended"] > (cur["updated_at"] or "")
+    finishing = s["finished"] and cur["state"] != "finished"
+    if finishing:
+        state, finished_at = "finished", s["ended"]
+        progress = max(progress, pages or 0)
+    elif state == "want" or (state in ("paused", "dnf") and newer):
+        state = "reading"                     # reading it again is picking it back up
+    con.execute("""UPDATE book_states SET state=?, progress=?, finished_at=?,
+        started_at=COALESCE(started_at, ?), updated_at=MAX(COALESCE(updated_at,''), ?)
+        WHERE user_id=? AND book_id=?""",
+        (state, progress, finished_at, s["started"], s["ended"], uid, bid))
+    return record_reading_milestones(con, uid, "book", bid, again=True) if finishing else []
+
+
+@app.post("/api/reading/sessions/batch")
+async def folio_batch(request: Request, user=Depends(current_user)):
+    """Folio's outbox, emptied. Idempotent on client_id: a retry lands every session
+    it already sent in `duplicates`, never twice in the log."""
+    body = await _json_obj(request)
+    sessions = body.get("sessions")
+    if not isinstance(sessions, list):
+        return _folio_err(400, "sessions must be a list")
+    if len(sessions) > FOLIO_BATCH_MAX:
+        return _folio_err(413, f"at most {FOLIO_BATCH_MAX} sessions per batch")
+    uid, tok = user["id"], _bearer_token(request)
+    with db() as con:
+        if not folio_prefs(con, uid)["enabled"]:
+            return _folio_err(403, "integration disabled")
+        dev = _folio_device_for_token(con, uid, tok)
+        if not dev and isinstance(body.get("device_id"), int):
+            dev = con.execute("""SELECT * FROM folio_devices WHERE id=? AND user_id=?
+                AND revoked_at IS NULL""", (body["device_id"], uid)).fetchone()
+        # the server forgot the device (or Folio skipped registering): adopt the token
+        device_id = dev["id"] if dev else (_folio_register(con, uid, tok) if tok else None)
+    accepted, duplicates, rejected, todo = [], [], [], []
+    seen = set()
+    for raw in sessions:
+        cid = str(raw.get("client_id") or "").strip()[:100] if isinstance(raw, dict) else ""
+        if not cid:
+            rejected.append({"client_id": cid or None, "error": "missing client_id"})
+            continue
+        # a retry is a duplicate whatever it now says — checked before validation, so
+        # an id that was accepted once can never also come back rejected
+        if cid in seen:
+            duplicates.append(cid)
+            continue
+        seen.add(cid)
+        with db() as con:
+            prior = con.execute("SELECT user_id FROM reading_sessions WHERE client_id=?",
+                                (cid,)).fetchone()
+        if prior:
+            if prior["user_id"] == uid:
+                duplicates.append(cid)
+            else:
+                rejected.append({"client_id": cid, "error": "client_id already used"})
+            continue
+        try:
+            todo.append((cid, _folio_parse(raw)))
+        except ValueError as e:
+            rejected.append({"client_id": cid, "error": str(e)})
+    # milestones a finish earns are banked server-side; the apps pick them up from
+    # /api/celebrations exactly as they do for a finish logged on the web
+    # oldest first, so a finish uploaded alongside the sessions before it lands last
+    for cid, s in sorted(todo, key=lambda t: t[1]["started"]):
+        bid = s["book_id"]
+        if bid:
+            with db() as con:
+                bid = bid if con.execute("SELECT 1 FROM books WHERE id=?", (bid,)).fetchone() else None
+        if not bid:
+            bid, _ = folio_resolve(uid, s["book"])
+        if not bid:
+            rejected.append({"client_id": cid, "error": "unresolved book"})
+            continue
+        try:
+            with db() as con:
+                _folio_apply(con, uid, device_id, cid, bid, s)
+            accepted.append(cid)
+        except sqlite3.IntegrityError:        # the same id racing in on a parallel retry
+            duplicates.append(cid)
+    with db() as con:
+        if device_id:
+            con.execute("UPDATE folio_devices SET last_sync_at=? WHERE id=?",
+                        (datetime.now().replace(microsecond=0).isoformat(), device_id))
+    return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
+
+
+# --- one book's reading, in depth (the per-book stats page) -------------------------
+
+SOURCE_LABELS = {"folio": "Folio", "ios": "iPhone", "web": "Web"}
+
+
+def _wall_seconds(r):
+    try:
+        return max(0.0, (datetime.fromisoformat(r["ended_at"])
+                         - datetime.fromisoformat(r["started_at"])).total_seconds())
+    except (ValueError, TypeError):
+        return 0
+
+
+def _ses_seconds(r):
+    """Reading time for one session row: Folio's active time when it sent one (idle
+    gaps already taken out), otherwise the wall clock from start to end."""
+    a = r["active_seconds"] if "active_seconds" in r.keys() else None
+    return max(0, a) if a is not None else _wall_seconds(r)
+
+
+def _ses_source(r):
+    """(source, label) for a session — the reader it came from by name when we know it."""
+    src = r["source"] if "source" in r.keys() else None
+    if src == "folio":
+        dev = r["device_name"] if "device_name" in r.keys() else None
+        return "folio", dev or "Folio"
+    return (src or "marquee"), SOURCE_LABELS.get(src, "Marquee")
+
+
+def _ses_meta(r):
+    try:
+        return json.loads(r["meta"]) if "meta" in r.keys() and r["meta"] else {}
+    except ValueError:
+        return {}
+
+
+def recent_folio(con, uid, book_id=None):
+    """The newest Folio session within FOLIO_RECENT_HOURS — what lets a page say
+    "read on Boox Palma 40 min ago" without the user opening anything."""
+    cut = (datetime.now() - timedelta(hours=FOLIO_RECENT_HOURS)).isoformat()
+    q = """SELECT rs.*, d.name AS device_name, b.title, b.cover, b.pages
+        FROM reading_sessions rs LEFT JOIN folio_devices d ON d.id=rs.device_id
+        JOIN books b ON b.id=rs.item_id
+        WHERE rs.user_id=? AND rs.kind='book' AND rs.source='folio' AND rs.ended_at>=?"""
+    args = [uid, cut]
+    if book_id:
+        q += " AND rs.item_id=?"; args.append(book_id)
+    r = con.execute(q + " ORDER BY rs.ended_at DESC LIMIT 1", args).fetchone()
+    if not r:
+        return None
+    meta = _ses_meta(r)
+    return {"book_id": r["item_id"], "title": r["title"], "cover": r["cover"],
+            "device": r["device_name"] or "Folio", "ended_at": r["ended_at"],
+            "minutes": round(_ses_seconds(r) / 60),
+            "pages": max(0, (r["end_pos"] or 0) - (r["start_pos"] or 0)) if r["end_pos"] is not None else None,
+            "end_fraction": r["end_fraction"], "chapter": meta.get("end_chapter")}
+
+
+@app.get("/api/book/{book_id}/stats")
+def book_stats(book_id: int, user=Depends(current_user)):
+    """Everything about how you've read one book: time, pace, a finish forecast, the
+    session history (with where each came from), a day-by-day calendar and — when
+    Folio sent chapter detail — pace per chapter."""
+    uid = user["id"]
+    with db() as con:
+        b = con.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
+        if not b:
+            raise HTTPException(404, "unknown book")
+        st = con.execute("SELECT * FROM book_states WHERE user_id=? AND book_id=?",
+                         (uid, book_id)).fetchone()
+        rows = con.execute("""SELECT rs.*, d.name AS device_name FROM reading_sessions rs
+            LEFT JOIN folio_devices d ON d.id=rs.device_id
+            WHERE rs.user_id=? AND rs.kind='book' AND rs.item_id=?
+            ORDER BY rs.started_at""", (uid, book_id)).fetchall()
+        recent = recent_folio(con, uid, book_id)
+        paced = add_reading_pace(con, uid, [{"id": book_id, "state": st["state"] if st else None,
+                                              "pages": b["pages"], "progress": st["progress"] if st else 0}],
+                                 "book")[0]
+    pages = b["pages"]
+    sessions, days, clock = [], {}, [0.0] * 24
+    chapters, sources = {}, {}
+    tot_s = timed_s = timed_units = 0.0
+    timed_frac = frac_s = 0.0
+    units_all = 0
+    live = None
+    for r in rows:
+        if not r["ended_at"]:
+            live = {"session_id": r["id"], "started_at": r["started_at"], "from": r["start_pos"] or 0}
+            continue
+        secs = _ses_seconds(r)
+        src, label = _ses_source(r)
+        meta = _ses_meta(r)
+        has_pos = r["end_pos"] is not None
+        units = max(0, (r["end_pos"] or 0) - (r["start_pos"] or 0)) if has_pos else 0
+        fgain = (max(0.0, r["end_fraction"] - r["start_fraction"])
+                 if r["end_fraction"] is not None and r["start_fraction"] is not None
+                 else (units / pages if pages else None))
+        timed = secs >= 180
+        tot_s += secs
+        units_all += units
+        day = (r["started_at"] or "")[:10]
+        e = days.setdefault(day, {"date": day, "minutes": 0.0, "pages": 0, "sessions": 0})
+        e["minutes"] += secs / 60; e["pages"] += units; e["sessions"] += 1 if timed else 0
+        if timed:
+            timed_s += secs; timed_units += units
+            if fgain is not None:
+                timed_frac += fgain; frac_s += secs
+            try:
+                clock[datetime.fromisoformat(r["started_at"]).hour] += secs / 60
+            except ValueError:
+                pass
+            so = sources.setdefault(label, {"source": src, "label": label, "sessions": 0, "minutes": 0.0})
+            so["sessions"] += 1; so["minutes"] += secs / 60
+        for c in meta.get("chapters") or []:
+            ch = chapters.setdefault(c["title"], {"title": c["title"], "seconds": 0,
+                                                  "pages_turned": 0, "sessions": 0})
+            ch["seconds"] += c.get("seconds") or 0
+            ch["pages_turned"] += c.get("pages_turned") or 0
+            ch["sessions"] += 1
+        sessions.append({
+            "id": r["id"], "started_at": r["started_at"], "ended_at": r["ended_at"],
+            "minutes": round(secs / 60), "seconds": round(secs),
+            "wall_minutes": round(_wall_seconds(r) / 60),
+            "from": r["start_pos"] or 0, "to": r["end_pos"] if has_pos else (r["start_pos"] or 0),
+            "pages": units if has_pos else None,
+            "start_fraction": r["start_fraction"], "end_fraction": r["end_fraction"],
+            "pages_turned": r["pages_turned"], "source": src, "source_label": label,
+            "checkpoint": not timed, "start_chapter": meta.get("start_chapter"),
+            "end_chapter": meta.get("end_chapter"), "chapters": meta.get("chapters") or []})
+    sessions.reverse()                      # newest first, like the reading log
+    progress = (st["progress"] or 0) if st else 0
+    last_frac = next((s["end_fraction"] for s in sessions if s["end_fraction"] is not None), None)
+    fraction = (min(1.0, progress / pages) if pages else last_frac) if st else None
+    if st and st["state"] == "finished":
+        fraction = 1.0
+    pph = round(timed_units / (timed_s / 3600), 1) if pages and timed_s >= 900 and timed_units else None
+    pct_ph = round(100 * timed_frac / (frac_s / 3600), 1) if frac_s >= 900 and timed_frac else None
+    forecast = None
+    if st and st["state"] == "reading":
+        if paced.get("finish_days"):
+            forecast = {"days": paced["finish_days"], "per_day": paced.get("pace"), "unit": "pages"}
+        elif fraction is not None and fraction < 1:
+            # no page count: the same three-week window, in fractions of the book
+            cut = (datetime.now() - timedelta(days=PACE_DAYS)).isoformat()
+            recent_rows = [s for s in sessions if s["started_at"] >= cut
+                           and s["start_fraction"] is not None and s["end_fraction"] is not None]
+            gained = sum(max(0, s["end_fraction"] - s["start_fraction"]) for s in recent_rows)
+            if gained > 0:
+                span = max(1, (datetime.now() - datetime.fromisoformat(
+                    min(s["started_at"] for s in recent_rows))).days + 1)
+                per_day = gained / span
+                forecast = {"days": max(1, round((1 - fraction) / per_day)),
+                            "per_day": round(per_day * 100, 1), "unit": "pct"}
+        if forecast:
+            forecast["date"] = (date.today() + timedelta(days=forecast["days"])).isoformat()
+            left_h = None
+            if pph and pages:
+                left_h = max(0, pages - progress) / pph
+            elif pct_ph and fraction is not None:
+                left_h = (1 - fraction) * 100 / pct_ph
+            forecast["hours_left"] = round(left_h, 1) if left_h is not None else None
+    timed_list = [s for s in sessions if not s["checkpoint"]]
+    try:
+        toc = (json.loads(b["details"] or "{}").get("toc")) or []
+    except ValueError:
+        toc = []
+    ch_rows = []
+    for c in chapters.values():
+        c["minutes"] = round(c["seconds"] / 60, 1)
+        c["per_hour"] = round(c["pages_turned"] / (c["seconds"] / 3600), 1) if c["seconds"] >= 60 else None
+        ch_rows.append(c)
+    return {
+        "book": {"id": b["id"], "title": b["title"], "author": b["author"], "cover": b["cover"],
+                 "pages": pages, "chapters": b["chapters"] if "chapters" in b.keys() else None,
+                 "toc_count": len(toc)},
+        "tracked": bool(st),
+        "state": {"state": st["state"], "progress": progress, "mode": st["mode"],
+                  "started_at": st["started_at"], "finished_at": st["finished_at"],
+                  "fraction": round(fraction, 4) if fraction is not None else None} if st else None,
+        "totals": {"minutes": round(tot_s / 60), "sessions": len(timed_list),
+                   "checkpoints": len(sessions) - len(timed_list),
+                   "days": len([d for d in days.values() if d["minutes"] >= 1 or d["pages"]]),
+                   "pages": units_all,
+                   "avg_minutes": round(timed_s / 60 / len(timed_list)) if timed_list else None,
+                   "longest_minutes": max((s["minutes"] for s in timed_list), default=None),
+                   "first_at": rows[0]["started_at"] if rows else None,
+                   "last_at": sessions[0]["ended_at"] if sessions else None},
+        "pace": {"pages_per_hour": pph, "pct_per_hour": pct_ph,
+                 "unit": "pages" if pph else ("pct" if pct_ph else None),
+                 "per_day": paced.get("pace")},
+        "forecast": forecast,
+        "sessions": sessions,
+        "days": sorted(({**d, "minutes": round(d["minutes"], 1)} for d in days.values()),
+                       key=lambda d: d["date"]),
+        "clock": [round(x) for x in clock],
+        "chapters": ch_rows,
+        "sources": sorted(({**v, "minutes": round(v["minutes"])} for v in sources.values()),
+                          key=lambda v: -v["minutes"]),
+        "live": live, "recent_folio": recent,
+    }
 
 
 # ---------------------------------------------------------------- search + add
@@ -6684,7 +7378,20 @@ def startup():
                      "CREATE INDEX IF NOT EXISTS idx_watches_time ON watches(watched_at)",
                      "CREATE INDEX IF NOT EXISTS idx_watches_show ON watches(show_id, season, number)",
                      "CREATE INDEX IF NOT EXISTS idx_shows_imdb ON shows(imdb_id)",
-                     "CREATE INDEX IF NOT EXISTS idx_movies_imdb ON movies(imdb_id)"):
+                     "CREATE INDEX IF NOT EXISTS idx_movies_imdb ON movies(imdb_id)",
+                     # Folio sessions (and where any session came from)
+                     "ALTER TABLE reading_sessions ADD COLUMN client_id TEXT",
+                     "ALTER TABLE reading_sessions ADD COLUMN device_id INTEGER",
+                     "ALTER TABLE reading_sessions ADD COLUMN source TEXT",
+                     "ALTER TABLE reading_sessions ADD COLUMN active_seconds INTEGER",
+                     "ALTER TABLE reading_sessions ADD COLUMN pages_turned INTEGER",
+                     "ALTER TABLE reading_sessions ADD COLUMN start_fraction REAL",
+                     "ALTER TABLE reading_sessions ADD COLUMN end_fraction REAL",
+                     "ALTER TABLE reading_sessions ADD COLUMN meta TEXT",
+                     # SQLite can't ADD a UNIQUE column; a unique index is the same
+                     # guarantee, and NULLs (every pre-Folio row) don't collide
+                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_rsessions_client ON reading_sessions(client_id)",
+                     "CREATE INDEX IF NOT EXISTS idx_rsessions_item ON reading_sessions(user_id, kind, item_id)"):
             try:
                 con.execute(stmt)
             except sqlite3.OperationalError:
