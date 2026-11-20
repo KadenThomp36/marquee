@@ -256,6 +256,9 @@ struct BookRequestControl: View {
 
     @State private var picking = false
     @State private var managing = false
+    /// Calibre already has it (it came in some other way); "Request another copy" overrides.
+    @State private var inCalibre: CalibreCopy?
+    @State private var anyway = false
 
     private var enabled: Bool { session.bookRequestConfig?.isEnabled == true }
     private var isActive: Bool { request?.phase.isActive == true }
@@ -266,8 +269,18 @@ struct BookRequestControl: View {
         Group {
             if enabled, loaded {
                 VStack(alignment: .leading, spacing: 7) {
-                    if let request, request.phase != .cancelled {
+                    if let request, request.phase != .cancelled, !(request.phase == .failed && inCalibre != nil && !anyway) {
                         status(request)
+                    } else if inCalibre != nil, !anyway {
+                        RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready)
+                            .accessibilityLabel("Already in Calibre")
+                        HStack(spacing: 12) {
+                            Text("Get it from the Palma's Calibre tab.")
+                                .font(.mqCaption).foregroundStyle(Color.mqInkMuted)
+                            Button("Request another copy") { anyway = true }
+                                .font(MarqueeFont.body(12, .bold, relativeTo: .caption))
+                                .foregroundStyle(Color.mqBrass)
+                        }
                     } else {
                         Button { confirming = true } label: {
                             if busy {
@@ -398,6 +411,7 @@ struct BookRequestControl: View {
         if let list = try? await client.get("book-requests", query: ["book_id": String(bookID)],
                                             as: BookRequestList.self) {
             request = list.requests?.first
+            inCalibre = list.inCalibre
         }
         loaded = true
     }
@@ -597,6 +611,8 @@ struct BookRequestsScreen: View {
                 if let existing {
                     RequestStatusPill(label: existing.phase.label, symbol: existing.phase.symbol,
                                       tone: existing.phase.tone, compact: true)
+                } else if book.inCalibre != nil {
+                    RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready, compact: true)
                 } else if creating == book.id {
                     ProgressView().controlSize(.small).tint(Color.mqBrass)
                 } else {

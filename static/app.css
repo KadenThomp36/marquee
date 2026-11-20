@@ -2878,3 +2878,8 @@ body.recap-open,html:has(body.recap-open){overflow:hidden}
 .rq-live-acts small{color:var(--mut);margin-left:auto}
 .rq-live-msg{color:var(--ink-2);min-width:0}
 .rq-live-t em+.rq-live-msg{margin-left:2px}
+.brq-tag.ok{color:#5fbf7f;border-color:rgba(95,191,127,.45);background:rgba(95,191,127,.1)}
+.toggle-row .cal-admin{flex-wrap:wrap;flex:0 1 380px;justify-content:flex-end}
+.cal-admin input{flex:1 1 150px}
+.cal-admin #caluser,.cal-admin #calpw{flex:1 1 110px}
+.brq-btn.on.ok{border-color:rgba(95,191,127,.45);background:rgba(95,191,127,.08)}

@@ -2,7 +2,7 @@
 
 ## Unreleased — book requests, series and authors
 
-Needs web build `20261120f`.
+Needs web build `20261120g`.
 
 - **Book requests.** Ask for an ebook and the server finds a copy through Shelfmark,
   downloads it and files it into Calibre, where the Palma's Calibre tab can Get it.

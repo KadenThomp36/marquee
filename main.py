@@ -16,7 +16,9 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import urllib.parse
 import zipfile
+import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
@@ -40,7 +42,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120f"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120g"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -8262,6 +8264,94 @@ def _sm_queue(con, req, rel, base):
             message="Queued", stalled_since=None, lost_since=None)
 
 
+# ---- what's already in Calibre ----------------------------------------------------
+# Calibre-Web's OPDS catalogue, read with a view-only account (`calibre_url`,
+# `calibre_user`, `calibre_password` in settings, all admin-set), so a book that came
+# in some other way (the Palma, a manual import) shows "In Calibre" instead of offering
+# a request. Calibre-Web-Automated trusts each file's own metadata, so titles can
+# arrive mangled (author and title swapped); the match is on title and author together.
+
+_CAL_TTL = 300
+_cal_cache = {}
+_ATOM = "{http://www.w3.org/2005/Atom}"
+
+
+def calibre_cfg(con=None):
+    def read(c):
+        url = (setting(c, "calibre_url") or "").rstrip("/")
+        return (url, setting(c, "calibre_user") or "", setting(c, "calibre_password") or "") if url else None
+    if con is not None:
+        return read(con)
+    with db() as c:
+        return read(c)
+
+
+def _calibre_search(query, cfg):
+    key = (cfg[0], query.lower())
+    hit = _cal_cache.get(key)
+    if hit and time.time() - hit[0] < _CAL_TTL:
+        return hit[1]
+    url, user, pw = cfg
+    r = httpx.get(f"{url}/opds/search/{urllib.parse.quote(query, safe='')}",
+                  auth=(user, pw) if user else None, timeout=10)
+    r.raise_for_status()
+    out = []
+    for e in ET.fromstring(r.content).iter(_ATOM + "entry"):
+        title = (e.findtext(_ATOM + "title") or "").strip()
+        authors = [(a.findtext(_ATOM + "name") or "").strip() for a in e.findall(_ATOM + "author")]
+        cid = None
+        for ln in e.findall(_ATOM + "link"):
+            m = re.search(r"/opds/(?:download|cover|thumb)/(\d+)", ln.get("href") or "")
+            if m:
+                cid = int(m.group(1))
+                break
+        out.append({"id": cid, "title": title, "authors": [a for a in authors if a]})
+    _cal_cache[key] = (time.time(), out)
+    return out
+
+
+def calibre_match(title, author, cfg=None):
+    """The Calibre copy of a book, or None. All of the book's main-title words and the
+    author's surname have to turn up in the entry's title and authors put together."""
+    cfg = cfg or calibre_cfg()
+    want = _sm_key_words(title or "")
+    if not cfg or not want:
+        return None
+    first = (author or "").split(",")[0].strip()
+    surname = (_sm_words(first) or [""])[-1]
+    # a subtitle with real words names a particular book: "Dungeon Crawler Carl: The Gate
+    # of the Feral Gods" is book 4, not the first one, whose title also starts that way
+    sub = [w for w in set(_sm_words(title)) - set(_sm_words(sm_main_title(title))) - _SM_STOP - _SM_JARGON
+           if len(w) > 2 and not w.isdigit()]
+    # by title first; then by the author, for copies whose metadata came in mangled
+    queries = [sm_main_title(title)] + ([surname] if surname and len(surname) > 2 else [])
+    entries = []
+    for i, q in enumerate(queries):
+        try:
+            found = _calibre_search(q, cfg)
+        except (httpx.HTTPError, ET.ParseError) as e:
+            log.info("calibre lookup failed: %s", e)
+            return None
+        hit = _calibre_pick(found, want, surname, first, sub)
+        if hit:
+            return hit
+    return None
+
+
+def _calibre_pick(entries, want, surname, first, sub=()):
+    for en in entries:
+        words = set(_sm_words(en["title"] + " " + " ".join(en["authors"])))
+        if sub and sum(1 for w in sub if w in words) < 0.6 * len(sub):
+            continue
+        if all(w in words for w in want) and (not surname or surname in words):
+            # not a different book that merely contains the title ("Dune Messiah")
+            extra = set(_sm_words(sm_main_title(en["title"]))) - set(want) - _SM_STOP \
+                - set(_sm_words(first)) - _SM_JARGON
+            if len([w for w in extra if len(w) > 2 and not w.isdigit()]) <= 1:
+                return {"id": en["id"], "title": en["title"], "authors": en["authors"]}
+    return None
+
+
 _sm_finding = set()
 _sm_lock = threading.Lock()
 
@@ -8445,9 +8535,12 @@ def book_requests_search(q: str, user=Depends(current_user)):
         return {"results": [], "unavailable": True}
     with db() as con:
         live = {r["provider_id"]: r for r in _sm_list(con, "r.state NOT IN ('cancelled','failed')")}
-    for b in results:
+    cfg = calibre_cfg()
+    for i, b in enumerate(results):
         r = live.get(b["provider_id"])
         b["request"] = {"id": r["id"], "state": r["state"]} if r else None
+        # the first dozen are worth a look in Calibre (cached; the LAN answers fast)
+        b["in_calibre"] = calibre_match(b["title"], ", ".join(b["authors"]), cfg) if cfg and i < 12 and not r else None
     return {"results": results}
 
 
@@ -8517,7 +8610,11 @@ def book_requests_list(book_id: int = 0, user=Depends(current_user)):
             if not rows and b:      # requested from search rather than from this page
                 key = _book_key(b["title"] or "")
                 rows = [r for r in _sm_list(con, "r.state!='cancelled'") if _book_key(r["title"]) == key]
-            return {"requests": [_sm_row(r, user["id"]) for r in rows[:1]], "enabled": bool(shelfmark_url())}
+            out = {"requests": [_sm_row(r, user["id"]) for r in rows[:1]], "enabled": bool(shelfmark_url())}
+            live = rows and rows[0]["state"] not in ("cancelled", "failed")
+            if b and not live:
+                out["in_calibre"] = calibre_match(b["title"], b["author"])
+            return out
         rows = _sm_list(con, "r.state!='cancelled' OR r.updated_at>=?",
                         ((datetime.now() - timedelta(days=1)).isoformat(),))
         return {"requests": [_sm_row(r, user["id"]) for r in rows[:60]], "enabled": bool(shelfmark_url())}
@@ -8592,7 +8689,34 @@ async def book_request_pick(rid: int, request: Request, user=Depends(current_use
 @app.get("/api/admin/shelfmark")
 def admin_shelfmark_get(_=Depends(admin_user)):
     with db() as con:
-        return {"url": shelfmark_url(con)}
+        cal = calibre_cfg(con)
+        return {"url": shelfmark_url(con), "calibre_url": cal[0] if cal else None,
+                "calibre_user": cal[1] if cal else None, "calibre_password_set": bool(cal and cal[2])}
+
+
+@app.post("/api/admin/calibre")
+async def admin_calibre_set(request: Request, _=Depends(admin_user)):
+    """Calibre-Web's address and a view-only login, for "already in Calibre"."""
+    body = await request.json()
+    url = (body.get("url") or "").strip().rstrip("/")
+    if url and not re.match(r"^https?://", url):
+        raise HTTPException(400, "the URL needs to start with http:// or https://")
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('calibre_url',?)", (url,))
+        if "user" in body:
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('calibre_user',?)", ((body.get("user") or "").strip(),))
+        if body.get("password"):
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('calibre_password',?)", (body["password"],))
+        cfg = calibre_cfg(con)
+    ok = None
+    if cfg:
+        _cal_cache.clear()
+        try:
+            await run_in_threadpool(_calibre_search, "a", cfg)
+            ok = True
+        except Exception:  # noqa: BLE001
+            ok = False
+    return {"url": url or None, "reachable": ok}
 
 
 @app.post("/api/admin/shelfmark")

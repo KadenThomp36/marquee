@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120f";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120g";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -6419,6 +6419,14 @@ async function mountBookRequest(slot, bookId) {
   let d; try { d = await api(`/book-requests?book_id=${bookId}`, { quiet: true }); } catch { return; }
   if (!slot.isConnected) return;
   const r = (d.requests || [])[0];
+  if ((!r || ["cancelled", "failed"].includes(r.state)) && d.in_calibre && !slot.dataset.anyway) {
+    // already in the library (it came in some other way): nothing to request
+    slot.innerHTML = `<span class="chip-btn brq-btn on ok" title="${esc(d.in_calibre.title || "")}">${I.check}<span>In Calibre</span></span>
+      <span class="rq-live ok"><span class="rq-live-t"><span class="brq-dot"></span><span class="rq-live-msg">Already in the library. Get it from the Palma's Calibre tab.</span></span>
+        <span class="rq-live-acts"><button id="brqanyway">Request another copy</button></span></span>`;
+    $("#brqanyway", slot).onclick = () => { slot.dataset.anyway = "1"; mountBookRequest(slot, bookId); };
+    return;
+  }
   if (!r || r.state === "cancelled") {
     slot.innerHTML = `<button class="chip-btn brq-btn" id="brqgo">${BRQ_ICO}<span>Request ebook</span></button>`;
     $("#brqgo", slot).onclick = async e => {
@@ -6506,6 +6514,7 @@ routes.requests = async () => {
         <img src="${POSTER(b.cover)}" alt="" loading="lazy">
         <div class="brq-hit-t"><b>${esc(b.title)}</b><span>${esc((b.authors || []).join(", "))}${b.year ? ` · ${b.year}` : ""}</span></div>
         ${b.request ? `<span class="brq-tag">${esc((BRQ_STATE[b.request.state] || [, b.request.state])[1])}</span>`
+          : b.in_calibre ? `<span class="brq-tag ok">In Calibre</span>`
           : `<button class="btn sm" data-hit="${i}">${BRQ_ICO} Request</button>`}</div>`).join("")}</div>`
       : `<div class="empty">No books found for “${esc(q)}”.</div>`;
     res.onclick = async ev => {
@@ -6606,6 +6615,14 @@ routes.settings = async () => {
         <span class="hint">The address of Shelfmark on your network, for book requests. Marquee talks to it from the server, so it never needs to be public.</span></span>
         <span class="sm-admin-pick"><input id="smurl" placeholder="http://…:8084" value="${esc(smc.url || "")}" autocapitalize="none" spellcheck="false">
           <button class="btn" id="smsave">Save</button></span>
+      </div>
+      <div class="toggle-row sm-admin"><span>Calibre library
+        <span class="hint">Calibre-Web's address and a view-only login, so books already in the library show as "In Calibre" instead of offering a request.${smc.calibre_password_set ? " A password is saved." : ""}</span></span>
+        <span class="sm-admin-pick cal-admin">
+          <input id="calurl" placeholder="http://…:8083" value="${esc(smc.calibre_url || "")}" autocapitalize="none" spellcheck="false">
+          <input id="caluser" placeholder="user" value="${esc(smc.calibre_user || "")}" autocapitalize="none" spellcheck="false">
+          <input id="calpw" type="password" placeholder="${smc.calibre_password_set ? "unchanged" : "password"}" autocomplete="new-password">
+          <button class="btn" id="calsave">Save</button></span>
       </div>
       <div class="toggle-row ry-admin"><span>Year in Review goes live
         <span class="hint">Everyone's recap opens on this day and pops up once the next time they visit. It keeps counting until New Year.</span></span>
@@ -6851,6 +6868,17 @@ routes.settings = async () => {
     } catch {}
   };
   if ($("#rcmonth")) { $("#rcmonth").onchange = saveRelease; $("#rcday").onchange = saveRelease; }
+  if ($("#calsave")) $("#calsave").onclick = async () => {
+    const b = $("#calsave"); b.disabled = true;
+    const body = { url: $("#calurl").value.trim(), user: $("#caluser").value.trim() };
+    if ($("#calpw").value) body.password = $("#calpw").value;
+    try {
+      const r = await api("/admin/calibre", { body });
+      $("#calpw").value = "";
+      toast(!r.url ? "Calibre check turned off" : r.reachable ? "Saved. Calibre answered." : "Saved, but Calibre didn't answer with that login");
+    } catch {}
+    b.disabled = false;
+  };
   if ($("#smsave")) $("#smsave").onclick = async () => {
     const b = $("#smsave"); b.disabled = true;
     try {

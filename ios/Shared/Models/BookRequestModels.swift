@@ -157,6 +157,19 @@ public struct BookRequest: Codable, Sendable, Hashable, Identifiable {
 public struct BookRequestList: Codable, Sendable, Equatable {
     public var enabled: Bool?
     public var requests: [BookRequest]?
+    /// For one book: Calibre's own copy, when it's already in the library.
+    public var inCalibre: CalibreCopy?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, requests
+        case inCalibre = "in_calibre"
+    }
+}
+
+/// A book Calibre already has (matched on title and author).
+public struct CalibreCopy: Codable, Sendable, Hashable {
+    public var id: Int?
+    public var title: String?
 }
 
 /// The request a search result already has, if any.
@@ -176,6 +189,7 @@ public struct ShelfmarkBook: Codable, Sendable, Hashable, Identifiable {
     /// An absolute https URL, or nil.
     public var cover: String?
     public var request: BookRequestRef?
+    public var inCalibre: CalibreCopy?
 
     public var id: String { "\(provider ?? "")/\(providerID)" }
     public var displayTitle: String { title ?? "Untitled" }
@@ -184,6 +198,7 @@ public struct ShelfmarkBook: Codable, Sendable, Hashable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case provider, title, authors, year, cover, request
         case providerID = "provider_id"
+        case inCalibre = "in_calibre"
     }
 }
 
