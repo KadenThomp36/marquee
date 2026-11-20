@@ -16,7 +16,7 @@ import dev.kadenthompson.marquee.nav.LocalNav
 object Screens {
     @Composable fun Next() = dev.kadenthompson.marquee.features.next.NextScreen()
     @Composable fun Upcoming() = Todo("Upcoming")
-    @Composable fun Library(r: LibraryHome) = Todo("Library")
+    @Composable fun Library(r: LibraryHome) = dev.kadenthompson.marquee.features.library.LibraryScreen(r)
     @Composable fun Search(query: String?) = Todo("Search")
     @Composable fun You() = Todo("You")
     @Composable fun Show(id: Int) = dev.kadenthompson.marquee.features.show.ShowScreen(id)
@@ -39,7 +39,7 @@ object Screens {
     @Composable fun Settings() = Todo("Settings", true)
     @Composable fun Folio() = Todo("Folio", true)
     @Composable fun Devices() = Todo("Devices", true)
-    @Composable fun ShowsWatchlist() = Todo("Watchlist", true)
+    @Composable fun ShowsWatchlist() = dev.kadenthompson.marquee.features.library.ShowsWatchlistScreen()
     @Composable fun RequestStates() = Todo("Request states", true)
 
     @Composable
