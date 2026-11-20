@@ -1312,7 +1312,7 @@ def profile_payload(con, u, viewer_id):
     is_me = u["id"] == viewer_id
     cy = datetime.now().year
     recap_soon = False
-    if is_me and not recap_year_unlocked(cy):
+    if is_me and not recap_year_unlocked(cy, con):
         recap_soon = bool(
             con.execute("SELECT 1 FROM watches WHERE user_id=? AND substr(watched_at,1,4)=? LIMIT 1",
                         (u["id"], str(cy))).fetchone()
@@ -1324,7 +1324,8 @@ def profile_payload(con, u, viewer_id):
             "headline": headline_counts(con, u["id"], user_feats(u)),
             "favorites": get_favorites(con, u["id"]),
             "recap_years": available_recap_years(con, u["id"]),
-            "recap_soon": recap_soon, "recap_year": cy}
+            "recap_soon": recap_soon, "recap_year": cy,
+            "recap_release": recap_release_at(cy, con).date().isoformat()}
 
 
 def resolve_member(con, username):
@@ -6842,6 +6843,118 @@ def recap_reading(con, uid, year):
     return out
 
 
+RECAP_RELEASE_DEFAULT = "12-26"
+RECAP_AUTOSHOW_UNTIL = (2, 1)      # (month, day) of the following year
+WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def recap_rhythm(con, uid, lo, hi):
+    """When the year's watching happened: hour of day, day of week, how many days had
+    any, and the longest run of consecutive days. Bulk marks (a season ticked off at
+    once, an import) carry no real time of day, so they're left out."""
+    rows = con.execute(f"""SELECT watched_at FROM watches WHERE user_id=? AND watched_at>=? AND watched_at<=?
+          AND watched_at NOT IN (SELECT watched_at FROM watches WHERE user_id=?
+                                 GROUP BY watched_at HAVING COUNT(*)>=?)
+        UNION ALL SELECT watched_at FROM movie_states WHERE user_id=? AND state='watched'
+          AND watched_at>=? AND watched_at<=?""",
+        (uid, lo, hi, uid, BULK_MARK, uid, lo, hi)).fetchall()
+    hours, weekdays, days = [0] * 24, [0] * 7, set()
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r["watched_at"])
+        except (ValueError, TypeError):
+            continue
+        hours[t.hour] += 1
+        weekdays[t.weekday()] += 1
+        days.add(t.date())
+    streak, run, prev, run_start = None, 0, None, None
+    for d in sorted(days):
+        if prev and (d - prev).days == 1:
+            run += 1
+        else:
+            run, run_start = 1, d
+        if not streak or run > streak["days"]:
+            streak = {"days": run, "start": run_start.isoformat(), "end": d.isoformat()}
+        prev = d
+    total = sum(hours)
+    return {
+        "hours": hours, "weekdays": weekdays, "days_watched": len(days),
+        "streak": streak if streak and streak["days"] > 1 else None,
+        "peak_hour": max(range(24), key=lambda h: hours[h]) if total else None,
+        "peak_weekday": WEEKDAY_NAMES[max(range(7), key=lambda i: weekdays[i])] if total else None,
+        "_total": total,
+    }
+
+
+def recap_persona(d, rhythm):
+    """One playful label for the year, from the strongest signal in it. Thresholds are
+    deliberately generous: everyone gets one, and the line under it says why."""
+    total = rhythm["_total"]
+    hours, weekdays = rhythm["hours"], rhythm["weekdays"]
+    R = d.get("reading") or {}
+    watch_min = d["minutes"] or 0
+    cands = []
+    if R.get("minutes") and R["minutes"] > watch_min:
+        cands.append((3.0, "bookworm", "The Bookworm", "More hours with a book than with the telly."))
+    if total >= 10:
+        late = sum(hours[h] for h in (22, 23, 0, 1, 2, 3)) / total
+        early = sum(hours[h] for h in range(5, 11)) / total
+        weekend = (weekdays[5] + weekdays[6]) / total
+        if late >= 0.35:
+            cands.append((late * 3, "owl", "The Night Owl", f"{round(late * 100)}% of it after 10 pm."))
+        if early >= 0.3:
+            cands.append((early * 3, "lark", "The Early Bird", f"{round(early * 100)}% of it before 11 am."))
+        if weekend >= 0.5:
+            cands.append((weekend * 2.4, "weekender", "The Weekender",
+                          f"{round(weekend * 100)}% of it on Saturdays and Sundays."))
+    if watch_min and d["movie_minutes"] / watch_min >= 0.4:
+        share = d["movie_minutes"] / watch_min
+        cands.append((share * 2.6, "cinephile", "The Cinephile", f"Films were {round(share * 100)}% of the hours."))
+    binge = d.get("binge") or {}
+    if binge.get("count", 0) >= 6:
+        cands.append((1 + binge["count"] / 10, "binger", "The Binger",
+                      f"{binge['count']} episodes in one day{(' of ' + binge['top']) if binge.get('top') else ''}."))
+    top = (d.get("top_shows") or [None])[0]
+    if top and d["tv_minutes"] and top["mins"] / d["tv_minutes"] >= 0.45:
+        share = top["mins"] / d["tv_minutes"]
+        cands.append((share * 2.2, "devotee", "The Devotee", f"{round(share * 100)}% of your TV time went to {top['title']}."))
+    if (d.get("new_shows") or 0) >= 6:
+        cands.append((1 + d["new_shows"] / 12, "explorer", "The Explorer", f"{d['new_shows']} shows you'd never started before."))
+    if not cands:
+        if not watch_min and not R:
+            return None
+        ph = rhythm.get("peak_hour")
+        line = f"Most often around {_hour_label(ph)}." if ph is not None else "Steady, all year."
+        cands.append((0, "regular", "The Regular", line))
+    score, key, title, line = max(cands)
+    return {"key": key, "title": title, "line": line}
+
+
+def _hour_label(h):
+    if h is None:
+        return None
+    return "midnight" if h == 0 else "noon" if h == 12 else f"{h % 12} {'am' if h < 12 else 'pm'}"
+
+
+def recap_household(con, uid, lo, hi):
+    """Where this member's hours sit in the household, when there's a household."""
+    totals = []
+    for u in con.execute("SELECT id FROM users"):
+        m = con.execute("""SELECT COALESCE(SUM(COALESCE(e.runtime,s.avg_runtime,30)),0) m
+            FROM watches w JOIN shows s ON s.id=w.show_id
+            LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
+            WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=?""", (u["id"], lo, hi)).fetchone()["m"]
+        m += con.execute("""SELECT COALESCE(SUM(COALESCE(m.runtime,110)),0) m FROM movie_states ms
+            JOIN movies m ON m.id=ms.movie_id WHERE ms.user_id=? AND ms.state='watched'
+            AND ms.watched_at>=? AND ms.watched_at<=?""", (u["id"], lo, hi)).fetchone()["m"]
+        if m:
+            totals.append((m, u["id"]))
+    if len(totals) < 2 or uid not in {i for _, i in totals}:
+        return None
+    totals.sort(reverse=True)
+    return {"rank": [i for _, i in totals].index(uid) + 1, "of": len(totals)}
+
+
 def compute_recap(con, uid, year):
     y = str(year)
     lo, hi = f"{y}-01-01", f"{y}-12-31T23:59:59.999999"
@@ -6853,13 +6966,13 @@ def compute_recap(con, uid, year):
         FROM movie_states ms JOIN movies m ON m.id=ms.movie_id
         WHERE ms.user_id=? AND ms.state='watched' AND ms.watched_at>=? AND ms.watched_at<=?""",
         (uid, lo, hi)).fetchone()
-    top_shows = con.execute("""SELECT s.title, s.poster, COUNT(*) eps,
+    top_shows = con.execute("""SELECT s.id, s.title, s.poster, COUNT(*) eps,
           SUM(COALESCE(e.runtime, s.avg_runtime, 30)) mins
         FROM watches w JOIN shows s ON s.id=w.show_id
         LEFT JOIN episodes e ON e.show_id=w.show_id AND e.season=w.season AND e.number=w.number
         WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=?
         GROUP BY s.id ORDER BY mins DESC LIMIT 5""", (uid, lo, hi)).fetchall()
-    top_movies = con.execute("""SELECT m.title, m.poster, ms.rating
+    top_movies = con.execute("""SELECT m.id, m.title, m.poster, ms.rating
         FROM movie_states ms JOIN movies m ON m.id=ms.movie_id
         WHERE ms.user_id=? AND ms.state='watched' AND ms.watched_at>=? AND ms.watched_at<=?
         ORDER BY ms.rating IS NULL, ms.rating DESC, ms.watched_at DESC LIMIT 5""",
@@ -6878,10 +6991,10 @@ def compute_recap(con, uid, year):
         if r["mo"]:
             months[int(r["mo"]) - 1] += r["c"]
     binge = biggest_binge(con, uid, lo, hi)
-    first = con.execute("""SELECT w.watched_at, s.title FROM watches w JOIN shows s ON s.id=w.show_id
+    first = con.execute("""SELECT w.watched_at, s.title, s.poster FROM watches w JOIN shows s ON s.id=w.show_id
         WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=? ORDER BY w.watched_at LIMIT 1""",
         (uid, lo, hi)).fetchone()
-    last = con.execute("""SELECT w.watched_at, s.title FROM watches w JOIN shows s ON s.id=w.show_id
+    last = con.execute("""SELECT w.watched_at, s.title, s.poster FROM watches w JOIN shows s ON s.id=w.show_id
         WHERE w.user_id=? AND w.watched_at>=? AND w.watched_at<=? ORDER BY w.watched_at DESC LIMIT 1""",
         (uid, lo, hi)).fetchone()
     new_shows = con.execute("""SELECT COUNT(*) c FROM (
@@ -6891,9 +7004,11 @@ def compute_recap(con, uid, year):
     busiest = max(range(12), key=lambda i: months[i]) if any(months) else None
     genres = sorted(({"name": k, "count": v} for k, v in gcount.items()), key=lambda x: -x["count"])[:5]
     reading = recap_reading(con, uid, year)
-    return {
+    rhythm = recap_rhythm(con, uid, lo, hi)
+    d = {
         "year": year,
         "has_data": (eps["c"] + mov["c"]) > 0 or bool(reading),
+        "final": datetime.now() >= datetime(year + 1, 1, 1),
         "reading": reading,
         "episodes": eps["c"], "movies": mov["c"],
         "minutes": eps["m"] + mov["m"], "tv_minutes": eps["m"], "movie_minutes": mov["m"],
@@ -6907,18 +7022,51 @@ def compute_recap(con, uid, year):
         "first_watch": dict(first) if first else None,
         "last_watch": dict(last) if last else None,
         "new_shows": new_shows,
+        "hours": rhythm["hours"], "weekdays": rhythm["weekdays"],
+        "peak_hour": rhythm["peak_hour"], "peak_weekday": rhythm["peak_weekday"],
+        "days_watched": rhythm["days_watched"], "streak": rhythm["streak"],
+        "household": recap_household(con, uid, lo, hi),
     }
+    d["persona"] = recap_persona(d, rhythm)
+    return d
 
 
-def recap_year_unlocked(year):
-    """A year's recap unlocks only once that year is over — any past year, or the current
-    year once it's December. (Keeps '2026 wrapped' from showing up in July.)"""
+def recap_release_md(con=None):
+    """The month and day each year's recap goes live, from the admin setting ("MM-DD").
+    Boxing Day by default: late enough that the year is nearly all in, early enough to
+    land in the quiet days between Christmas and New Year."""
+    raw = None
+    if con is not None:
+        raw = setting(con, "recap_release")
+    else:
+        with db() as c:
+            raw = setting(c, "recap_release")
+    try:
+        m, dd = (int(x) for x in (raw or RECAP_RELEASE_DEFAULT).split("-"))
+        date(2000, m, dd)
+        if m < 10:                 # it has to fall late in the year it reviews
+            raise ValueError
+        return m, dd
+    except (ValueError, TypeError):
+        m, dd = (int(x) for x in RECAP_RELEASE_DEFAULT.split("-"))
+        return m, dd
+
+
+def recap_release_at(year, con=None):
+    return datetime(year, *recap_release_md(con))
+
+
+def recap_year_unlocked(year, con=None):
+    """A year's recap opens on its release day (see recap_release_md) and stays open —
+    any past year, or the current one once the day has come. The numbers keep counting
+    until the year ends; `final` on the recap says when they've stopped."""
     now = datetime.now()
-    return year < now.year or (year == now.year and now.month == 12)
+    return year < now.year or (year == now.year and now >= recap_release_at(year, con))
 
 
-def available_recap_years(con, uid):
-    """Years this user actually watched something in that are also unlocked, newest first."""
+def available_recap_years(con, uid, preview=False):
+    """Years this user actually watched (or read) something in that are also unlocked,
+    newest first. An admin's preview counts the current year too."""
     years = set()
     for tbl, cond in (("watches", ""), ("movie_states", " AND state='watched'")):
         for r in con.execute(f"SELECT DISTINCT substr(watched_at,1,4) y FROM {tbl} "
@@ -6931,53 +7079,99 @@ def available_recap_years(con, uid):
             WHERE user_id=? AND state='finished' UNION SELECT substr(started_at,1,4) FROM
             reading_sessions WHERE user_id=? AND kind=?""", (uid, uid, kind)).fetchall()
         years.update(int(r["y"]) for r in rows if r["y"] and r["y"].isdigit())
-    return sorted((y for y in years if recap_year_unlocked(y)), reverse=True)
+    cy = datetime.now().year
+    return sorted((y for y in years if y <= cy and (recap_year_unlocked(y, con) or (preview and y == cy))),
+                  reverse=True)
 
 
 def recap_current_pending(con, uid):
-    """The current year's recap IF unlocked (December), has data, and not yet seen — the
-    one-time slideshow to auto-present. Otherwise None."""
-    cy = datetime.now().year
-    if not recap_year_unlocked(cy) or cy not in available_recap_years(con, uid):
-        return None
-    seen = con.execute("SELECT 1 FROM recap_seen WHERE user_id=? AND year=?", (uid, cy)).fetchone()
-    return None if seen else cy
+    """The recap to present once, by itself, the next time this member opens Marquee:
+    the newest released year they haven't seen, while it's still fresh — from release
+    day until the end of January. Someone who doesn't open the app until New Year's Day
+    still gets theirs. Otherwise None."""
+    now = datetime.now()
+    years = available_recap_years(con, uid)
+    for y in (now.year, now.year - 1):
+        if y not in years or not recap_year_unlocked(y, con):
+            continue
+        if now >= datetime(y + 1, *RECAP_AUTOSHOW_UNTIL):
+            continue
+        seen = con.execute("SELECT 1 FROM recap_seen WHERE user_id=? AND year=?", (uid, y)).fetchone()
+        return None if seen else y
+    return None
+
+
+def recap_schedule(con):
+    now = datetime.now()
+    this = recap_release_at(now.year, con)
+    nxt = this if now < this else recap_release_at(now.year + 1, con)
+    return {"release": this.date().isoformat(), "next_release": nxt.date().isoformat(),
+            "release_md": "%02d-%02d" % recap_release_md(con)}
 
 
 @app.get("/api/recap")
 def recap_index(user=Depends(current_user)):
     with db() as con:
         return {"years": available_recap_years(con, user["id"]),
-                "autoshow": recap_current_pending(con, user["id"])}
+                "autoshow": recap_current_pending(con, user["id"]), **recap_schedule(con)}
+
+
+def _recap_payload(con, uid, year, preview):
+    if not (recap_year_unlocked(year, con) or preview):
+        return {"year": year, "locked": True, "has_data": False, **recap_schedule(con),
+                "years": available_recap_years(con, uid)}
+    d = compute_recap(con, uid, year)
+    d["years"] = available_recap_years(con, uid, preview=preview)
+    if preview and not recap_year_unlocked(year, con):
+        d["preview"] = True
+    return d
 
 
 @app.get("/api/recap/{year}")
-def recap(year: int, user=Depends(current_user)):
-    if not recap_year_unlocked(year):
-        return {"year": year, "locked": True, "has_data": False}
+def recap(year: int, preview: int = 0, user=Depends(current_user)):
     with db() as con:
-        d = compute_recap(con, user["id"], year)
-        d["years"] = available_recap_years(con, user["id"])
-        return d
+        return _recap_payload(con, user["id"], year, bool(preview and user["is_admin"]))
 
 
 @app.post("/api/recap/{year}/seen")
 def recap_seen_mark(year: int, user=Depends(current_user)):
     with db() as con:
-        con.execute("INSERT OR IGNORE INTO recap_seen(user_id,year,seen_at) VALUES(?,?,?)",
-                    (user["id"], year, datetime.now().isoformat()))
+        if recap_year_unlocked(year, con):          # an admin's preview never counts as seen
+            con.execute("INSERT OR IGNORE INTO recap_seen(user_id,year,seen_at) VALUES(?,?,?)",
+                        (user["id"], year, datetime.now().isoformat()))
     return {"ok": True}
 
 
 @app.get("/api/profile/{username}/recap/{year}")
 def recap_public(username: str, year: int, user=Depends(current_user)):
-    if not recap_year_unlocked(year):
-        return {"year": year, "locked": True, "has_data": False}
     with db() as con:
         u = resolve_member(con, username)
-        d = compute_recap(con, u["id"], year)
-        d["years"] = available_recap_years(con, u["id"])
+        d = _recap_payload(con, u["id"], year, False)
+        if not d.get("locked"):
+            d.pop("household", None)                # your rank is yours to see
         return d
+
+
+@app.get("/api/admin/recap")
+def admin_recap_get(_=Depends(admin_user)):
+    with db() as con:
+        return recap_schedule(con)
+
+
+@app.post("/api/admin/recap")
+async def admin_recap_set(request: Request, _=Depends(admin_user)):
+    body = await request.json()
+    md = str(body.get("release_md") or "").strip()
+    try:
+        m, dd = (int(x) for x in md.split("-"))
+        date(2000, m, dd)
+        if m < 10:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(400, "pick a day between October 1 and December 31")
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('recap_release',?)", ("%02d-%02d" % (m, dd),))
+        return recap_schedule(con)
 
 
 # ---------------------------------------------------------------- history
