@@ -8,6 +8,7 @@ import gzip
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -39,7 +40,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120d"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120e"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -159,6 +160,14 @@ CREATE INDEX IF NOT EXISTS idx_folio_unmatched_ident ON folio_unmatched(user_id,
 CREATE TABLE IF NOT EXISTS folio_identity_state(
   user_id INTEGER, identity_key TEXT, status TEXT, identity TEXT, attempts INTEGER DEFAULT 0,
   next_attempt_at TEXT, last_error TEXT, updated_at TEXT, PRIMARY KEY(user_id, identity_key));
+CREATE TABLE IF NOT EXISTS book_requests(
+  id INTEGER PRIMARY KEY, user_id INTEGER, book_id INTEGER, provider TEXT, provider_id TEXT,
+  title TEXT, author TEXT, year TEXT, cover TEXT, state TEXT, message TEXT,
+  progress REAL DEFAULT 0, task_id TEXT, release TEXT, tried TEXT DEFAULT '[]', candidates TEXT,
+  attempts INTEGER DEFAULT 0, manual INTEGER DEFAULT 0, stalled_since TEXT, lost_since TEXT,
+  created_at TEXT, updated_at TEXT, finished_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_book_requests_state ON book_requests(state);
+CREATE INDEX IF NOT EXISTS idx_book_requests_work ON book_requests(provider_id);
 """
 
 
@@ -7987,6 +7996,570 @@ def request_config(user=Depends(current_user)):
     return {"enabled": bool(url and key), "url": url or None}
 
 
+# ---------------------------------------------------------------- book requests (Shelfmark)
+#
+# Shelfmark finds ebooks through Prowlarr, downloads them with the household's download
+# client and drops them into Calibre's ingest folder. Marquee talks to it server-side only
+# (it has no login of its own), behind Marquee's login, the way Overseerr requests work.
+# The URL is an admin setting (`shelfmark_url`), never in code.
+#
+# A request is a persisted job: find copies (Prowlarr fans out to every indexer, which
+# takes half a minute to two), rank them, queue the best, follow it to Calibre. When a
+# copy fails (stalled, a format Calibre can't import) it falls back to near-best copies,
+# up to three tries; after that the requester picks a copy from the list.
+
+SM_STATES_ACTIVE = ("finding", "downloading", "importing")
+SM_MAX_TRIES = 3
+SM_FALLBACK_WINDOW = 3.0          # only fall back to copies within this many points of the best
+SM_STALL_MINUTES = 12             # "Stalled" this long counts as a failed copy
+SM_DEAD_MINUTES = 3               # …or this long when it's stalled with no seeders at all
+SM_LOST_MINUTES = 3               # a queued copy Shelfmark no longer lists
+SM_TICK = 5
+
+_SM_STOP = {"the", "a", "an", "of", "and", "or", "in", "on", "to", "for", "with", "by", "at", "from", "de", "la", "le"}
+_SM_JARGON = {"epub", "mobi", "azw", "azw3", "pdf", "txt", "ebook", "ebooks", "book", "retail", "kindle", "edition",
+              "ed", "english", "eng", "true", "scan", "ocr", "fixed", "converted", "repack", "by", "novel",
+              "illustrated", "annotated", "unabridged", "version"}
+_SM_AUDIO_FMT = {"m4b", "mp3", "cbz", "cbr", "flac", "aac"}
+_SM_BUNDLE = re.compile(r"\b(collection|box ?set|boxed set|omnibus|complete series|books? \d+ ?(-|to) ?\d+|"
+                        r"\d+ (novels|editions|versions|books)|trilogy|series|pack)\b")
+
+
+def _sm_words(s):
+    return [w for w in re.split(r"[^\w]+|_", (s or "").lower()) if w]
+
+
+def sm_main_title(title):
+    """The title without its subtitle: "Frankenstein; or, The Modern Prometheus" -> "Frankenstein"."""
+    head = re.split(r"[:;(\[]|,\s*or\b|\s+-\s+", title or "", flags=re.I)[0].strip()
+    return head or (title or "")
+
+
+def _sm_key_words(s):
+    return [w for w in _sm_words(sm_main_title(s)) if w not in _SM_STOP and (len(w) > 1 or w.isdigit())]
+
+
+def sm_release_format(rel):
+    f = (rel.get("format") or "").lower()
+    if f:
+        return f
+    m = re.search(r"\b(epub|azw3|mobi|pdf|cbz|cbr|m4b|mp3)\b", (rel.get("title") or "").lower())
+    return m.group(1) if m else ""
+
+
+def sm_score_release(rel, title, authors):
+    """How well a release fits the book as an ebook, or None when it's clearly wrong (an
+    audiobook, a film, another book). Ported from Folio's scorer (Shelfmark.kt), which was
+    tuned on real Prowlarr results; Prowlarr's own order is by indexer, not relevance."""
+    t = (rel.get("title") or "").lower()
+    tw = set(_sm_words(t))
+    want = _sm_key_words(title)
+    if not want:
+        return None
+    hit = sum(1 for w in want if w in tw) / len(want)
+    if hit < 0.75:
+        return None
+    fmt = sm_release_format(rel)
+    if fmt in _SM_AUDIO_FMT:
+        return None
+    if re.search(r"audio ?book|\bunabridged\b|\bnarrated\b|\b(64|128|192|256)\s?kbps\b", t):
+        return None
+    size = int(rel.get("size_bytes") or 0)
+    if size > 80_000_000 or 0 < size <= 40_000:
+        return None
+    s = hit * 4
+    s += {"epub": 6.0, "azw3": 3.0, "mobi": 3.0, "pdf": 1.0, "": 1.5}.get(fmt, -2.0)
+    first = (authors or [None])[0]
+    surname = (_sm_words(first) or [None])[-1] if first else None
+    if surname:
+        s += 3.0 if surname in tw else -1.5
+    # omnibuses and packs aren't the book you asked for, unless you asked for one
+    if _SM_BUNDLE.search(t) and not _SM_BUNDLE.search((title or "").lower()):
+        s -= 4
+    # real words beyond the title and author usually mean another book ("Dune Messiah");
+    # release jargon and the scene group's tag don't count
+    bare = set(_sm_words(re.sub(r"-[a-z0-9]+\s*$", "", t)))
+    author_words = set(_sm_words(", ".join(authors or [])))
+    extra = [w for w in bare - set(want) - _SM_STOP - _SM_JARGON - author_words if len(w) > 2 and not w.isdigit()]
+    s -= min(len(extra), 8) * 2.0
+    if re.search(r"\b(summary|study guide|workbook|sparknotes)\b", t):
+        s -= 6
+    seeds = rel.get("seeders")
+    if seeds is None:
+        s += 2.0 if rel.get("protocol") == "usenet" else 0.0
+    elif int(seeds) == 0:
+        s -= 5
+    else:
+        s += min(math.log(int(seeds) + 1) / math.log(2), 5.0)
+    return s
+
+
+def sm_rank_releases(releases, title, authors):
+    """Acceptable releases, best first, as (score, release)."""
+    scored = [(sm_score_release(r, title, authors), r) for r in releases]
+    scored = [(s, r) for s, r in scored if s is not None]
+    scored.sort(key=lambda x: (-x[0], -int(x[1].get("seeders") or 0)))
+    return scored
+
+
+def sm_looks_like_ebook(rel):
+    """Loose filter for copies offered by hand: not a film, audiobook or comic, ebook-sized."""
+    t = (rel.get("title") or "").lower()
+    if sm_release_format(rel) in _SM_AUDIO_FMT:
+        return False
+    if re.search(r"audio ?book|\b(m4b|mp3|cbr|cbz|xvid|x264|h264|hevc|brrip|bluray|webrip|1080p|720p|480p)\b", t):
+        return False
+    size = int(rel.get("size_bytes") or 0)
+    return size == 0 or 20_000 <= size <= 80_000_000
+
+
+def sm_cover_url(rel_url):
+    """Shelfmark proxies covers as /api/covers/<key>?url=<base64 of the original>. Hand out
+    the original (Open Library's public cover) so clients never need to reach Shelfmark."""
+    if not rel_url:
+        return None
+    if rel_url.startswith("http"):
+        return rel_url
+    m = re.search(r"[?&]url=([^&]+)", rel_url)
+    if not m:
+        return None
+    try:
+        raw = m.group(1)
+        out = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode()
+        return out if out.startswith("https://") else None
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def shelfmark_url(con=None):
+    if con is None:
+        with db() as c:
+            return (setting(c, "shelfmark_url") or "").rstrip("/") or None
+    return (setting(con, "shelfmark_url") or "").rstrip("/") or None
+
+
+def _sm_json(text):
+    # Shelfmark's JSON carries raw control characters inside strings
+    return json.loads("".join(ch if ch >= " " else " " for ch in (text or "")) or "{}")
+
+
+def sm_call(method, path, base=None, timeout=20, **kw):
+    base = base or shelfmark_url()
+    if not base:
+        raise HTTPException(400, "Book requests aren't set up")
+    r = httpx.request(method, base + path, timeout=timeout, **kw)
+    r.raise_for_status()
+    return _sm_json(r.text) if r.content else {}
+
+
+def sm_search(query, base=None):
+    """Shelfmark's metadata search (Open Library), retried once — it sometimes answers
+    empty the first time — and without the "Summary of …" spam unless that was asked for."""
+    params = {"query": query.strip(), "limit": 24, "content_type": "ebook"}
+    books = []
+    for _ in range(2):
+        books = (sm_call("GET", "/api/metadata/search", base=base, timeout=30, params=params) or {}).get("books") or []
+        if books:
+            break
+    guides = re.search(r"summary|guide|study", query, re.I)
+    out, seen = [], set()
+    for b in books:
+        t = b.get("title") or ""
+        if not b.get("provider_id") or not t:
+            continue
+        if not guides and re.search(r"^(summary|study guide|workbook|analysis)\b|\bsummary of\b", t, re.I):
+            continue
+        key = (_book_key(sm_main_title(t)), ((_sm_words((b.get("authors") or [""])[0]) or [""])[-1]))
+        if key in seen:          # Open Library lists every edition and translation as its own work
+            continue
+        seen.add(key)
+        out.append({"provider": b.get("provider") or "openlibrary", "provider_id": b["provider_id"],
+                    "title": t, "authors": b.get("authors") or [], "year": b.get("publish_year") or None,
+                    "cover": sm_cover_url(b.get("cover_url"))})
+    return out
+
+
+def _sm_row(r, viewer_id=None, with_choices=False):
+    d = {k: r[k] for k in ("id", "user_id", "book_id", "provider_id", "title", "author", "year", "cover",
+                           "state", "message", "attempts", "created_at", "updated_at", "finished_at")}
+    d["progress"] = round(r["progress"] or 0)
+    d["requested_by"] = r["requested_by"] if "requested_by" in r.keys() else None
+    d["mine"] = viewer_id is not None and r["user_id"] == viewer_id
+    rel = json.loads(r["release"]) if r["release"] else None
+    d["copy"] = {"title": rel.get("title"), "size": rel.get("size"), "format": sm_release_format(rel) or None,
+                 "seeders": rel.get("seeders")} if rel else None
+    if with_choices:
+        tried = set(json.loads(r["tried"] or "[]"))
+        d["choices"] = [{"source_id": c["source_id"], "title": c.get("title"), "size": c.get("size"),
+                         "format": sm_release_format(c) or None, "seeders": c.get("seeders"),
+                         "indexer": c.get("indexer"), "score": c.get("_score"),
+                         "tried": c["source_id"] in tried, "recommended": c.get("_score") is not None}
+                        for c in json.loads(r["candidates"] or "[]")]
+    return d
+
+
+def _sm_set(con, rid, **fields):
+    fields["updated_at"] = datetime.now().isoformat()
+    con.execute("UPDATE book_requests SET %s WHERE id=?" % ",".join(f"{k}=?" for k in fields),
+                (*fields.values(), rid))
+
+
+def _sm_queue(con, req, rel, base):
+    """Hand one copy to Shelfmark. Its queue id is the release's source_id."""
+    body = {k: v for k, v in rel.items() if not k.startswith("_")}
+    body.update({"author": req["author"] or "", "year": str(req["year"] or ""), "content_type": "ebook"})
+    if req["cover"]:
+        body["preview"] = req["cover"]
+    res = sm_call("POST", "/api/releases/download", base=base, timeout=30, json=body)
+    if (res or {}).get("status") != "queued":
+        raise RuntimeError((res or {}).get("error") or "Shelfmark didn't queue it")
+    tried = json.loads(req["tried"] or "[]") + [rel["source_id"]]
+    _sm_set(con, req["id"], state="downloading", task_id=rel["source_id"], release=json.dumps(body),
+            tried=json.dumps(tried), attempts=(req["attempts"] or 0) + 1, progress=0,
+            message="Queued", stalled_since=None, lost_since=None)
+
+
+_sm_finding = set()
+_sm_lock = threading.Lock()
+
+
+def _sm_find(rid):
+    """Find and rank copies for one request, then queue the best. Runs on its own thread:
+    the releases call alone takes 30 s to 2 min."""
+    try:
+        base = shelfmark_url()
+        with db() as con:
+            req = con.execute("SELECT * FROM book_requests WHERE id=?", (rid,)).fetchone()
+        if not req or req["state"] != "finding" or not base:
+            return
+        authors = [a.strip() for a in (req["author"] or "").split(",") if a.strip()]
+        params = {"provider": req["provider"] or "openlibrary", "book_id": req["provider_id"],
+                  "content_type": "ebook", "title": req["title"], "author": authors[0] if authors else ""}
+        # Shelfmark's server drops a long-running request (~100 s) while Prowlarr is still
+        # fanning out, but keeps going and caches the answer: asking again gets it fast.
+        for attempt in range(3):
+            try:
+                rels = (sm_call("GET", "/api/releases", base=base, timeout=240, params=params) or {}).get("releases") or []
+                break
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError):
+                if attempt == 2:
+                    raise
+                time.sleep(10 * (attempt + 1))
+        ranked = sm_rank_releases(rels, req["title"], authors)
+        picks = [dict(r, _score=round(s, 2)) for s, r in ranked[:12]]
+        seen = {r["source_id"] for r in picks}
+        loose = [dict(r) for r in rels if r.get("source_id") not in seen and sm_looks_like_ebook(r)]
+        loose.sort(key=lambda r: -int(r.get("seeders") or 0))
+        candidates = (picks + loose)[:30]
+        with db() as con:
+            cur = con.execute("SELECT * FROM book_requests WHERE id=?", (rid,)).fetchone()
+            if not cur or cur["state"] != "finding":
+                return                                       # cancelled while we looked
+            _sm_set(con, rid, candidates=json.dumps(candidates))
+            if not picks:
+                _sm_set(con, rid, state="pick" if candidates else "failed",
+                        message=("No copy matched well enough. Pick one from the list." if candidates
+                                 else f"No copies found ({len(rels)} results, none were ebooks)."))
+                return
+            cur = con.execute("SELECT * FROM book_requests WHERE id=?", (rid,)).fetchone()
+            _sm_queue(con, cur, picks[0], base)
+    except Exception as e:  # noqa: BLE001
+        log.warning("book request %s: finding failed: %s", rid, e)
+        with db() as con:
+            _sm_set(con, rid, state="failed", message="Couldn't reach the book downloader. Try again in a bit.")
+    finally:
+        with _sm_lock:
+            _sm_finding.discard(rid)
+
+
+def _sm_fail_copy(con, req, why, base):
+    """A copy didn't make it: fall back to a near-best one, or hand the choice over."""
+    try:
+        sm_call("DELETE", f"/api/download/{req['task_id']}/cancel", base=base, timeout=15)
+    except Exception:  # noqa: BLE001
+        pass
+    cands = json.loads(req["candidates"] or "[]")
+    tried = set(json.loads(req["tried"] or "[]"))
+    best = max((c.get("_score") for c in cands if c.get("_score") is not None), default=None)
+    if best is not None and (req["attempts"] or 0) < SM_MAX_TRIES and not req["manual"]:
+        for c in cands:
+            if c.get("_score") is not None and c["source_id"] not in tried and c["_score"] >= best - SM_FALLBACK_WINDOW:
+                try:
+                    _sm_queue(con, req, c, base)
+                    _sm_set(con, req["id"], message=f"Trying another copy ({why.lower()})")
+                    return
+                except Exception as e:  # noqa: BLE001
+                    log.warning("book request %s: fallback failed: %s", req["id"], e)
+                    break
+    _sm_set(con, req["id"], state="pick", task_id=None, message=f"{why}. Pick another copy.")
+
+
+def shelfmark_tick():
+    base = shelfmark_url()
+    if not base:
+        return
+    with db() as con:
+        rows = con.execute("SELECT * FROM book_requests WHERE state IN ('finding','downloading','importing')").fetchall()
+    for r in rows:
+        if r["state"] == "finding":
+            with _sm_lock:
+                if r["id"] in _sm_finding:
+                    continue
+                _sm_finding.add(r["id"])
+            threading.Thread(target=_sm_find, args=(r["id"],), daemon=True).start()
+    active = [r for r in rows if r["state"] in ("downloading", "importing") and r["task_id"]]
+    if not active:
+        return
+    try:
+        status = sm_call("GET", "/api/status", base=base, timeout=15) or {}
+    except Exception as e:  # noqa: BLE001
+        log.info("shelfmark status unavailable: %s", e)
+        return
+    where = {}
+    for bucket, items in status.items():
+        for tid, it in (items or {}).items():
+            where[tid] = (bucket, it or {})
+    now = datetime.now()
+    with db() as con:
+        for r in active:
+            req = con.execute("SELECT * FROM book_requests WHERE id=?", (r["id"],)).fetchone()
+            if not req or req["state"] not in ("downloading", "importing"):
+                continue
+            hit = where.get(req["task_id"])
+            if not hit:
+                lost = req["lost_since"] or now.isoformat()
+                if not req["lost_since"]:
+                    _sm_set(con, req["id"], lost_since=lost)
+                elif now - datetime.fromisoformat(lost) > timedelta(minutes=SM_LOST_MINUTES):
+                    _sm_fail_copy(con, req, "The downloader lost track of it", base)
+                continue
+            bucket, it = hit
+            msg = re.sub(r"\s+", " ", it.get("status_message") or "").strip()
+            if bucket == "complete":
+                _sm_set(con, req["id"], state="done", progress=100, message="In Calibre",
+                        finished_at=now.isoformat(), lost_since=None)
+            elif bucket in ("error", "cancelled"):
+                why = "Calibre can't import that format" if "format not supported" in msg.lower() else \
+                      ("That copy was cancelled" if bucket == "cancelled" else (msg or "That copy failed"))
+                _sm_fail_copy(con, req, why, base)
+            else:
+                prog = max(req["progress"] or 0, float(it.get("progress") or 0))   # only ever forward
+                state = "importing" if "waiting for completed" in msg.lower() else "downloading"
+                if state == "importing":
+                    prog = max(prog, 99)
+                stalled = req["stalled_since"]
+                if msg.lower().startswith("stalled"):
+                    stalled = stalled or now.isoformat()
+                    # nobody seeding is hopeless sooner than a slow swarm
+                    limit = SM_DEAD_MINUTES if re.search(r"\b0 seeds?\b", msg.lower()) else SM_STALL_MINUTES
+                    if now - datetime.fromisoformat(stalled) > timedelta(minutes=limit):
+                        _sm_fail_copy(con, req, "That copy stalled", base)
+                        continue
+                else:
+                    stalled = None
+                _sm_set(con, req["id"], state=state, progress=prog, message=msg or bucket.capitalize(),
+                        stalled_since=stalled, lost_since=None)
+
+
+def shelfmark_loop():
+    time.sleep(8)
+    while True:
+        try:
+            shelfmark_tick()
+        except Exception:  # noqa: BLE001
+            log.exception("shelfmark loop error")
+        time.sleep(SM_TICK)
+
+
+def _sm_list(con, where="1=1", args=()):
+    return con.execute(f"""SELECT r.*, COALESCE(NULLIF(u.display_name,''), u.username) AS requested_by
+        FROM book_requests r LEFT JOIN users u ON u.id=r.user_id WHERE {where}
+        ORDER BY r.created_at DESC""", args).fetchall()
+
+
+@app.get("/api/book-requests/config")
+def book_requests_config(user=Depends(current_user)):
+    return {"enabled": bool(shelfmark_url())}
+
+
+@app.get("/api/book-requests/search")
+def book_requests_search(q: str, user=Depends(current_user)):
+    if not q.strip():
+        return {"results": []}
+    try:
+        results = sm_search(q)
+    except httpx.HTTPError:
+        return {"results": [], "unavailable": True}
+    with db() as con:
+        live = {r["provider_id"]: r for r in _sm_list(con, "r.state NOT IN ('cancelled','failed')")}
+    for b in results:
+        r = live.get(b["provider_id"])
+        b["request"] = {"id": r["id"], "state": r["state"]} if r else None
+    return {"results": results}
+
+
+def _sm_match_book(con, book_id):
+    """The Open Library work for a book on Marquee's shelf: search by title and author,
+    keep the first result whose main title and author surname both match."""
+    b = con.execute("SELECT id,title,author,year,cover FROM books WHERE id=?", (book_id,)).fetchone()
+    if not b:
+        raise HTTPException(404, "no such book")
+    title, author = b["title"] or "", (b["author"] or "").split(",")[0].strip()
+    want = _sm_key_words(title)
+    surname = (_sm_words(author) or [""])[-1]
+    try:
+        found = sm_search(f"{sm_main_title(title)} {author}".strip())
+    except httpx.HTTPError:
+        raise HTTPException(502, "The book downloader isn't answering")
+    for f in found:
+        fw = set(_sm_words(sm_main_title(f["title"])))
+        aw = set(_sm_words(" ".join(f["authors"])))
+        if want and all(w in fw for w in want) and (not surname or surname in aw):
+            return b, f
+    raise HTTPException(404, "Couldn't find that book to request. Try searching for it instead.")
+
+
+@app.post("/api/book-requests")
+async def book_request_create(request: Request, user=Depends(current_user)):
+    body = await request.json()
+    if not shelfmark_url():
+        raise HTTPException(400, "Book requests aren't set up")
+
+    def work():
+        with db() as con:
+            book_id = body.get("book_id")
+            if book_id and not body.get("provider_id"):
+                b, f = _sm_match_book(con, int(book_id))
+                found = {**f, "cover": b["cover"] or f["cover"]}
+            else:
+                if not body.get("provider_id") or not body.get("title"):
+                    raise HTTPException(400, "provider_id and title required")
+                found = {"provider": body.get("provider") or "openlibrary", "provider_id": body["provider_id"],
+                         "title": body["title"], "authors": body.get("authors") or [], "year": body.get("year"),
+                         "cover": body.get("cover")}
+            dup = con.execute("""SELECT id FROM book_requests WHERE provider_id=? AND state NOT IN
+                ('cancelled','failed') ORDER BY created_at DESC LIMIT 1""", (found["provider_id"],)).fetchone()
+            if dup:
+                return dup["id"], True
+            now = datetime.now().isoformat()
+            cur = con.execute("""INSERT INTO book_requests(user_id,book_id,provider,provider_id,title,author,year,
+                cover,state,message,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (user["id"], book_id, found["provider"], found["provider_id"], found["title"],
+                 ", ".join(found["authors"]), str(found["year"] or "") or None, found["cover"], "finding",
+                 "Looking for copies", now, now))
+            return cur.lastrowid, False
+
+    rid, existed = await run_in_threadpool(work)
+    with db() as con:
+        r = _sm_list(con, "r.id=?", (rid,))[0]
+    return {**_sm_row(r, user["id"]), "already": existed}
+
+
+@app.get("/api/book-requests")
+def book_requests_list(book_id: int = 0, user=Depends(current_user)):
+    with db() as con:
+        if book_id:
+            b = con.execute("SELECT title, author FROM books WHERE id=?", (book_id,)).fetchone()
+            rows = _sm_list(con, "r.book_id=?", (book_id,))
+            if not rows and b:      # requested from search rather than from this page
+                key = _book_key(b["title"] or "")
+                rows = [r for r in _sm_list(con, "r.state!='cancelled'") if _book_key(r["title"]) == key]
+            return {"requests": [_sm_row(r, user["id"]) for r in rows[:1]], "enabled": bool(shelfmark_url())}
+        rows = _sm_list(con, "r.state!='cancelled' OR r.updated_at>=?",
+                        ((datetime.now() - timedelta(days=1)).isoformat(),))
+        return {"requests": [_sm_row(r, user["id"]) for r in rows[:60]], "enabled": bool(shelfmark_url())}
+
+
+def _sm_owned(con, rid, user):
+    r = con.execute("SELECT * FROM book_requests WHERE id=?", (rid,)).fetchone()
+    if not r:
+        raise HTTPException(404, "no such request")
+    if r["user_id"] != user["id"] and not user["is_admin"]:
+        raise HTTPException(403, "only the person who asked for it (or an admin) can change it")
+    return r
+
+
+@app.get("/api/book-requests/{rid}")
+def book_request_get(rid: int, user=Depends(current_user)):
+    with db() as con:
+        rows = _sm_list(con, "r.id=?", (rid,))
+        if not rows:
+            raise HTTPException(404, "no such request")
+        return _sm_row(rows[0], user["id"], with_choices=True)
+
+
+@app.post("/api/book-requests/{rid}/cancel")
+def book_request_cancel(rid: int, user=Depends(current_user)):
+    with db() as con:
+        r = _sm_owned(con, rid, user)
+        if r["task_id"] and r["state"] in ("downloading", "importing"):
+            try:
+                sm_call("DELETE", f"/api/download/{r['task_id']}/cancel", timeout=15)
+            except Exception:  # noqa: BLE001
+                pass
+        _sm_set(con, rid, state="cancelled", message="Cancelled", task_id=None)
+        return _sm_row(_sm_list(con, "r.id=?", (rid,))[0], user["id"])
+
+
+@app.post("/api/book-requests/{rid}/retry")
+def book_request_retry(rid: int, user=Depends(current_user)):
+    """Look for copies again from scratch (indexers change; a stalled torrent may be back)."""
+    with db() as con:
+        _sm_owned(con, rid, user)
+        _sm_set(con, rid, state="finding", message="Looking for copies", candidates=None, tried="[]",
+                attempts=0, progress=0, task_id=None, release=None, manual=0, finished_at=None)
+        return _sm_row(_sm_list(con, "r.id=?", (rid,))[0], user["id"])
+
+
+@app.post("/api/book-requests/{rid}/pick")
+async def book_request_pick(rid: int, request: Request, user=Depends(current_user)):
+    body = await request.json()
+
+    def work():
+        with db() as con:
+            r = _sm_owned(con, rid, user)
+            cand = next((c for c in json.loads(r["candidates"] or "[]") if c["source_id"] == body.get("source_id")), None)
+            if not cand:
+                raise HTTPException(404, "that copy isn't in the list any more")
+            if r["task_id"] and r["state"] in ("downloading", "importing"):
+                try:
+                    sm_call("DELETE", f"/api/download/{r['task_id']}/cancel", timeout=15)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                _sm_queue(con, r, cand, shelfmark_url(con))
+            except (httpx.HTTPError, RuntimeError) as e:
+                raise HTTPException(502, f"The downloader didn't take it: {e}")
+            _sm_set(con, rid, manual=1, message="Queued the copy you picked")
+            return _sm_row(_sm_list(con, "r.id=?", (rid,))[0], user["id"], with_choices=True)
+
+    return await run_in_threadpool(work)
+
+
+@app.get("/api/admin/shelfmark")
+def admin_shelfmark_get(_=Depends(admin_user)):
+    with db() as con:
+        return {"url": shelfmark_url(con)}
+
+
+@app.post("/api/admin/shelfmark")
+async def admin_shelfmark_set(request: Request, _=Depends(admin_user)):
+    body = await request.json()
+    url = (body.get("url") or "").strip().rstrip("/")
+    if url and not re.match(r"^https?://", url):
+        raise HTTPException(400, "the URL needs to start with http:// or https://")
+    ok = None
+    if url:
+        try:
+            await run_in_threadpool(sm_call, "GET", "/api/status", url, 10)
+            ok = True
+        except Exception:  # noqa: BLE001
+            ok = False
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('shelfmark_url',?)", (url,))
+    return {"url": url or None, "reachable": ok}
+
+
 # ---------------------------------------------------------------- admin
 
 @app.get("/api/users")
@@ -8189,6 +8762,7 @@ def startup():
     threading.Thread(target=imdb_loop, daemon=True).start()
     threading.Thread(target=manga_release_loop, daemon=True).start()
     threading.Thread(target=folio_heal_loop, daemon=True).start()
+    threading.Thread(target=shelfmark_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
