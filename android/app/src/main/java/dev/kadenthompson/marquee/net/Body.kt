@@ -24,3 +24,6 @@ private fun toJson(v: Any?): JsonElement? = when (v) {
     is Map<*, *> -> JsonObject(v.entries.mapNotNull { (k, x) -> toJson(x)?.let { k.toString() to it } }.toMap())
     else -> JsonPrimitive(v.toString())
 }
+
+/** Send an explicit JSON null (e.g. clearing a rating). */
+val JsonNullValue: JsonElement = JsonNull

@@ -19,7 +19,7 @@ object Screens {
     @Composable fun Library(r: LibraryHome) = Todo("Library")
     @Composable fun Search(query: String?) = Todo("Search")
     @Composable fun You() = Todo("You")
-    @Composable fun Show(id: Int) = Todo("Show $id", true)
+    @Composable fun Show(id: Int) = dev.kadenthompson.marquee.features.show.ShowScreen(id)
     @Composable fun Episode(showId: Int, season: Int, number: Int) = Todo("Episode", true)
     @Composable fun Movie(id: Int) = Todo("Movie", true)
     @Composable fun Person(id: Int) = Todo("Person", true)
