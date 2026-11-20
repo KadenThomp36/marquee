@@ -22,6 +22,16 @@ public enum MarqueeFont {
         .custom(display, size: size, relativeTo: style)
     }
 
+    /// The display face at a fixed size, for the one place that scales as a whole
+    /// picture instead: the Year in Review card, which is drawn on a fixed canvas and
+    /// fitted to the screen (its text is read out by VoiceOver like any other).
+    public static func canvasDisplay(_ size: CGFloat) -> Font { .custom(display, fixedSize: size) }
+
+    /// The body face at a fixed size, for the same canvas.
+    public static func canvasBody(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .custom(archivo(weight), fixedSize: size)
+    }
+
     /// Body face at an explicit size and weight, scaling from `style`.
     public static func body(_ size: CGFloat,
                             _ weight: Font.Weight = .regular,

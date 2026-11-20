@@ -16,20 +16,53 @@ struct StatsSection: View {
     @State private var pickedYear: String?
     @State private var pickedScore: Int?
 
+    /// Set when there's room for two columns — the Duo opened out (either side of the
+    /// crease) or a wide screen. One stretched column of charts reads badly there.
+    @State private var pages: SpreadPages?
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            headline
-            records
-            monthByMonth
-            watchingLife
-            watchClock
-            topShows
-            genres
-            showShelf
-            decades
-            ratings
-            if let advanced, !advanced.isEmpty { deeperCuts(advanced) }
+        Group {
+            if let pages {
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        headline
+                        records
+                        monthByMonth
+                        watchingLife
+                        watchClock
+                        topShows
+                        genres
+                    }
+                    .frame(width: pages.leading, alignment: .top)
+                    Color.clear.frame(width: pages.gap, height: 1)
+                    VStack(alignment: .leading, spacing: 18) {
+                        ratings
+                        showShelf
+                        decades
+                        if let advanced, !advanced.isEmpty { deeperCuts(advanced) }
+                    }
+                    .frame(width: pages.trailing, alignment: .top)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    headline
+                    records
+                    monthByMonth
+                    watchingLife
+                    watchClock
+                    topShows
+                    genres
+                    showShelf
+                    decades
+                    ratings
+                    if let advanced, !advanced.isEmpty { deeperCuts(advanced) }
+                }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: SpreadPages?.self) { proxy in
+            SpreadPages(width: proxy.size.width, fold: proxy.foldLine)
+        } action: { pages = $0 }
     }
 
     // MARK: - Tiles
@@ -122,9 +155,11 @@ struct StatsSection: View {
                 .chartXSelection(value: $pickedMonth)
                 .sensoryFeedback(.selection, trigger: pickedMonth)
                 .chartXAxis {
-                    AxisMarks(values: points.map(\.key).filter { $0.hasSuffix("-01") }) { value in
-                        AxisValueLabel {
-                            if let key = value.as(String.self) {
+                    // A label every January only. (Handing `values:` a filtered list
+                    // still drew all 24 on a category axis — a row of overlapping years.)
+                    AxisMarks { value in
+                        if let key = value.as(String.self), key.hasSuffix("-01") {
+                            AxisValueLabel(anchor: .topLeading) {
                                 Text(key.prefix(4)).font(.mqCaption)
                             }
                         }

@@ -152,10 +152,13 @@ struct FoldSpread<Leading: View, Trailing: View>: View {
                 HStack(spacing: 0) {
                     page { leading }
                         .frame(width: pages.leading)
+                        // a scroll bar running down the gutter reads as a second crease
+                        .scrollIndicators(.hidden)
                     FoldGutter()
                         .frame(width: pages.gap)
                     page { trailing }
                         .frame(width: pages.trailing)
+                        .scrollIndicators(.hidden)
                 }
             } else {
                 page {

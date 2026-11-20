@@ -45,9 +45,9 @@ struct BookStatsScreen: View {
                 .padding(MQ.gutter)
             }
         }
-        // The hero already names the book; the bar says what this page is.
-        .navigationTitle("Reading stats")
-        .navigationBarTitleDisplayMode(.inline)
+        // The hero names the book and says what this is; a bar title on top of it
+        // only crowded the first page (and sat over the content as it scrolled).
+        .mqUntitledNavigationBar()
         .task { await load() }
         .sheet(item: $editing) { sitting in
             SessionEditorSheet(entry: sitting.logEntry, kind: .book,
@@ -121,7 +121,7 @@ struct BookStatsScreen: View {
         VStack(alignment: .leading, spacing: 24) {
             MarqueeSign(stats: stats)
             numbers(stats)
-            section("The book, sitting by sitting") {
+            section("Across the book") {
                 BookRibbon(stats: stats)
                 FlowLayout(spacing: 14, lineSpacing: 6) {
                     ForEach(stats.sources) { source in
@@ -653,42 +653,49 @@ private struct ChapterPace: View {
             if !values.isEmpty { averages[unit] = values.reduce(0, +) / Double(values.count) }
         }
         let shown = showingAll ? chapters : Array(chapters.prefix(Self.cap))
-        return VStack(alignment: .leading, spacing: 10) {
-            ForEach(shown) { chapter in
-                HStack(spacing: 10) {
-                    Text(chapter.title)
-                        .font(.mqSub)
-                        .foregroundStyle(Color.mqInkSoft)
-                        .lineLimit(1)
-                        .frame(width: 90, alignment: .leading)
-                    GeometryReader { proxy in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.mqPanelRaised)
-                            Capsule().fill(Color.mqBrassFill)
-                                .frame(width: max(4, proxy.size.width * chapter.minutes / longest))
+        return VStack(alignment: .leading, spacing: 12) {
+            // a grid, so the bars start and end together whatever the labels say
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 11) {
+                ForEach(shown) { chapter in
+                    GridRow {
+                        Text(chapter.title)
+                            .font(.mqSub)
+                            .foregroundStyle(Color.mqInkSoft)
+                            .lineLimit(1)
+                            .frame(maxWidth: 110, alignment: .leading)
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.mqPanelRaised)
+                                Capsule().fill(Color.mqBrassFill)
+                                    .frame(width: max(4, proxy.size.width * chapter.minutes / longest))
+                            }
                         }
+                        .frame(height: 8)
+                        .gridColumnAlignment(.leading)
+                        Text(BookStatsFormat.duration(Int(chapter.minutes.rounded())))
+                            .font(.mqCaption).foregroundStyle(Color.mqInkSoft).monospacedDigit()
+                            .gridColumnAlignment(.trailing)
+                        Group {
+                            if let perHour = chapter.perHour {
+                                let unit = chapter.paceUnit ?? "screens"
+                                let ratio = averages[unit].map { perHour / $0 } ?? 1
+                                Text(Self.pace(perHour, unit: chapter.paceUnit))
+                                    .foregroundStyle(ratio > 1.12 ? Color.mqChartAqua
+                                                     : ratio < 0.88 ? Color.mqChartOrange : Color.mqInkMuted)
+                            } else {
+                                Text("—").foregroundStyle(Color.mqInkMuted)
+                            }
+                        }
+                        .font(.mqCaption).monospacedDigit()
+                        .lineLimit(1)
+                        .gridColumnAlignment(.trailing)
                     }
-                    .frame(height: 8)
-                    Text(BookStatsFormat.duration(Int(chapter.minutes.rounded())))
-                        .font(.mqCaption).foregroundStyle(Color.mqInkSoft).monospacedDigit()
-                        .frame(minWidth: 44, alignment: .trailing)
-                    if let perHour = chapter.perHour {
-                        let unit = chapter.paceUnit ?? "screens"
-                        let ratio = averages[unit].map { perHour / $0 } ?? 1
-                        Text(Self.pace(perHour, unit: chapter.paceUnit))
-                            .font(.mqCaption).monospacedDigit()
-                            .foregroundStyle(ratio > 1.12 ? Color.mqChartAqua
-                                             : ratio < 0.88 ? Color.mqChartOrange : Color.mqInkMuted)
-                            .frame(width: 92, alignment: .trailing)   // bars end together
-                            .minimumScaleFactor(0.8)
-                    }
+                    .accessibilityElement(children: .combine)
                 }
-                .accessibilityElement(children: .combine)
             }
             if chapters.count > Self.cap && !showingAll {
                 Button("Show all \(chapters.count) chapters") { showingAll = true }
                     .buttonStyle(.mqChip)
-                    .padding(.top, 2)
             }
         }
     }
@@ -714,23 +721,42 @@ private struct SittingRow: View {
             .frame(width: 40)
 
             VStack(alignment: .leading, spacing: 4) {
-                if sitting.checkpoint {
-                    Text(pages != nil ? "Progress set to page \(sitting.to)" : "Progress update")
-                        .font(.mqSub).foregroundStyle(Color.mqInkSoft)
-                } else {
-                    HStack(spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if sitting.checkpoint {
+                        Text(pages != nil ? "Progress set to page \(sitting.to)" : "Progress update")
+                            .font(.mqSub).foregroundStyle(Color.mqInkSoft)
+                    } else {
                         Text(BookStatsFormat.duration(sitting.minutes))
                             .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
                             .foregroundStyle(Color.mqInk)
                         if let gain { Text(gain).font(.mqSub).foregroundStyle(Color.mqBrass) }
                     }
-                    .monospacedDigit()
+                    Spacer(minLength: 6)
+                    // where it came from: a dot and a name, quiet, at the end of the line
+                    HStack(spacing: 5) {
+                        Circle().fill(SittingSource.color(sitting.source)).frame(width: 7, height: 7)
+                        Text(sitting.sourceLabel)
+                            .font(MarqueeFont.body(11.5, .semibold, relativeTo: .caption2))
+                            .foregroundStyle(Color.mqInkSoft)
+                            .lineLimit(1)
+                    }
+                    .fixedSize()
                 }
-                Text(detail)
-                    .font(.mqCaption)
-                    .foregroundStyle(Color.mqInkMuted)
-                    .monospacedDigit()
-                    .fixedSize(horizontal: false, vertical: true)
+                .monospacedDigit()
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+                if let chapters {
+                    Text(chapters)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 if let span = sitting.span(pages: pages) {
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
@@ -741,17 +767,10 @@ private struct SittingRow: View {
                         }
                     }
                     .frame(height: 3)
-                    .padding(.top, 3)
+                    .padding(.top, 4)
                     .accessibilityHidden(true)
                 }
             }
-            Spacer(minLength: 4)
-            Text(sitting.sourceLabel)
-                .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
-                .foregroundStyle(SittingSource.color(sitting.source))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(SittingSource.color(sitting.source).opacity(0.15), in: .capsule)
         }
         .padding(.vertical, 11)
         .contentShape(.rect)
@@ -767,6 +786,8 @@ private struct SittingRow: View {
         return nil
     }
 
+    /// The time, the pages (or the stretch, without a page count), and any idle time
+    /// Folio left out.
     private var detail: String {
         var parts: [String] = []
         if let day { parts.append(day.formatted(date: .omitted, time: .shortened)) }
@@ -775,14 +796,15 @@ private struct SittingRow: View {
         } else if let span = sitting.span(pages: pages) {
             parts.append("\(Int((span.start * 100).rounded()))% → \(Int((span.end * 100).rounded()))%")
         }
-        if let start = sitting.startChapter, let end = sitting.endChapter, start != end {
-            parts.append("\(start) → \(end)")
-        } else if let chapter = sitting.endChapter ?? sitting.startChapter {
-            parts.append(chapter)
-        }
         if sitting.source == "folio", let wall = sitting.wallMinutes, wall > sitting.minutes + 4 {
             parts.append("\(wall - sitting.minutes) min idle left out")
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// The chapters it crossed, on their own line so they never wrap mid-name.
+    private var chapters: String? {
+        if let start = sitting.startChapter, let end = sitting.endChapter, start != end { return "\(start) → \(end)" }
+        return sitting.endChapter ?? sitting.startChapter
     }
 }

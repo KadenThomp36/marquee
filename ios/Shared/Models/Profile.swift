@@ -18,6 +18,8 @@ public struct ProfilePayload: Codable, Sendable, Equatable {
     /// True when this year has data but December hasn't arrived.
     public var recapSoon: Bool?
     public var recapYear: Int?
+    /// The day this year's recap premieres.
+    public var recapRelease: String?
 
     public var person: Person {
         Person(id: id, username: username, displayName: displayName, avatar: avatar,
@@ -33,6 +35,7 @@ public struct ProfilePayload: Codable, Sendable, Equatable {
         case recapYears = "recap_years"
         case recapSoon = "recap_soon"
         case recapYear = "recap_year"
+        case recapRelease = "recap_release"
     }
 }
 
@@ -204,11 +207,17 @@ public struct YearCount: Codable, Sendable, Hashable, Identifiable {
 }
 
 public struct TopShow: Codable, Sendable, Hashable, Identifiable {
+    public var showID: Int?
     public var title: String
     public var poster: String?
     public var eps: Int
     public var mins: Int?
     public var id: String { title }
+
+    enum CodingKeys: String, CodingKey {
+        case title, poster, eps, mins
+        case showID = "id"
+    }
 }
 
 public struct NamedCount: Codable, Sendable, Hashable, Identifiable {
@@ -341,9 +350,29 @@ public struct Recap: Codable, Sendable, Equatable {
     public var lastWatch: FirstWatch?
     public var newShows: Int?
     public var years: [Int]?
+    /// False while the year is still running: the numbers keep counting to New Year.
+    public var final: Bool?
+    /// An admin looking before release day.
+    public var preview: Bool?
+    public var reading: RecapReading?
+    public var persona: RecapPersona?
+    /// Plays by hour of day (24, midnight first) and weekday (7, Monday first).
+    public var hours: [Int]?
+    public var weekdays: [Int]?
+    public var peakHour: Int?
+    public var peakWeekday: String?
+    public var daysWatched: Int?
+    public var streak: RecapStreak?
+    public var household: RecapHousehold?
+    /// On a locked year: when it opens.
+    public var release: String?
 
     enum CodingKeys: String, CodingKey {
         case year, locked, episodes, movies, minutes, genres, months, binge, years
+        case final, preview, reading, persona, hours, weekdays, streak, household, release
+        case peakHour = "peak_hour"
+        case peakWeekday = "peak_weekday"
+        case daysWatched = "days_watched"
         case hasData = "has_data"
         case tvMinutes = "tv_minutes"
         case movieMinutes = "movie_minutes"
@@ -366,6 +395,75 @@ public struct RecapMovie: Codable, Sendable, Hashable, Identifiable {
 
 public struct RecapIndex: Codable, Sendable, Equatable {
     public var years: [Int]
-    /// Set in December, once, until the slideshow has been seen.
+    /// The year to present once, by itself, until it's been seen — from release day
+    /// to the end of January.
     public var autoshow: Int?
+    public var release: String?
+}
+
+/// "The Night Owl — 41% of it after 10 pm."
+public struct RecapPersona: Codable, Sendable, Hashable {
+    public var key: String
+    public var title: String
+    public var line: String
+}
+
+public struct RecapStreak: Codable, Sendable, Hashable {
+    public var days: Int
+    public var start: String
+    public var end: String
+}
+
+public struct RecapHousehold: Codable, Sendable, Hashable {
+    public var rank: Int
+    public var of: Int
+}
+
+/// The reading half of a recap, when its owner reads.
+public struct RecapReading: Codable, Sendable, Hashable {
+    public var books: Int?
+    public var manga: Int?
+    public var pages: Int?
+    public var chapters: Int?
+    public var minutes: Int?
+    public var covers: [Cover]?
+    public var topAuthor: Author?
+    public var longest: Book?
+    public var fastest: Fastest?
+    public var favourite: Book?
+    public var busiestMonth: String?
+    public var busiestMonthUnits: Int?
+    public var goal: Goal?
+
+    enum CodingKeys: String, CodingKey {
+        case books, manga, pages, chapters, minutes, covers, longest, fastest, favourite, goal
+        case topAuthor = "top_author"
+        case busiestMonth = "busiest_month"
+        case busiestMonthUnits = "busiest_month_units"
+    }
+
+    public struct Cover: Codable, Sendable, Hashable {
+        public var title: String?
+        public var cover: String?
+    }
+    public struct Author: Codable, Sendable, Hashable {
+        public var name: String
+        public var count: Int
+        public var pages: Int
+    }
+    public struct Book: Codable, Sendable, Hashable {
+        public var title: String
+        public var cover: String?
+        public var author: String?
+        public var pages: Int?
+        public var rating: Int?
+    }
+    public struct Fastest: Codable, Sendable, Hashable {
+        public var title: String
+        public var days: Int
+    }
+    public struct Goal: Codable, Sendable, Hashable {
+        public var target: Int?
+        public var done: Int?
+    }
 }

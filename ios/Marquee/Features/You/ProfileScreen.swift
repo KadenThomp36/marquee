@@ -23,6 +23,9 @@ struct ProfileScreen: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.mqTopInset) private var topInset
     @Environment(\.colorScheme) private var colorScheme
+    /// Regular on the Duo opened out (and iPad), where the tab bar becomes a rail and
+    /// bar buttons live in it — so Settings goes there instead of floating on the art.
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var profile: ProfilePayload?
     @State private var stats: Stats?
     @State private var advanced: AdvancedStats?
@@ -42,6 +45,7 @@ struct ProfileScreen: View {
     }
     private var who: String { isMe ? "me" : (username ?? "me") }
     private var hasBanner: Bool { profile?.banner?.isEmpty == false }
+    private var railLayout: Bool { sizeClass == .regular }
 
     var body: some View {
         MarqueeScreen {
@@ -94,7 +98,19 @@ struct ProfileScreen: View {
             }
 
         }
-        .mqBareNavigationBar()
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(railLayout ? .visible : .hidden, for: .navigationBar)
+        .toolbar {
+            if isMe, railLayout {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink(value: Navigator.Route.settings) {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+        }
         // The system spinner sits behind the scrolled content, so on a bannered
         // profile the stretch bleed covers it completely. This one floats above
         // the art in the same spot instead. Bannerless profiles keep the stock
@@ -110,7 +126,7 @@ struct ProfileScreen: View {
         }
         .animation(.easeInOut(duration: 0.2), value: refreshing)
         .overlay(alignment: .topTrailing) {
-            if isMe {
+            if isMe, !railLayout {
                 NavigationLink(value: Navigator.Route.settings) {
                     Image(systemName: "gearshape")
                         .font(.system(size: 18))
@@ -300,8 +316,8 @@ struct ProfileScreen: View {
             NavigationLink(value: Navigator.Route.recap(year: year,
                                                         username: isMe ? nil : profile.username)) {
                 recapCard(kicker: "Year in Review",
-                          title: "\(isMe ? "Your" : profile.person.shortName + "'s") \(year), wrapped",
-                          detail: "A slideshow of everything watched in \(year)",
+                          title: "\(isMe ? "Your" : profile.person.shortName + "'s") \(year), now showing",
+                          detail: "The year in lights, with a quiz, a ticket and a few surprises",
                           locked: false)
             }
             .buttonStyle(.plain)
@@ -310,7 +326,7 @@ struct ProfileScreen: View {
         } else if isMe, profile.recapSoon == true {
             recapCard(kicker: "Year in Review",
                       title: "\(profile.recapYear ?? Calendar.current.component(.year, from: Date())) is still being written",
-                      detail: "Your wrapped slideshow unlocks in December",
+                      detail: "Premieres \(profile.recapRelease.flatMap(MQTime.date(from:))?.formatted(.dateTime.month(.wide).day()) ?? "in December")",
                       locked: true)
                 .padding(.horizontal, MQ.gutter)
         }

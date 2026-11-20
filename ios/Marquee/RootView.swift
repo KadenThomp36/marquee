@@ -5,6 +5,8 @@ import SwiftUI
 struct RootView: View {
     @Environment(Session.self) private var session
     @Environment(\.scenePhase) private var scenePhase
+    /// This year's Year in Review, presented by itself once after it premieres.
+    @State private var premiere: RecapPremiere?
 
     var body: some View {
         Group {
@@ -20,6 +22,9 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: session.phase)
+        .fullScreenCover(item: $premiere) { premiere in
+            NavigationStack { RecapScreen(year: premiere.year, presentedModally: true) }
+        }
         .celebrationHost()
         .observesHinge()
         .curtainUpOnUnfold()
@@ -30,6 +35,7 @@ struct RootView: View {
             await session.loadRequestConfig()
             await session.checkCelebrations()
             await SyncCoordinator.shared.replayPending(session: session)
+            await checkPremiere()
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, session.phase == .ready else { return }
@@ -37,9 +43,30 @@ struct RootView: View {
             Task {
                 await session.checkCelebrations()
                 await SyncCoordinator.shared.replayPending(session: session)
+                await checkPremiere()
             }
         }
     }
+}
+
+extension RootView {
+    /// The server says which recap (if any) is still unseen and fresh — from release
+    /// day to the end of January. Opening it marks it seen, so it shows once across
+    /// every device: whichever one you open first.
+    fileprivate func checkPremiere() async {
+        guard premiere == nil, session.phase == .ready, let client = session.client,
+              let index: RecapIndex = try? await client.get("recap"), let year = index.autoshow
+        else { return }
+        // let the app settle (and any finish-line fanfare play) before the curtain goes up
+        try? await Task.sleep(for: .seconds(1.2))
+        guard premiere == nil, session.phase == .ready else { return }
+        premiere = RecapPremiere(year: year)
+    }
+}
+
+struct RecapPremiere: Identifiable, Equatable {
+    let year: Int
+    var id: Int { year }
 }
 
 /// A held beat on the wordmark while the Keychain is read. Deliberately quiet — this

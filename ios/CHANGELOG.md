@@ -1,5 +1,25 @@
 # iOS changelog
 
+## Unreleased — Year in Review, and a tidier Duo
+
+Needs web build `20261120c`.
+
+- **Year in Review, rebuilt.** A night at the pictures: a countdown leader rolls it
+  in, a guessing game ("how many hours do you think…?"), then show of the year, your
+  persona stamp (Night Owl, Binger, Bookworm…), prime time, the big month, genres,
+  films, your reading year, where you rank in the household, the records, and a
+  ticket to share. Drawn on one canvas fitted to the screen, so it looks the same on
+  every phone; on the Duo opened out it reads like a programme, two slides a spread.
+- **It premieres by itself, once.** After release day (Boxing Day unless the admin
+  picks another) the recap opens on its own the next time you launch, then never
+  again on any device. Opening it in January still counts.
+- **Duo, opened out:** Settings moved from the top of your profile to the rail; your
+  numbers sit in two columns either side of the crease; the month-by-month chart
+  labels each January instead of every month.
+- **Reading stats, cleaner:** no bar title over the hero, sittings with the source as
+  a quiet dot and chapters on their own line, chapter pace in aligned columns, no
+  scroll bar running down the crease.
+
 ## Unreleased — Folio v1.1: nothing gets stuck
 
 Needs web build `20261120b`.
