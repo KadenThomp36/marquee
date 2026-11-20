@@ -8245,6 +8245,16 @@ def _sm_find(rid):
                 if attempt == 2:
                     raise
                 time.sleep(10 * (attempt + 1))
+        if not rels:
+            # Some indexers file ebooks under Other (8000), not Books (7000), and
+            # Shelfmark's own auto-expand is skipped whenever any indexer times out.
+            try:
+                rels = (sm_call("GET", "/api/releases", base=base, timeout=240,
+                                params={**params, "expand_search": "true"}) or {}).get("releases") or []
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout):
+                time.sleep(10)        # dropped while still searching: the answer is cached
+                rels = (sm_call("GET", "/api/releases", base=base, timeout=240,
+                                params={**params, "expand_search": "true"}) or {}).get("releases") or []
         ranked = sm_rank_releases(rels, req["title"], authors)
         picks = [dict(r, _score=round(s, 2)) for s, r in ranked[:12]]
         seen = {r["source_id"] for r in picks}
