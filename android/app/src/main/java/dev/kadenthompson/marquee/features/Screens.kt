@@ -14,7 +14,7 @@ import dev.kadenthompson.marquee.nav.LocalNav
 
 /** Every destination's entry point, in one place so the nav graph reads as a table of contents. */
 object Screens {
-    @Composable fun Next() = Todo("Next")
+    @Composable fun Next() = dev.kadenthompson.marquee.features.next.NextScreen()
     @Composable fun Upcoming() = Todo("Upcoming")
     @Composable fun Library(r: LibraryHome) = Todo("Library")
     @Composable fun Search(query: String?) = Todo("Search")
