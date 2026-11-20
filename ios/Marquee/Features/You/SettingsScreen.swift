@@ -31,6 +31,8 @@ struct SettingsScreen: View {
                     devicesPanel
                     offlinePanel
                     plexPanel
+                    // The reader app reports books, so it lives with the books feature.
+                    if session.me?.features?.tracksBooks == true { FolioPanel() }
                     if let imdb { imdbPanel(imdb) }
                     notificationsPanel
                     trackingPanel

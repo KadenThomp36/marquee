@@ -167,6 +167,17 @@ struct ReadingDetailScreen: View {
 
             sessionButton(detail)
 
+            // Folio uploads after the fact, so "live" from the reader means "just synced".
+            if live == nil, let recent = detail.recentFolio { FolioSyncedLine(recent: recent) }
+
+            if kind == .book, let id = item?.id, let reading = detail.reading,
+               reading.minutes > 0 || !detail.sessions.isEmpty {
+                NavigationLink(value: Navigator.Route.bookStats(id)) {
+                    statsDoor(reading)
+                }
+                .buttonStyle(.plain)
+            }
+
             HStack {
                 Text("My rating").mqEyebrowStyle()
                 Spacer()
@@ -388,6 +399,43 @@ struct ReadingDetailScreen: View {
         }
     }
 
+    /// The door to the stats page: how much reading so far, and how much came from Folio.
+    private func statsDoor(_ reading: ReadingSummary) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.mqBrass)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Reading stats")
+                    .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
+                    .foregroundStyle(Color.mqInk)
+                Text(statsLine(reading))
+                    .font(.mqCaption)
+                    .foregroundStyle(Color.mqInkMuted)
+                    .monospacedDigit()
+            }
+            Spacer(minLength: 6)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.mqInkMuted)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .contentShape(.rect)
+        .mqPanel()
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens pace, a calendar and every sitting")
+    }
+
+    private func statsLine(_ reading: ReadingSummary) -> String {
+        var line = reading.minutes > 0
+            ? "\(BookStatsFormat.duration(reading.minutes)) over \(reading.sessions) sitting\(reading.sessions == 1 ? "" : "s")"
+            : "Pace, calendar and every sitting"
+        if let folio = reading.folio, folio > 0 { line += " · \(folio) from Folio" }
+        return line
+    }
+
     /// A finish date only exists once it's finished — the server clears it for every
     /// other state, and showing one on a book you're mid-way through (a DatePicker
     /// can't be empty, so it used to show today) read as "finished today".
@@ -483,6 +531,14 @@ struct ReadingDetailScreen: View {
                                 Text(logLine(entry))
                                     .font(.mqCaption)
                                     .foregroundStyle(Color.mqInkSoft)
+                                if entry.isTimed, let label = entry.sourceLabel,
+                                   let source = entry.source, source != "marquee" {
+                                    Text(label)
+                                        .font(MarqueeFont.body(10.5, .bold, relativeTo: .caption2))
+                                        .foregroundStyle(SittingSource.color(source))
+                                        .padding(.horizontal, 7).padding(.vertical, 2)
+                                        .background(SittingSource.color(source).opacity(0.15), in: .capsule)
+                                }
                             }
                             .padding(.horizontal, 12)
                             .padding(.vertical, 11)
@@ -565,6 +621,11 @@ struct ReadingDetailScreen: View {
     private func logLine(_ entry: ReadingSession) -> String {
         var parts: [String] = []
         if entry.isTimed { parts.append("\(entry.minutes) min") }
+        // A book without a page count: Folio's fractions are the only positions there are.
+        if total == nil, let end = entry.endFraction {
+            parts.append("\(Int(((entry.startFraction ?? 0) * 100).rounded()))% → \(Int((end * 100).rounded()))%")
+            return parts.joined(separator: " · ")
+        }
         parts.append(entry.from == entry.to
                      ? "at \(entry.to)"
                      : "\(entry.from) → \(entry.to)")
@@ -810,8 +871,8 @@ private struct RematchSheet: View {
     }
 }
 
-/// Edit or delete one row of the reading log.
-private struct SessionEditorSheet: View {
+/// Edit or delete one row of the reading log — here and on the stats page.
+struct SessionEditorSheet: View {
     let entry: ReadingSession
     let kind: ReadingKind
     let mode: ProgressMode

@@ -1,5 +1,37 @@
 # iOS changelog
 
+## Unreleased — Folio, and one book's reading in depth
+
+Needs a server with the Folio integration (web build `20261120a`). Everything new
+decodes as optional, so an older server just doesn't show it.
+
+### Reading stats for a book
+- **A stats page per book** (from the book's page: *Reading stats*). The finish date
+  is the headline — Limelight, lit like an opening date on a marquee, with the
+  arithmetic under it ("11 days at your recent 6.8 pages a day — about 1 h 12 min of
+  reading left"), or the finish date once it's done.
+- Reading time, sittings, pace (pages an hour, or % an hour for a book with no page
+  count) and a typical sitting; the **whole book as one strip** with every sitting
+  laid across the stretch it covered, coloured by where it came from, and a
+  *you're here* marker; a **calendar** of the days you read it; and **chapter by
+  chapter** time and pace when Folio sent chapters.
+- **Sittings** as a timeline grouped by month, each with its length, pages, the
+  chapters it crossed, a sliver of where in the book it ran, and a source pill
+  (Folio by the reader's own name, iPhone, Web). Tap one to fix it — the same edit
+  sheet as the reading log. Folio sittings say how much idle time was left out.
+- **On the iPhone Duo opened out it's a two-page spread** (the same `FoldSpread`
+  as the show/film/book pages): summary and pace on the leading page, the sittings
+  on the facing one, the gutter on the fold. Closed, it's one column.
+
+### Folio
+- **Settings › Folio** (with Books on): switch it on, *Record sittings
+  automatically*, the paired readers with last sync and sittings synced, Unpair,
+  and **Pair a reader** — a six-digit code for Folio's setup, using the same pairing
+  flow as this app. The reader appears the moment Folio registers.
+- A book's page says when Folio just synced it: "Read on Boox Palma 2 hours ago —
+  40 min, 14 pages, up to Chapter 19". The reading log marks Folio rows, and shows
+  percentages for a book without a page count.
+
 ## Unreleased — iPhone Duo
 
 Built against the iOS 27.1 SDK and tried on the iPhone Duo simulator in every pose.

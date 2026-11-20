@@ -261,6 +261,15 @@ public struct ReadingDetail: Codable, Sendable, Equatable {
     public var state: ReadingStateRow?
     public var sessions: [ReadingSession]
     public var household: [HouseholdRead]
+    /// Reading time and sittings at a glance — the door to the stats page.
+    public var reading: ReadingSummary?
+    /// A Folio session that synced in the last day and a half.
+    public var recentFolio: RecentFolio?
+
+    enum CodingKeys: String, CodingKey {
+        case tracked, kind, item, state, sessions, household, reading
+        case recentFolio = "recent_folio"
+    }
 }
 
 public struct ReadingDetailItem: Codable, Sendable, Equatable {
@@ -355,9 +364,23 @@ public struct ReadingSession: Codable, Sendable, Identifiable, Hashable {
     public var minutes: Int
     public var from: Int
     public var to: Int
+    /// folio · ios · web · marquee. Older servers send none.
+    public var source: String?
+    /// "Boox Palma" for a Folio session, by the reader's own name.
+    public var sourceLabel: String?
+    public var startFraction: Double?
+    public var endFraction: Double?
 
     /// Under three minutes isn't a sitting — it's a progress note.
     public var isTimed: Bool { minutes >= 3 }
+    public var isFolio: Bool { source == "folio" }
+
+    enum CodingKeys: String, CodingKey {
+        case id, date, minutes, from, to, source
+        case sourceLabel = "source_label"
+        case startFraction = "start_fraction"
+        case endFraction = "end_fraction"
+    }
 }
 
 public struct HouseholdRead: Codable, Sendable, Hashable, Identifiable {
@@ -414,6 +437,12 @@ public struct ActiveSession: Codable, Sendable, Identifiable, Hashable {
 
 public struct ActiveSessionsResponse: Codable, Sendable, Equatable {
     public var sessions: [ActiveSession]
+    public var recentFolio: RecentFolio?
+
+    enum CodingKeys: String, CodingKey {
+        case sessions
+        case recentFolio = "recent_folio"
+    }
 }
 
 public struct SessionStartResponse: Codable, Sendable, Equatable {

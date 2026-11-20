@@ -22,6 +22,8 @@ public final class Navigator {
         /// A Hardcover search result, by Hardcover id — not on anyone's shelf yet, or
         /// on it under a different local id.
         case bookPreview(Int)
+        /// One book's reading in depth: time, pace, a forecast, every sitting.
+        case bookStats(Int)
         case manga(Int)
         case profile(String)
         /// Year in Review. `username` nil means "me".
@@ -57,7 +59,7 @@ public final class Navigator {
     private func tab(for route: Route) -> Destination {
         switch route {
         case .show, .episode: .next
-        case .movie, .book, .bookPreview, .manga: .library
+        case .movie, .book, .bookPreview, .bookStats, .manga: .library
         case .search: .search
         case .person: .search
         case .list, .profile, .history, .notifications, .settings, .recap, .watched: .you
@@ -85,6 +87,8 @@ public final class Navigator {
             return Int(parts.count > 1 ? parts[1] : "").map(Route.person)
         case "list":
             return Int(parts.count > 1 ? parts[1] : "").map(Route.list)
+        case "book" where parts.count >= 3 && parts[2] == "stats":
+            return Int(parts[1]).map(Route.bookStats)
         case "book":
             return Int(parts.count > 1 ? parts[1] : "").map(Route.book)
         case "manga":
