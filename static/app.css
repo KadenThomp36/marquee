@@ -2862,3 +2862,19 @@ body.recap-open,html:has(body.recap-open){overflow:hidden}
 /* admin: the downloader's address */
 .toggle-row .sm-admin-pick{display:flex;flex-direction:row;align-items:center;gap:6px;flex:0 1 330px}
 .sm-admin-pick input{margin:0;min-width:0}
+
+/* the book page's request: a chip in the action row, its live line wrapping below */
+.brq-inline{display:contents}
+.brq-btn{color:var(--c-violet)}
+.brq-btn svg{width:15px;height:15px}
+.brq-btn.on{cursor:default}
+.brq-btn.on.ok{color:#5fbf7f}.brq-btn.on.find,.brq-btn.on.dl{color:var(--amber)}
+.brq-btn.on.warn{color:#e3a04a}.brq-btn.on.bad{color:var(--c-red)}
+.rq-live.find,.rq-live.dl{--tone:var(--amber)}.rq-live.ok{--tone:#5fbf7f}.rq-live.warn{--tone:#e3a04a}.rq-live.bad{--tone:var(--c-red)}
+.rq-live.find .brq-dot{animation:brqPulse 1.6s ease-in-out infinite}
+.rq-live-t i{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.rq-live-acts{display:flex;align-items:center;gap:14px;font-size:12.5px}
+.rq-live-acts button,.rq-live-acts a{color:var(--amber);font-weight:750}
+.rq-live-acts small{color:var(--mut);margin-left:auto}
+.rq-live-msg{color:var(--ink-2);min-width:0}
+.rq-live-t em+.rq-live-msg{margin-left:2px}

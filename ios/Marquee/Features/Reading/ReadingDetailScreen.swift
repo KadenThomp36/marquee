@@ -44,10 +44,6 @@ struct ReadingDetailScreen: View {
                 FoldSpread(spacing: 20, refresh: { await load() }) {
                     hero(item)
                     if detail.tracked { tracked(detail) } else { untracked() }
-                    if kind == .book, let id = item.id, !isHardcoverPreview {
-                        BookRequestControl(bookID: id, title: item.displayTitle)
-                            .padding(.horizontal, MQ.gutter)
-                    }
                 } trailing: {
                     extras(detail, item)
                 }
@@ -147,6 +143,11 @@ struct ReadingDetailScreen: View {
                         Text(String(year))
                             .font(.mqCaption)
                             .foregroundStyle(Color.mqInkMuted)
+                    }
+                    // the Request button lives in the hero, like a film's or a show's
+                    if kind == .book, let id = item.id, !isHardcoverPreview {
+                        BookRequestControl(bookID: id, title: item.displayTitle)
+                            .padding(.top, 4)
                     }
                 }
             }

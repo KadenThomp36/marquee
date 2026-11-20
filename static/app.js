@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120e";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120f";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2649,7 +2649,6 @@ function renderRDetail(d) {
       </div></div>
     <div class="rdt-body reveal">
       ${rdActChips(kind, it)}
-      ${kind === "book" && it.id ? `<div id="brqslot" class="brq-slot"></div>` : ""}
       ${d.tracked ? `
       <div id="rdtstates">
         <div class="rd-states">${[["want", "Want to read"], ["reading", "Reading"], ["finished", "Finished"]].map(([x, l]) =>
@@ -2867,7 +2866,8 @@ function rdActChips(kind, it) {
   return `<div class="act-row rdt-acts">${it.id ? `
     <button class="chip-btn fav-chip" id="favchip" aria-pressed="false">${I.star}<span id="favchiplbl">Favorite</span></button>
     <button class="chip-btn" id="rdaddlist" data-listbtn="${kind}:${it.id}">${I.listadd}<span>List</span></button>` : ""}
-    <button class="chip-btn" id="rdshare">${I.share}<span>Share</span></button></div>`;
+    <button class="chip-btn" id="rdshare">${I.share}<span>Share</span></button>
+    ${kind === "book" && it.id ? `<span id="brqslot" class="brq-inline"></span>` : ""}</div>`;
 }
 function wireRdActChips(kind, it) {
   const path = it.id ? `${kind}/${it.id}` : `book/hc/${it.hc_id}`;
@@ -6408,34 +6408,61 @@ async function brqPickSheet(rid, after) {
   });
 }
 
-// the card on a book's own page
+// on a book's own page: a Request chip in the action row, right where films and shows
+// keep theirs, and the same live line under it once something's happening
+const BRQ_SHORT = { finding: "Finding a copy", downloading: "Downloading", importing: "Adding to Calibre",
+  done: "In Calibre", pick: "Choose a copy", failed: "No copy yet", cancelled: "Request ebook" };
 let _brqTimer = null;
 async function mountBookRequest(slot, bookId) {
   clearTimeout(_brqTimer);
   if (!slot || !(await brqEnabled())) return;
-  let d; try { d = await api(`/book-requests?book_id=${bookId}`); } catch { return; }
+  let d; try { d = await api(`/book-requests?book_id=${bookId}`, { quiet: true }); } catch { return; }
   if (!slot.isConnected) return;
   const r = (d.requests || [])[0];
   if (!r || r.state === "cancelled") {
-    slot.innerHTML = `<div class="brq ask"><div class="brq-main">
-      <div class="brq-state"><span class="brq-dot"></span><b>Get the ebook</b></div>
-      <div class="brq-sub">Marquee finds a copy and sends it to Calibre. The Palma can Get it from there.</div>
-      <div class="brq-acts"><button class="btn pri sm" id="brqgo">${BRQ_ICO} Request ebook</button></div></div></div>`;
+    slot.innerHTML = `<button class="chip-btn brq-btn" id="brqgo">${BRQ_ICO}<span>Request ebook</span></button>`;
     $("#brqgo", slot).onclick = async e => {
-      const b = e.currentTarget; b.disabled = true; b.textContent = "Requesting…";
+      const b = e.currentTarget; b.disabled = true; b.innerHTML = `${BRQ_ICO}<span>Requesting…</span>`;
       try {
         const nr = await api("/book-requests", { body: { book_id: bookId }, quiet: true });
-        toast(nr.already ? "Already requested. Following that one." : "Requested. Looking for copies.");
+        toast(nr.already ? "Already requested. Following that one." : "Requested. Finding a copy.");
         mountBookRequest(slot, bookId);
       } catch (err) {
-        b.disabled = false; b.innerHTML = `${BRQ_ICO} Request ebook`;
-        slot.insertAdjacentHTML("beforeend", `<div class="brq-err">${esc(err.message || "Couldn't request it.")} <a href="#/requests">Search for it instead</a></div>`);
+        b.disabled = false; b.innerHTML = `${BRQ_ICO}<span>Request ebook</span>`;
+        slot.insertAdjacentHTML("beforeend", `<span class="rq-live bad"><span class="rq-live-t"><span class="brq-dot"></span>
+          <b>${esc(err.message || "Couldn't request it.")}</b></span><span class="rq-live-acts"><a href="#/requests">Search for it instead</a></span></span>`);
       }
     };
     return;
   }
-  slot.innerHTML = brqCard(r, { showBook: false });
-  wireBrq(slot, () => mountBookRequest(slot, bookId));
+  const [tone] = BRQ_STATE[r.state] || ["off"];
+  const pct = r.state === "done" ? 100 : r.progress || 0;
+  // the chip names the state; the line under it only adds what's new
+  const line = {
+    finding: "Searching every indexer, about a minute",
+    downloading: r.message || "",
+    importing: "The file's in. Calibre picks it up in a few minutes.",
+    done: "Get it from the Palma's Calibre tab.",
+    pick: r.message || "None of the copies matched well enough.",
+    failed: r.message || "No copies found.",
+  }[r.state] || "";
+  const acts = [];
+  if (r.state === "failed") acts.push(`<button data-brq="retry">Try again</button>`);
+  if (r.state === "downloading") acts.push(`<button data-brq="pick">Other copies</button>`);
+  if (brqActive(r) && r.mine) acts.push(`<button data-brq="cancel">Cancel</button>`);
+  const chipIco = r.state === "done" ? I.check : BRQ_ICO;
+  const chip = r.state === "pick"
+    ? `<button class="chip-btn brq-btn on ${tone}" data-brq="pick">${chipIco}<span>Choose a copy</span></button>`
+    : `<span class="chip-btn brq-btn on ${tone}">${chipIco}<span>${BRQ_SHORT[r.state] || "Requested"}</span></span>`;
+  slot.innerHTML = `${chip}
+    <span class="rq-live ${tone}" data-rid="${r.id}">
+      <span class="rq-live-t"><span class="brq-dot"></span>${r.state === "downloading" ? `<em>${Math.round(pct)}%</em>` : ""}<span class="rq-live-msg">${esc(line)}</span></span>
+      ${r.state === "finding" ? `<span class="brq-bar find"><i></i></span>` : ["downloading", "importing"].includes(r.state) ? `<span class="rq-live-bar"><i style="width:${Math.max(3, pct)}%"></i></span>` : ""}
+      ${acts.length || (!r.mine && r.requested_by) ? `<span class="rq-live-acts">${acts.join("")}${!r.mine && r.requested_by ? `<small>asked for by ${esc(r.requested_by)}</small>` : ""}</span>` : ""}
+    </span>`;
+  // the chip is the pick button too
+  slot.onclick = e => { const b = e.target.closest("[data-brq]"); if (b && b.dataset.brq === "pick" && !b.closest("[data-rid]")) brqPickSheet(r.id, () => mountBookRequest(slot, bookId)); };
+  wireBrq($(".rq-live", slot), () => mountBookRequest(slot, bookId));
   if (brqActive(r)) _brqTimer = setTimeout(() => { if (slot.isConnected && !document.hidden) mountBookRequest(slot, bookId); else if (slot.isConnected) _brqTimer = setTimeout(() => mountBookRequest(slot, bookId), 4000); }, 4000);
 }
 
