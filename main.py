@@ -8470,7 +8470,7 @@ def book_requests_list(book_id: int = 0, user=Depends(current_user)):
     with db() as con:
         if book_id:
             b = con.execute("SELECT title, author FROM books WHERE id=?", (book_id,)).fetchone()
-            rows = _sm_list(con, "r.book_id=?", (book_id,))
+            rows = _sm_list(con, "r.book_id=? AND r.state!='cancelled'", (book_id,))
             if not rows and b:      # requested from search rather than from this page
                 key = _book_key(b["title"] or "")
                 rows = [r for r in _sm_list(con, "r.state!='cancelled'") if _book_key(r["title"]) == key]
