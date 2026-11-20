@@ -10,10 +10,71 @@ public struct FolioIntegration: Codable, Sendable, Equatable {
     public var enabled: Bool
     public var autoCapture: Bool
     public var devices: [FolioDevice]
+    /// Sittings that arrived for a file Marquee can't place yet (contract v1.1).
+    public var waiting: [FolioWaiting]?
+    /// Set on the answer to a manual match.
+    public var imported: Int?
+    public var title: String?
 
     enum CodingKeys: String, CodingKey {
-        case enabled, devices
+        case enabled, devices, waiting, imported, title
         case autoCapture = "auto_capture"
+    }
+}
+
+/// One reader file whose sittings are parked until its book is known.
+public struct FolioWaiting: Codable, Sendable, Equatable, Identifiable {
+    public var key: String
+    public var title: String
+    public var authors: [String]
+    public var isbn: String?
+    public var sittings: Int
+    public var minutes: Int
+    public var firstAt: String?
+    public var nextAttemptAt: String?
+    /// "no match", "unavailable" (Hardcover couldn't answer), or nil: not asked yet.
+    public var reason: String?
+
+    public var id: String { key }
+    public var byline: String {
+        authors.isEmpty ? (isbn.map { "ISBN \($0)" } ?? "No author in the file") : authors.joined(separator: ", ")
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case key, title, authors, isbn, sittings, minutes, reason
+        case firstAt = "first_at"
+        case nextAttemptAt = "next_attempt_at"
+    }
+}
+
+/// `POST /api/integrations/folio/waiting/{match,ignore,retry}`. A match names a book
+/// already on the shelf (`bookID`) or a Hardcover result (`hcID` plus its fields, the
+/// same as `/api/books/add` takes, as a fallback if Hardcover can't be reached).
+public struct FolioWaitingRequest: Codable, Sendable, Equatable {
+    public var key: String
+    public var bookID: Int?
+    public var hcID: Int?
+    public var title: String?
+    public var author: String?
+    public var pages: Int?
+    public var cover: String?
+    public var slug: String?
+
+    public init(key: String, bookID: Int? = nil, result: BookSearchResult? = nil) {
+        self.key = key
+        self.bookID = bookID
+        self.hcID = result?.hcID
+        self.title = result?.title
+        self.author = result?.author
+        self.pages = result?.pages
+        self.cover = result?.cover
+        self.slug = result?.slug
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case key, title, author, pages, cover, slug
+        case bookID = "book_id"
+        case hcID = "hc_id"
     }
 }
 
@@ -237,6 +298,9 @@ public struct BookStats: Codable, Sendable, Equatable {
         public var minutes: Double
         public var pagesTurned: Int
         public var perHour: Double?
+        /// "pages" (printed, from chapter fractions), "pct" (no page count), or
+        /// "screens" (pages turned on the reader — the fallback). Older servers: nil.
+        public var paceUnit: String?
 
         public var id: String { title }
 
@@ -244,6 +308,7 @@ public struct BookStats: Codable, Sendable, Equatable {
             case title, minutes
             case pagesTurned = "pages_turned"
             case perHour = "per_hour"
+            case paceUnit = "pace_unit"
         }
     }
 

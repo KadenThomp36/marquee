@@ -1,5 +1,21 @@
 # iOS changelog
 
+## Unreleased — Folio v1.1: nothing gets stuck
+
+Needs web build `20261120b`.
+
+- **Settings › Folio › Waiting for a book.** Sittings Folio sent for a file Marquee
+  can't place yet (Hardcover down, or a book it doesn't know) are kept on the server
+  and listed here by file — title, author, sittings, time, why it's waiting and when
+  Marquee looks again. **Match** opens a picker with your own shelf first (it works
+  while Hardcover is down) and Hardcover's search under it; the sittings land on the
+  book you pick. **Ignore** is for personal documents: they're dropped and Folio's
+  later sittings in that file aren't kept. **Look now** asks Hardcover straight away.
+- *Record sittings automatically* now says it controls recording on the reader.
+- Stats: chapter pace is printed pages an hour (or % an hour) from Folio's chapter
+  positions, screens an hour only when it didn't send them; long chapter lists show
+  12 with *Show all*.
+
 ## Unreleased — Folio, and one book's reading in depth
 
 Needs a server with the Folio integration (web build `20261120a`). Everything new

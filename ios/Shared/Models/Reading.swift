@@ -574,6 +574,8 @@ public struct RestoreReadingRequest: Codable, Sendable, Equatable {
 
 public struct BookSearchResponse: Codable, Sendable, Equatable {
     public var results: [BookSearchResult]
+    /// True when Hardcover couldn't answer — not the same as "no such book".
+    public var unavailable: Bool?
 }
 
 public struct BookSearchResult: Codable, Sendable, Hashable, Identifiable {

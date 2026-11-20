@@ -13,6 +13,10 @@ struct FolioPanel: View {
     @State private var pairingUntil: Date?
     @State private var unpairing: FolioDevice?
     @State private var failed = false
+    @State private var matching: FolioWaiting?
+    @State private var ignoring: FolioWaiting?
+    @State private var lookingAgain: String?
+    @State private var notice: String?
 
     var body: some View {
         Panel(title: "Folio", symbol: "book.pages",
@@ -32,13 +36,24 @@ struct FolioPanel: View {
                         Toggle(isOn: Binding(get: { state.autoCapture },
                                              set: { value in Task { await update(.init(autoCapture: value)) } })) {
                             label("Record sittings automatically",
-                                  "Folio starts timing when you open a book and stops when you put it down. Off, you start each one on the reader.")
+                                  "This controls recording on the reader. On, Folio times a sitting from opening a book to putting it down. Off, it records only the sittings you start on the reader. Folio picks up a change the next time it syncs.")
                         }
                         .tint(Color.mqBrassFill)
 
                         Divider().overlay(Color.mqHairline).padding(.top, 8)
                         devices(state.devices)
                         pairBlock
+                        if let waiting = state.waiting, !waiting.isEmpty {
+                            waitingSection(waiting)
+                        }
+                        // outside the section, so resolving the last one still says so
+                        if let notice {
+                            Label(notice, systemImage: "checkmark.circle")
+                                .font(.mqCaption)
+                                .foregroundStyle(Color.mqBrass)
+                                .padding(.top, 12)
+                                .accessibilityAddTraits(.updatesFrequently)
+                        }
                     }
                 }
             } else if failed {
@@ -49,6 +64,22 @@ struct FolioPanel: View {
             }
         }
         .task { await load() }
+        .sheet(item: $matching) { waiting in
+            FolioMatchSheet(waiting: waiting) { request in
+                await match(request)
+            }
+        }
+        .confirmationDialog("Ignore \u{201C}\(ignoring?.title ?? "")\u{201D}?",
+                            isPresented: .init(get: { ignoring != nil },
+                                               set: { if !$0 { ignoring = nil } }),
+                            titleVisibility: .visible) {
+            Button("Ignore this file", role: .destructive) {
+                if let waiting = ignoring { Task { await ignore(waiting) } }
+                ignoring = nil
+            }
+        } message: {
+            Text("Its \(ignoring?.sittings ?? 0) sitting\(ignoring?.sittings == 1 ? " is" : "s are") dropped, and Folio\u{2019}s sittings in this file won\u{2019}t be kept from now on. For personal documents, not books.")
+        }
         .confirmationDialog("Unpair \(unpairing?.displayName ?? "this reader")?",
                             isPresented: .init(get: { unpairing != nil },
                                                set: { if !$0 { unpairing = nil } }),
@@ -162,6 +193,104 @@ struct FolioPanel: View {
         }
     }
 
+    // MARK: - Waiting for a book
+
+    /// Sittings Folio sent for a file Marquee can't place yet. Nothing is lost: they're
+    /// kept, Marquee keeps looking, and Match / Ignore settle one by hand.
+    private func waitingSection(_ waiting: [FolioWaiting]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Waiting for a book")
+                    .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
+                    .foregroundStyle(Color.mqInk)
+                Text("\(waiting.count)")
+                    .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
+                    .foregroundStyle(Color.mqBrass)
+                    .padding(.horizontal, 7).padding(.vertical, 1)
+                    .background(Color.mqBrassSoft, in: .capsule)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            Text("Folio sent these sittings, but Marquee can\u{2019}t tell which book they belong to yet. They\u{2019}re kept safe. Match one to put its sittings on your shelf, or ignore personal documents.")
+                .font(.mqCaption)
+                .foregroundStyle(Color.mqInkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+            ForEach(waiting) { item in
+                waitingRow(item)
+                if item.id != waiting.last?.id { Divider().overlay(Color.mqHairline) }
+            }
+        }
+        .padding(.top, 18)
+    }
+
+    private func waitingRow(_ item: FolioWaiting) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            // a dashed, coverless tile: "no book yet", without an alarm colour
+            Text(String(item.title.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased())
+                .font(MarqueeFont.body(15, .heavy, relativeTo: .headline))
+                .foregroundStyle(Color.mqInkMuted)
+                .frame(width: 36, height: 54)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.mqHairlineBold, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                }
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
+                    .foregroundStyle(Color.mqInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(item.byline).font(.mqCaption).foregroundStyle(Color.mqInkSoft)
+                Text(meta(item)).font(.mqCaption).foregroundStyle(Color.mqInkMuted).monospacedDigit()
+                Text(why(item))
+                    .font(.mqCaption)
+                    .foregroundStyle(Color.mqInkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Match") { matching = item }
+                        .buttonStyle(.mqChip(on: true))
+                    Button("Ignore") { ignoring = item }
+                        .buttonStyle(.mqChip)
+                    if item.reason != nil {
+                        Button(lookingAgain == item.key ? "Looking\u{2026}" : "Look now") {
+                            Task { await lookAgain(item) }
+                        }
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqBrass)
+                        .disabled(lookingAgain != nil)
+                    }
+                }
+                .padding(.top, 5)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 12)
+    }
+
+    private func meta(_ item: FolioWaiting) -> String {
+        var parts = ["\(item.sittings) sitting\(item.sittings == 1 ? "" : "s")"]
+        if item.minutes > 0 { parts.append(BookStatsFormat.duration(item.minutes)) }
+        if let first = MQTime.date(from: item.firstAt) {
+            parts.append("since \(first.formatted(.dateTime.month(.abbreviated).day()))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func why(_ item: FolioWaiting) -> String {
+        var next = ""
+        if let date = MQTime.date(from: item.nextAttemptAt) {
+            next = Calendar.current.isDateInToday(date)
+                ? " Looking again at \(date.formatted(date: .omitted, time: .shortened))."
+                : " Looking again \(date.formatted(.dateTime.weekday(.wide)))."
+        }
+        switch item.reason {
+        case "unavailable": return "Hardcover isn\u{2019}t answering right now.\(next)"
+        case "no match": return "Hardcover doesn\u{2019}t know this file\u{2019}s book.\(next)"
+        default: return "Looking it up\u{2026}"
+        }
+    }
+
     private func label(_ title: String, _ detail: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
@@ -205,6 +334,38 @@ struct FolioPanel: View {
         }
     }
 
+    private func match(_ request: FolioWaitingRequest) async {
+        guard let client = session.client,
+              let next = try? await client.post("integrations/folio/waiting/match", body: request,
+                                                as: FolioIntegration.self) else { return }
+        let count = next.imported ?? 0
+        notice = "\(count) sitting\(count == 1 ? "" : "s") added to \(next.title ?? "your shelf")"
+        state = next
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    private func ignore(_ item: FolioWaiting) async {
+        guard let client = session.client,
+              let next = try? await client.post("integrations/folio/waiting/ignore",
+                                                body: FolioWaitingRequest(key: item.key),
+                                                as: FolioIntegration.self) else { return }
+        notice = "Ignoring \(item.title)"
+        state = next
+    }
+
+    private func lookAgain(_ item: FolioWaiting) async {
+        guard let client = session.client else { return }
+        lookingAgain = item.key
+        defer { lookingAgain = nil }
+        guard let next = try? await client.post("integrations/folio/waiting/retry",
+                                                body: FolioWaitingRequest(key: item.key),
+                                                as: FolioIntegration.self) else { return }
+        let count = next.imported ?? 0
+        notice = count > 0 ? "Found it \u{2014} \(count) sitting\(count == 1 ? "" : "s") added"
+                           : "Still no match \u{2014} Marquee will keep looking"
+        state = next
+    }
+
     private func unpair(_ device: FolioDevice) async {
         guard let client = session.client else { return }
         _ = try? await client.delete("integrations/folio/devices/\(device.id)", as: Empty.self)
@@ -234,5 +395,166 @@ struct FolioPanel: View {
             }
         }
         if !Task.isCancelled { pairing = nil }
+    }
+}
+
+/// Which book is it? Your own shelf first — it works even while Hardcover is down —
+/// then Hardcover's search, prefilled with what the file says about itself.
+struct FolioMatchSheet: View {
+    let waiting: FolioWaiting
+    let onPick: (FolioWaitingRequest) async -> Void
+
+    @Environment(Session.self) private var session
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var shelf: [ReadingItem] = []
+    @State private var results: [BookSearchResult] = []
+    @State private var hardcover: Phase = .idle
+    @State private var picking = false
+
+    enum Phase { case idle, searching, done, down }
+
+    var body: some View {
+        NavigationStack {
+            MarqueeScreen {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(fileLine)
+                            .font(.mqCaption)
+                            .foregroundStyle(Color.mqInkMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass").foregroundStyle(Color.mqInkMuted)
+                            TextField("Search for the book", text: $query)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .submitLabel(.search)
+                        }
+                        .padding(12)
+                        .mqPanel()
+
+                        let local = shelfMatches
+                        if !local.isEmpty {
+                            group("On your shelf")
+                            ForEach(local) { item in
+                                row(cover: item.cover, title: item.displayTitle,
+                                    detail: [item.author, item.year?.text, item.pages.map { "\($0)p" }]) {
+                                    await pick(FolioWaitingRequest(key: waiting.key, bookID: item.id))
+                                }
+                            }
+                        }
+                        group("From Hardcover")
+                        switch hardcover {
+                        case .searching:
+                            ProgressView().tint(Color.mqBrass).padding(.vertical, 8)
+                        case .down:
+                            hint("Hardcover isn\u{2019}t answering. Pick from your shelf, or try again later. The sittings stay safe either way.")
+                        case .done where results.isEmpty:
+                            hint("Nothing found. Try fewer words.")
+                        default:
+                            ForEach(results) { result in
+                                row(cover: result.cover, title: result.displayTitle,
+                                    detail: [result.author, result.year?.text, result.pages.map { "\($0)p" }]) {
+                                    await pick(FolioWaitingRequest(key: waiting.key, result: result))
+                                }
+                            }
+                        }
+                    }
+                    .padding(MQ.gutter)
+                }
+                .disabled(picking)
+            }
+            .navigationTitle("Which book is this?")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            }
+        }
+        .presentationBackground(Color.mqGround)
+        .onAppear {
+            if query.isEmpty { query = [waiting.title, waiting.authors.first].compactMap { $0 }.joined(separator: " ") }
+        }
+        .task {
+            guard let client = session.client,
+                  let shelves = try? await client.get("reading", as: ReadingShelves.self) else { return }
+            shelf = shelves.books.all
+        }
+        .task(id: query) {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            await search()
+        }
+    }
+
+    private var fileLine: String {
+        var line = "Folio\u{2019}s file: \(waiting.title)"
+        if !waiting.authors.isEmpty { line += " by \(waiting.authors.joined(separator: ", "))" }
+        if let isbn = waiting.isbn { line += " · ISBN \(isbn)" }
+        return line + " · \(waiting.sittings) sitting\(waiting.sittings == 1 ? "" : "s") waiting"
+    }
+
+    private static let stop: Set<String> = ["the", "and", "for", "with", "from", "into", "book", "novel"]
+
+    private var shelfMatches: [ReadingItem] {
+        let words = query.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init).filter { $0.count > 2 && !Self.stop.contains($0) }
+        guard !words.isEmpty else { return [] }
+        let need = max(1, Int((Double(words.count) / 2).rounded(.up)))
+        return shelf.filter { item in
+            let hay = "\(item.displayTitle) \(item.author ?? "")".lowercased()
+            return words.filter { hay.contains($0) }.count >= need
+        }.prefix(6).map { $0 }
+    }
+
+    private func search() async {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard let client = session.client, !trimmed.isEmpty else { hardcover = .idle; return }
+        hardcover = .searching
+        do {
+            let response = try await client.get("books/search", query: ["q": trimmed], as: BookSearchResponse.self)
+            results = response.results
+            hardcover = response.unavailable == true ? .down : .done
+        } catch {
+            results = []
+            hardcover = .down
+        }
+    }
+
+    private func pick(_ request: FolioWaitingRequest) async {
+        picking = true
+        await onPick(request)
+        dismiss()
+    }
+
+    private func group(_ title: String) -> some View {
+        Text(title).mqEyebrowStyle().padding(.top, 8)
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text).font(.mqCaption).foregroundStyle(Color.mqInkMuted)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func row(cover: String?, title: String, detail: [String?],
+                     action: @escaping () async -> Void) -> some View {
+        Button { Task { await action() } } label: {
+            HStack(spacing: 11) {
+                CoverArt(url: cover, radius: 6).frame(width: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(MarqueeFont.body(14, .semibold, relativeTo: .subheadline))
+                        .foregroundStyle(Color.mqInk)
+                        .multilineTextAlignment(.leading)
+                    Text(detail.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .mqPanel()
+        }
+        .buttonStyle(.plain)
     }
 }

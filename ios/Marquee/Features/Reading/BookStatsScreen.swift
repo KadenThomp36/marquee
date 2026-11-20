@@ -150,7 +150,7 @@ struct BookStatsScreen: View {
             }
             if !stats.chapters.isEmpty {
                 section("Chapter by chapter") {
-                    Text("Time in each chapter, from Folio. Pace is pages turned on the reader per hour, tinted when it's quicker or slower than your usual for this book.")
+                    Text("Time in each chapter, from Folio, and how fast it went — tinted when it's quicker or slower than your usual for this book.")
                         .font(.mqCaption)
                         .foregroundStyle(Color.mqInkMuted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -629,23 +629,38 @@ private struct ReadingCalendar: View {
     }
 }
 
-/// Time in each chapter as a bar, with the pace beside it — tinted when it's well off
-/// your usual for this book.
+/// Time in each chapter as a bar, with the pace beside it — printed pages an hour
+/// (or % without a page count) from Folio's chapter fractions, screens turned only as
+/// the fallback — tinted when it's well off your usual, comparing like with like.
 private struct ChapterPace: View {
     let chapters: [BookStats.Chapter]
+    @State private var showingAll = false
+    private static let cap = 12
+
+    private static func pace(_ value: Double, unit: String?) -> String {
+        switch unit {
+        case "pages": "\(Int(value.rounded())) p/hr"
+        case "pct": "\(value.formatted(.number.precision(.fractionLength(value < 10 ? 1 : 0))))%/hr"
+        default: "\(Int(value.rounded())) screens/hr"
+        }
+    }
 
     var body: some View {
         let longest = max(1, chapters.map(\.minutes).max() ?? 1)
-        let paced = chapters.compactMap(\.perHour)
-        let average = paced.isEmpty ? 0 : paced.reduce(0, +) / Double(paced.count)
-        VStack(spacing: 10) {
-            ForEach(chapters) { chapter in
+        var averages: [String: Double] = [:]
+        for unit in Set(chapters.map { $0.paceUnit ?? "screens" }) {
+            let values = chapters.filter { ($0.paceUnit ?? "screens") == unit }.compactMap(\.perHour)
+            if !values.isEmpty { averages[unit] = values.reduce(0, +) / Double(values.count) }
+        }
+        let shown = showingAll ? chapters : Array(chapters.prefix(Self.cap))
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(shown) { chapter in
                 HStack(spacing: 10) {
                     Text(chapter.title)
                         .font(.mqSub)
                         .foregroundStyle(Color.mqInkSoft)
                         .lineLimit(1)
-                        .frame(width: 96, alignment: .leading)
+                        .frame(width: 90, alignment: .leading)
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.mqPanelRaised)
@@ -658,15 +673,22 @@ private struct ChapterPace: View {
                         .font(.mqCaption).foregroundStyle(Color.mqInkSoft).monospacedDigit()
                         .frame(minWidth: 44, alignment: .trailing)
                     if let perHour = chapter.perHour {
-                        let ratio = average > 0 ? perHour / average : 1
-                        Text("\(Int(perHour.rounded()))/hr")
+                        let unit = chapter.paceUnit ?? "screens"
+                        let ratio = averages[unit].map { perHour / $0 } ?? 1
+                        Text(Self.pace(perHour, unit: chapter.paceUnit))
                             .font(.mqCaption).monospacedDigit()
                             .foregroundStyle(ratio > 1.12 ? Color.mqChartAqua
                                              : ratio < 0.88 ? Color.mqChartOrange : Color.mqInkMuted)
-                            .frame(minWidth: 40, alignment: .trailing)
+                            .frame(width: 92, alignment: .trailing)   // bars end together
+                            .minimumScaleFactor(0.8)
                     }
                 }
                 .accessibilityElement(children: .combine)
+            }
+            if chapters.count > Self.cap && !showingAll {
+                Button("Show all \(chapters.count) chapters") { showingAll = true }
+                    .buttonStyle(.mqChip)
+                    .padding(.top, 2)
             }
         }
     }
