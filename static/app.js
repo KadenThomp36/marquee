@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261012a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120a";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -685,6 +685,7 @@ function parseHash() {
   else if (p[0] === "movie") routes.movie(p[1]);
   else if (p[0] === "books" && (p[1] === "author" || p[1] === "series")) routes.bookBrowse(p[1], p[2]);
   else if (p[0] === "book" && p[1] === "hc") routes.bookhc(p[2]);
+  else if (p[0] === "book" && p[2] === "stats") routes.bookStats(p[1]);
   else if (p[0] === "book") routes.book(p[1]);
   else if (p[0] === "person") routes.person(p[1]);
   else if (p[0] === "list") routes.list(p[1]);
@@ -2665,6 +2666,13 @@ function renderRDetail(d) {
         ? `<span class="rd-livechip"><span class="rd-pulse"></span>reading for <b class="rd-el" data-t="${live.started_at}"></b></span>
            <button class="btn pri" id="sesend">End session</button>`
         : `<button class="btn" id="sesstart">${PLAY_ICO} Start a reading session</button>`}</div>
+      ${!live && d.recent_folio ? `<div class="bk-synced" style="--h:${RS_HUE.folio}">${FOLIO_ICO}
+        <span>Read on <b>${esc(d.recent_folio.device)}</b> ${rsAgo(d.recent_folio.ended_at)} — ${rsDur(d.recent_folio.minutes)}${
+          d.recent_folio.pages ? `, ${d.recent_folio.pages} pages` : ""}${d.recent_folio.chapter ? `, up to ${esc(d.recent_folio.chapter)}` : ""}</span></div>` : ""}
+      ${kind === "book" && d.reading && (d.reading.minutes || d.reading.sessions || d.sessions.length) ? `
+      <a class="rdt-statlink" href="#/book/${it.id}/stats">${statsIcon()}
+        <span><b>Reading stats</b><i>${d.reading.minutes ? `${rsDur(d.reading.minutes)} over ${d.reading.sessions} sitting${d.reading.sessions === 1 ? "" : "s"}`
+          : "pace, calendar and every sitting"}${d.reading.folio ? ` · ${d.reading.folio} from Folio` : ""}</i></span>${I.chevR}</a>` : ""}
       <div class="rd-raterow"><label>My rating</label><span class="stars" id="rdstars">${stars(st.rating)}</span></div>
       <div class="rdw-dates">
         <label>Started<input type="date" id="rdstart" value="${(st.started_at || "").slice(0, 10)}" max="${nowStamp().slice(0, 10)}"></label>
@@ -2696,8 +2704,11 @@ function renderRDetail(d) {
       ${d.sessions.length ? `<div class="sub-h" style="margin-top:22px">Reading log <i class="rdt-edithint">tap a row to edit</i></div>
       <div class="rdt-log">${d.sessions.map(s => `
         <button class="rdt-lrow" data-sid="${s.id}"><b>${fmtDate(s.date)}</b>
-          <span>${s.minutes >= 3 ? `${s.minutes} min \u00b7 ` : ""}${s.from !== s.to
-            ? `${lp(s.from)} \u2192 ${lp(s.to)}<i> \u00b7 ${lpDelta(s.from, s.to)}</i>` : `at ${lp(s.to)}`}</span></button>`).join("")}</div>` : ""}
+          <span>${s.minutes >= 3 ? `${s.minutes} min \u00b7 ` : ""}${!total && s.end_fraction != null
+            ? `${Math.round(100 * (s.start_fraction || 0))}% \u2192 ${Math.round(100 * s.end_fraction)}%`
+            : s.from !== s.to
+            ? `${lp(s.from)} \u2192 ${lp(s.to)}<i> \u00b7 ${lpDelta(s.from, s.to)}</i>` : `at ${lp(s.to)}`}</span>
+          ${s.source && s.source !== "marquee" && s.minutes >= 3 ? rsPill(s) : ""}</button>`).join("")}</div>` : ""}
       ${(d.household || []).length ? `<div class="sub-h" style="margin-top:22px">Around the house</div><div class="rdt-house">${d.household.map(h => `
         <span class="rdt-hrow">${avatarHTML(h, "tiny")} <b>${esc(h.display_name || h.username)}</b>
           <i>${esc(h.state)}${h.rating ? ` \u00b7 \u2605${num(h.rating)}` : ""}</i></span>`).join("")}</div>` : ""}
@@ -2903,6 +2914,198 @@ routes.book = async id => {
     if (a) RD_ACTIVE = a.sessions || [];
     un(); if (seg()[0] === "book") renderRDetail(d);
   } catch { un(); }
+};
+/* ---------- one book's reading, in depth (#/book/<id>/stats) ----------
+   The finish date is the headline, set like an opening date on a marquee. Under it the
+   whole book as one strip with every sitting laid across the stretch it covered, then
+   the calendar, chapter pace (when Folio sent chapters) and the sittings themselves,
+   editable, each saying where it came from. Two columns on a wide screen. */
+// Folio's mark: the reader itself, a page of lines on a slim slab
+const FOLIO_ICO = `<svg class="folio-ico" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5.5" y="2.8" width="13" height="18.4" rx="2.6" stroke="currentColor" stroke-width="1.7"/><path d="M8.8 7.4h6.4M8.8 10.4h6.4M8.8 13.4h4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="17.6" r=".9" fill="currentColor"/></svg>`;
+const RS_HUE = { folio: "var(--c-aqua)", ios: "var(--c-blue)", web: "var(--c-violet)", marquee: "var(--c-yellow)" };
+const rsDur = m => { m = Math.round(m || 0); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`; };
+const rsTime = iso => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+const rsAgo = iso => {
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  return m < 2 ? "just now" : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} hr ago` : fmtDate(iso.slice(0, 10));
+};
+// where a sitting starts and ends, as fractions of the book (Folio's own when it sent them)
+const rsSpan = (s, pages) => [s.start_fraction ?? (pages ? s.from / pages : null),
+  s.end_fraction ?? (pages ? s.to / pages : null)];
+const rsPill = s => `<span class="bk-src" style="--h:${RS_HUE[s.source] || RS_HUE.marquee}">${esc(s.source_label)}</span>`;
+
+function rsRibbon(d) {
+  // shapes in a stretched SVG (so it spans any width); words and the marker in HTML,
+  // positioned by percent, so the type never stretches with it
+  const pages = d.book.pages, cur = d.state && d.state.fraction;
+  const bars = d.sessions.slice().reverse().map(s => {
+    const [a, b] = rsSpan(s, pages);
+    if (a == null || b == null || b <= a) return "";
+    const x = (a * 1000).toFixed(1), w = Math.max(3, (b - a) * 1000).toFixed(1);
+    return `<rect x="${x}" y="${s.checkpoint ? 17 : 4}" width="${w}" height="${s.checkpoint ? 6 : 32}"
+      fill="${s.checkpoint ? "var(--amber-dim)" : RS_HUE[s.source] || RS_HUE.marquee}" opacity="${s.checkpoint ? .75 : .92}">
+      <title>${esc(fmtDate(s.started_at))} · ${esc(s.source_label)}${s.checkpoint ? "" : ` · ${rsDur(s.minutes)}`} · ${Math.round(a * 100)}–${Math.round(b * 100)}%</title></rect>`;
+  }).join("");
+  const ticks = [25, 50, 75].map(p => `<line x1="${p * 10}" x2="${p * 10}" y1="0" y2="40" class="bk-tick"/>`).join("");
+  const here = cur != null && cur < 1 ? cur * 100 : null;
+  return `<div class="bk-ribbon" role="img" aria-label="Where in the book each sitting happened${cur != null ? `; you are ${Math.round(cur * 100)}% through` : ""}">
+    <svg viewBox="0 0 1000 40" preserveAspectRatio="none"><rect x="0" y="4" width="1000" height="32" fill="var(--panel-2)"/>${ticks}${bars}</svg>
+    ${here != null ? `<span class="bk-here" style="left:${here.toFixed(2)}%"></span>` : ""}
+    <div class="bk-scale"><span style="left:0">start</span>${[25, 50, 75].map(p => `<span style="left:${p}%">${p}%</span>`).join("")}<span style="left:100%">end</span>
+      ${here != null ? `<b style="left:${here.toFixed(2)}%" class="${here < 12 ? "l" : here > 88 ? "r" : ""}">you’re here</b>` : ""}</div></div>`;
+}
+
+function rsCalendar(days) {
+  const byDay = Object.fromEntries(days.map(x => [x.date, x]));
+  const today = new Date(nowStamp().slice(0, 10) + "T00:00");
+  const first = days.length ? new Date(days[0].date + "T00:00") : today;
+  const weeks = Math.min(26, Math.max(14, Math.ceil((today - first) / 864e5 / 7) + 1));
+  const start = new Date(today); start.setDate(start.getDate() - start.getDay() - 7 * (weeks - 1));
+  const max = Math.max(1, ...days.map(x => x.minutes));
+  const iso = dt => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  let cells = "", lastM = -1;
+  const labels = [];
+  for (let w = 0; w < weeks; w++) {
+    const wk = new Date(start); wk.setDate(start.getDate() + 7 * w);
+    if (wk.getMonth() !== lastM) {
+      lastM = wk.getMonth();
+      if (w < weeks - 1) labels.push([w, MONTHS[lastM]]);
+    }
+    for (let r = 0; r < 7; r++) {
+      const dt = new Date(wk); dt.setDate(wk.getDate() + r);
+      const k = iso(dt), e = byDay[k], future = dt > today;
+      const a = e && e.minutes ? (0.18 + 0.82 * Math.sqrt(e.minutes / max)).toFixed(2) : e && e.pages ? ".12" : 0;
+      cells += `<i class="${future ? "fut" : ""}${k === iso(today) ? " now" : ""}" style="--a:${a}"
+        ${e ? `title="${esc(fmtDate(k))} · ${e.minutes >= 1 ? rsDur(e.minutes) : "progress update"}${e.pages ? ` · ${e.pages} pages` : ""}"` : ""}></i>`;
+    }
+  }
+  // a partial first month would crowd the next label — keep a label only with room to breathe
+  const months = labels.filter(([w], i) => !labels[i + 1] || labels[i + 1][0] - w >= 3)
+    .map(([w, m]) => `<span style="grid-column:${w + 1} / span 3">${m}</span>`).join("");
+  return `<div class="bk-cal" style="--w:${weeks}">
+    <div class="bk-cal-m">${months}</div>
+    <div class="bk-cal-g">${cells}</div>
+    <div class="heat-legend"><span>less</span><i style="--a:.2"></i><i style="--a:.45"></i><i style="--a:.7"></i><i style="--a:1"></i><span>more time</span></div></div>`;
+}
+
+function rsChapters(ch) {
+  const max = Math.max(...ch.map(c => c.minutes), 1);
+  const paced = ch.filter(c => c.per_hour);
+  const avg = paced.length ? paced.reduce((a, c) => a + c.per_hour, 0) / paced.length : 0;
+  return `<div class="bk-chs">${ch.map(c => {
+    const rel = c.per_hour && avg ? c.per_hour / avg : 1;
+    return `<div class="bk-ch">
+      <span class="bk-ch-t">${esc(c.title)}</span>
+      <span class="bk-ch-bar"><i style="width:${(100 * c.minutes / max).toFixed(1)}%"></i></span>
+      <span class="bk-ch-n">${rsDur(c.minutes)}${c.per_hour ? `<em class="${rel > 1.12 ? "fast" : rel < 0.88 ? "slow" : ""}">${Math.round(c.per_hour)}/hr</em>` : ""}</span>
+    </div>`; }).join("")}</div>`;
+}
+
+function rsTimeline(d) {
+  const pages = d.book.pages;
+  let month = "";
+  return d.sessions.map(s => {
+    const m = s.started_at.slice(0, 7);
+    const head = m !== month ? (month = m, `<div class="bk-tl-m">${new Date(m + "-01T00:00")
+      .toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>`) : "";
+    const dt = new Date(s.started_at);
+    const [a, b] = rsSpan(s, pages);
+    const gain = pages && s.pages != null ? `+${s.pages} page${s.pages === 1 ? "" : "s"}`
+      : a != null && b != null ? `+${Math.round((b - a) * 100)}%` : "";
+    const range = pages && s.pages != null ? `p. ${s.from} → ${s.to}`
+      : a != null && b != null ? `${Math.round(a * 100)}% → ${Math.round(b * 100)}%` : "";
+    const ch = s.start_chapter && s.end_chapter && s.start_chapter !== s.end_chapter
+      ? `${esc(s.start_chapter)} → ${esc(s.end_chapter)}` : esc(s.end_chapter || s.start_chapter || "");
+    return `${head}<button class="bk-tl${s.checkpoint ? " cp" : ""}" data-sid="${s.id}" aria-label="Edit the sitting on ${esc(fmtDate(s.started_at))}">
+      <span class="bk-tl-d"><b>${dt.getDate()}</b><i>${WD[dt.getDay()]}</i></span>
+      <span class="bk-tl-main">
+        <span class="bk-tl-l1">${s.checkpoint ? `Progress set${s.to ? ` to ${pages ? `page ${s.to}` : range}` : ""}`
+          : `<b>${rsDur(s.minutes)}</b>${gain ? ` <em>${gain}</em>` : ""}`}</span>
+        <span class="bk-tl-l2">${s.checkpoint ? rsTime(s.started_at) : `${rsTime(s.started_at)}${range ? ` · ${range}` : ""}`}${ch ? ` · ${ch}` : ""}
+          ${s.source === "folio" && s.wall_minutes > s.minutes + 4 ? `<span class="bk-idle">${s.wall_minutes - s.minutes} min idle left out</span>` : ""}</span>
+        ${a != null && b != null && b > a ? `<span class="bk-tl-bar"><i style="left:${(a * 100).toFixed(1)}%;width:${Math.max(1, (b - a) * 100).toFixed(1)}%;--h:${RS_HUE[s.source] || RS_HUE.marquee}"></i></span>` : ""}
+      </span>
+      ${rsPill(s)}</button>`;
+  }).join("");
+}
+
+function renderBookStats(d) {
+  const b = d.book, st = d.state || {}, T = d.totals, P = d.pace, F = d.forecast;
+  navHere(`${b.title} · stats`);
+  const pct = st.fraction != null ? Math.round(st.fraction * 100) : null;
+  const where = st.state === "finished" ? `Finished ${fmtDate((st.finished_at || "").slice(0, 10))}`
+    : pct != null ? `${pct}% read${b.pages ? ` · page ${st.progress} of ${b.pages}` : ""}` : "";
+  const fdate = F ? new Date(F.date + "T00:00") : null;
+  const headline = st.state === "finished" ? `<div class="bk-mq done"><span class="bk-mq-k">Finished</span>
+      <span class="bk-mq-d">${new Date((st.finished_at || "").slice(0, 10) + "T00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+      <span class="bk-mq-s">${T.days} day${T.days === 1 ? "" : "s"} of reading, ${rsDur(T.minutes)} in all</span></div>`
+    : F ? `<div class="bk-mq"><span class="bk-mq-k">Finishing around</span>
+      <span class="bk-mq-d">${fdate.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+      <span class="bk-mq-s">${F.days} day${F.days === 1 ? "" : "s"} at your recent ${F.unit === "pct" ? `${F.per_day}% a day` : `${F.per_day} pages a day`}${
+        F.hours_left != null ? ` — about ${rsDur(F.hours_left * 60)} of reading left` : ""}</span></div>`
+    : st.state === "reading" ? `<div class="bk-mq quiet"><span class="bk-mq-k">No finish date yet</span>
+      <span class="bk-mq-s">A forecast appears after a few sittings in the last three weeks.</span></div>` : "";
+  const live = d.live ? `<div class="rd-livebar bk-live"><span class="rd-pulse"></span>
+      <span class="rd-lb-t">Reading now · since ${rsTime(d.live.started_at)}</span>
+      <b class="rd-el" data-t="${esc(d.live.started_at)}"></b></div>`
+    : d.recent_folio ? `<div class="bk-synced" style="--h:${RS_HUE.folio}">${FOLIO_ICO}
+      <span>Synced from <b>${esc(d.recent_folio.device)}</b> ${rsAgo(d.recent_folio.ended_at)} — ${rsDur(d.recent_folio.minutes)}${
+        d.recent_folio.chapter ? `, up to ${esc(d.recent_folio.chapter)}` : ""}</span></div>` : "";
+  const nums = [
+    [rsDur(T.minutes), "reading time"],
+    [T.sessions, T.sessions === 1 ? "sitting" : "sittings"],
+    P.pages_per_hour ? [Math.round(P.pages_per_hour), "pages an hour"] : P.pct_per_hour ? [`${P.pct_per_hour}%`, "of the book an hour"] : ["—", "pace (needs timed sittings)"],
+    [T.avg_minutes ? rsDur(T.avg_minutes) : "—", "typical sitting"],
+  ];
+  const timed = d.sessions.filter(s => !s.checkpoint).length;
+  view.innerHTML = `
+    <div class="bk-top">${crumb(`#/book/${b.id}`, b.title)}</div>
+    <header class="bk-hero">
+      <a class="bk-cover" href="#/book/${b.id}"><img src="${POSTER(b.cover)}" alt=""></a>
+      <div class="bk-id"><h1>${esc(b.title)}</h1>
+        <div class="bk-by">${esc(b.author || "")}</div>
+        ${where ? `<div class="bk-where">${where}</div>` : ""}</div>
+    </header>
+    ${live}
+    ${!d.sessions.length ? `<div class="bk-empty"><p>No sittings yet. Start a session on the book’s page, or read it in Folio —
+        every sitting lands here with its time, pages and chapters.</p>
+        <a class="btn pri" href="#/book/${b.id}">${PLAY_ICO} Go to the book</a></div>` : `
+    <div class="bk-grid stats-wrap">
+      <div class="bk-lead reveal">
+        ${headline}
+        <div class="bk-nums">${nums.map(([v, l]) => `<div><b>${v}</b><span>${l}</span></div>`).join("")}</div>
+        <section class="bk-block"><div class="section"><h2>The book, sitting by sitting</h2><span class="rule"></span></div>
+          ${rsRibbon(d)}
+          <div class="bk-legend">${d.sources.map(s => `<span style="--h:${RS_HUE[s.source] || RS_HUE.marquee}"><i></i>${esc(s.label)}
+            <em>${s.sessions} · ${rsDur(s.minutes)}</em></span>`).join("")}${T.checkpoints ? `<span class="cp"><i></i>progress updates <em>${T.checkpoints}</em></span>` : ""}</div>
+        </section>
+        <section class="bk-block"><div class="section"><h2>When you read it</h2><span class="rule"></span>
+          <span class="cnt">${T.days} day${T.days === 1 ? "" : "s"}</span></div>
+          ${rsCalendar(d.days)}</section>
+        ${d.chapters.length ? `<section class="bk-block"><div class="section"><h2>Chapter by chapter</h2><span class="rule"></span></div>
+          <p class="bk-note">Time in each chapter, from Folio. Pace is pages turned on the reader per hour —
+            <em class="fast">quicker</em> and <em class="slow">slower</em> than your usual for this book.</p>
+          ${rsChapters(d.chapters)}</section>` : ""}
+      </div>
+      <div class="bk-facing">
+        <div class="section"><h2>Sittings</h2><span class="rule"></span><span class="cnt">${timed}${T.checkpoints ? ` + ${T.checkpoints} updates` : ""}</span></div>
+        <p class="bk-note">Tap one to fix its date, length or pages.</p>
+        <div class="bk-tls">${rsTimeline(d)}</div>
+      </div>
+    </div>`}`;
+  const rerun = () => routes.bookStats(b.id);
+  $$(".bk-tl", view).forEach(row => row.onclick = () => {
+    const s = d.sessions.find(x => x.id === +row.dataset.sid);
+    if (s) rdSessionSheet({ ...s, date: s.started_at }, { unit: "pages", mode: st.mode || "pages",
+      total: b.pages, chapters: b.chapters, pages: b.pages }, rerun);
+  });
+  rdTickTimers();
+}
+routes.bookStats = async id => {
+  if (!id) return routes.reading("books");
+  const un = deferSkeleton(`<div class="sk" style="height:180px;border-radius:18px;margin-bottom:14px"></div>${skRows(4)}`);
+  const d = await screenData(`/book/${id}/stats`, un);
+  if (d && seg()[0] === "book" && seg()[2] === "stats") renderBookStats(d);
 };
 routes.bookhc = async hcid => {
   if (!hcid) return routes.reading("books");
@@ -5918,11 +6121,12 @@ routes.settings = async () => {
   navHere("Settings");
   const live = routeGuard();
   // independent fetches — in parallel, not one after another
-  const [plex, oseer, np, imdb] = await Promise.all([
+  const [plex, oseer, np, imdb, folio] = await Promise.all([
     api("/plex/status").catch(() => ({})),
     api("/overseerr/me").catch(() => ({ enabled: false })),
     api("/notifications/prefs").catch(() => ({ prefs: [] })),
-    api("/imdb/status").catch(() => null)]);
+    api("/imdb/status").catch(() => null),
+    ME.features?.books ? api("/integrations/folio").catch(() => null) : null]);
   if (!live()) return;
   const nprefs = np.prefs;
   let rgoal = ME.features?.books ? await api("/reading/goal").catch(() => null) : null;
@@ -6016,6 +6220,7 @@ routes.settings = async () => {
   view.innerHTML = `<div class="page-head">${crumb("#/profile", "Profile")}</div>
     <h1>Settings</h1><div class="reveal">
     ${plexPanel}
+    ${folio ? `<div class="panel folio" id="foliopanel">${folioPanelHTML(folio)}</div>` : ""}
     ${devicePanel}
     ${imdb ? `<div class="panel"><h3><span class="h3-ic imdb-ic">${SRC_LOGO.IMDb}</span> IMDb ratings</h3>
       <p class="hint">Episode, season, show and film ratings come from IMDb's daily dataset —
@@ -6091,6 +6296,7 @@ routes.settings = async () => {
     });
   };
   loadDevices();
+  if (folio) wireFolio(folio, loadDevices);
   if ($("#revokeothers")) $("#revokeothers").onclick = async () => {
     if (!confirm("Sign out every device except this one?")) return;
     const r = await api("/sessions/others", { method: "DELETE" }).catch(() => null);
@@ -6224,6 +6430,83 @@ routes.settings = async () => {
   });
   wirePush();
 };
+
+/* ---------- Folio: the household's own e-reader, reporting in ----------
+   Per account: you switch it on for yourself and pair your own reader. Pairing is
+   the same six-digit code the phone app uses, typed into Folio's setup. */
+function folioPanelHTML(f) {
+  const devs = f.devices || [];
+  return `<div class="fo-head">
+      <span class="fo-mark">${FOLIO_ICO}</span>
+      <div><h3>Folio</h3>
+        <div class="hint">Your reader sends every sitting here — time, pages and chapters — and your shelf keeps up on its own.</div></div>
+      <button class="switch-btn ${f.enabled ? "on" : ""}" id="fo-on" role="switch" aria-checked="${f.enabled}" aria-label="Send reading from Folio"><span></span></button>
+    </div>
+    <div class="fo-body" ${f.enabled ? "" : "hidden"}>
+      <label class="toggle-row fo-row"><span>Record sittings automatically
+          <span class="hint">Folio starts timing when you open a book and stops when you put it down. Off, you start each one on the reader.</span></span>
+        <button class="switch-btn ${f.auto_capture ? "on" : ""}" id="fo-auto" role="switch" aria-checked="${f.auto_capture}"><span></span></button></label>
+      <div class="fo-devs">${devs.length ? devs.map(dv => `
+        <div class="fo-dev${dv.signed_in ? "" : " off"}">
+          <span class="fo-dev-ic">${FOLIO_ICO}</span>
+          <div class="fo-dev-mid"><b>${esc(dv.name || "Folio")}</b>
+            <span class="hint">${dv.signed_in
+              ? (dv.last_sync_at ? `Synced ${rsAgo(dv.last_sync_at)}` : "Paired, waiting for its first sync")
+              : "Signed out — unpair it, then pair it again"}${dv.app_version ? ` · Folio ${esc(dv.app_version)}` : ""}</span></div>
+          <div class="fo-dev-n"><b>${dv.sessions_synced}</b><span>sitting${dv.sessions_synced === 1 ? "" : "s"}</span></div>
+          <button class="btn ghost fo-unpair" data-dev="${dv.id}">Unpair</button>
+        </div>`).join("") : `<p class="fo-none">No reader paired yet.</p>`}</div>
+      <div id="fo-pair"><button class="btn" id="fo-pairbtn">${I.plus} Pair a reader</button></div>
+    </div>`;
+}
+function wireFolio(f, onDevicesChanged) {
+  const box = $("#foliopanel"); if (!box) return;
+  const paint = nf => { f = nf; box.innerHTML = folioPanelHTML(f); wire(); };
+  const save = async body => {
+    const r = await api("/integrations/folio", { body }).catch(() => null);
+    if (r) paint(r); else paint(f);
+    return r;
+  };
+  const wire = () => {
+    $("#fo-on", box).onclick = async () => {
+      const r = await save({ enabled: !f.enabled });
+      if (r) toast(r.enabled ? "Folio is on — sittings from your reader land on your shelf" : "Folio is off — your reader keeps sittings until you switch it back on");
+    };
+    if ($("#fo-auto", box)) $("#fo-auto", box).onclick = () => save({ auto_capture: !f.auto_capture });
+    $$(".fo-unpair", box).forEach(b => b.onclick = async () => {
+      const dv = f.devices.find(x => x.id === +b.dataset.dev);
+      if (!confirm(`Unpair ${dv ? dv.name : "this reader"}? It stops syncing until you pair it again. Sittings already here stay.`)) return;
+      const r = await api(`/integrations/folio/devices/${b.dataset.dev}`, { method: "DELETE" }).catch(() => null);
+      if (r) { toast(`${dv ? dv.name : "Reader"} unpaired`); paint(r); onDevicesChanged && onDevicesChanged(); }
+    });
+    const pb = $("#fo-pairbtn", box);
+    if (pb) pb.onclick = async () => {
+      const slot = $("#fo-pair", box);
+      slot.innerHTML = `<div class="hint">Getting a code…</div>`;
+      const p = await api("/pair/start", { body: {} }).catch(() => null);
+      if (!p) { paint(f); return; }
+      const until = Date.now() + (p.expires_in || 300) * 1000, known = f.devices.length;
+      slot.innerHTML = `<div class="paircode fo-code">
+          <div class="pc-digits">${p.code.split("").map(c => `<b>${c}</b>`).join("")}</div>
+          <div class="pc-help">Type this into Folio when its setup asks for a <b>Marquee pairing code</b>.
+            It works once. <span class="pc-left"></span></div></div>`;
+      const tick = setInterval(async () => {
+        const left = Math.max(0, Math.round((until - Date.now()) / 1000)), el = $(".pc-left", slot);
+        if (!el || !slot.isConnected) { clearInterval(tick); return; }
+        if (!left) { clearInterval(tick); paint(f); toast("That code expired — pair again for a new one"); return; }
+        el.textContent = `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}.`;
+        if (left % 4 === 0) {        // the reader shows up the moment Folio registers
+          const nf = await api("/integrations/folio").catch(() => null);
+          if (nf && nf.devices.length > known && slot.isConnected) {
+            clearInterval(tick); paint(nf); onDevicesChanged && onDevicesChanged();
+            toast(`${nf.devices[nf.devices.length - 1].name} paired`);
+          }
+        }
+      }, 1000);
+    };
+  };
+  wire();
+}
 
 /* ---------- celebrations: you finished a season / a whole series ----------
    Milestones are recorded server-side, so one that happened while the app was closed
