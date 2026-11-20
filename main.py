@@ -23,6 +23,7 @@ from io import BytesIO
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -150,6 +151,14 @@ CREATE INDEX IF NOT EXISTS idx_folio_devices_token ON folio_devices(token);
 CREATE TABLE IF NOT EXISTS book_identities(
   user_id INTEGER, ident TEXT, book_id INTEGER, matched_by TEXT, created_at TEXT,
   PRIMARY KEY(user_id, ident));
+CREATE TABLE IF NOT EXISTS folio_unmatched(
+  id INTEGER PRIMARY KEY, user_id INTEGER, device_id INTEGER, client_id TEXT UNIQUE,
+  identity_key TEXT, identity TEXT, session TEXT, started_at TEXT, active_seconds INTEGER,
+  created_at TEXT, last_attempt_at TEXT, attempts INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_folio_unmatched_ident ON folio_unmatched(user_id, identity_key);
+CREATE TABLE IF NOT EXISTS folio_identity_state(
+  user_id INTEGER, identity_key TEXT, status TEXT, identity TEXT, attempts INTEGER DEFAULT 0,
+  next_attempt_at TEXT, last_error TEXT, updated_at TEXT, PRIMARY KEY(user_id, identity_key));
 """
 
 
@@ -404,26 +413,75 @@ def _hc_token():
         return setting(con, "hardcover_token") or os.environ.get("HARDCOVER_TOKEN", "")
 
 
+# Hardcover can be down, slow or rate-limiting, and some callers (Folio's uploads)
+# must never wait on it for long or mistake an outage for "no such book". So:
+#  - a circuit breaker: after a failed call, skip Hardcover entirely for a short while;
+#  - a per-thread scope (hc_scope) that sets a deadline, a fast mode (one try, no
+#    sleeps) and records whether anything failed, so the caller can tell
+#    "Hardcover said no" from "Hardcover couldn't answer".
+HC_BREAKER_SECONDS = 90
+_hc_breaker = {"down_until": 0.0}
+_hc_tl = threading.local()
+
+
+@contextmanager
+def hc_scope(budget=None, fast=False):
+    """Run Hardcover lookups under a time budget; yields a dict whose `failed` says
+    whether any call couldn't get an answer (outage, timeout, 429, no token)."""
+    prev = (getattr(_hc_tl, "deadline", None), getattr(_hc_tl, "fast", False),
+            getattr(_hc_tl, "status", None))
+    status = {"failed": False}
+    _hc_tl.deadline = time.time() + budget if budget else None
+    _hc_tl.fast, _hc_tl.status = fast, status
+    try:
+        yield status
+    finally:
+        _hc_tl.deadline, _hc_tl.fast, _hc_tl.status = prev
+
+
+def _hc_failed(trip=True):
+    st = getattr(_hc_tl, "status", None)
+    if st is not None:
+        st["failed"] = True
+    if trip:
+        _hc_breaker["down_until"] = time.time() + HC_BREAKER_SECONDS
+
+
 def hardcover(query, variables=None):
     token = _hc_token()
     if not token:
+        _hc_failed(trip=False)
         return None
-    for attempt in range(3):
+    if time.time() < _hc_breaker["down_until"]:
+        _hc_failed(trip=False)
+        return None
+    fast = getattr(_hc_tl, "fast", False)
+    deadline = getattr(_hc_tl, "deadline", None)
+    attempts = 1 if fast else 3
+    for attempt in range(attempts):
+        left = deadline - time.time() if deadline else 25
+        if left <= 1:
+            _hc_failed(trip=False)          # out of time, not an outage
+            return None
         try:
-            r = httpx.post("https://api.hardcover.app/v1/graphql", timeout=25,
+            r = httpx.post("https://api.hardcover.app/v1/graphql", timeout=min(25, left),
                            headers={"Authorization": f"Bearer {token.strip()}",
                                     "Content-Type": "application/json"},
                            json={"query": query, "variables": variables or {}})
             if r.status_code == 429:
-                time.sleep(3 + attempt * 3)
+                if attempt + 1 < attempts:
+                    time.sleep(3 + attempt * 3)
                 continue
             r.raise_for_status()
-            data = r.json()
-            return data.get("data")
-        except httpx.HTTPError:
-            if attempt == 2:
-                return None
-            time.sleep(1 + attempt)
+            data = r.json().get("data")
+            if data is None:                 # a GraphQL error body: no answer either
+                break
+            _hc_breaker["down_until"] = 0.0
+            return data
+        except (httpx.HTTPError, ValueError):
+            if attempt + 1 < attempts:
+                time.sleep(1 + attempt)
+    _hc_failed()
     return None
 
 
@@ -491,7 +549,9 @@ def _hc_pick(hits, want_title, want_author):
 def hc_search_rows(q, limit=8):
     def fetch():
         d = hardcover(HC_SEARCH, {"q": q, "n": limit})
-        return ((d or {}).get("search") or {}).get("results", {}).get("hits") or []
+        if d is None:             # couldn't ask — don't cache "nothing" for six hours
+            return None
+        return ((d.get("search") or {}).get("results") or {}).get("hits") or []
     hits = _cached_get(f"hcs:{q}:{limit}", fetch) or []
     return hits
 
@@ -5083,7 +5143,9 @@ def folio_prefs(con, uid):
 def folio_device_rows(con, uid):
     rows = con.execute("""SELECT d.*, s.token IS NOT NULL AS signed_in,
           (SELECT COUNT(*) FROM reading_sessions rs
-            WHERE rs.user_id=d.user_id AND rs.device_id=d.id) AS synced
+            WHERE rs.user_id=d.user_id AND rs.device_id=d.id)
+          + (SELECT COUNT(*) FROM folio_unmatched fu
+            WHERE fu.user_id=d.user_id AND fu.device_id=d.id) AS synced
         FROM folio_devices d LEFT JOIN sessions s ON s.token=d.token
         WHERE d.user_id=? AND d.revoked_at IS NULL ORDER BY d.paired_at""", (uid,)).fetchall()
     return [{"id": r["id"], "name": r["name"], "platform": r["platform"],
@@ -5095,7 +5157,9 @@ def folio_device_rows(con, uid):
 
 
 def folio_state(con, uid):
-    return {**folio_prefs(con, uid), "devices": folio_device_rows(con, uid)}
+    return {**folio_prefs(con, uid), "devices": folio_device_rows(con, uid),
+            # sittings that arrived but whose book isn't known yet (v1.1)
+            "waiting": folio_waiting(con, uid)}
 
 
 def _folio_device_for_token(con, uid, tok):
@@ -5194,20 +5258,60 @@ def folio_device_remove(device_id: int, user=Depends(current_user)):
 
 # --- book identity: a file on the reader → a book in the catalogue -----------------
 
+# Other identifiers Folio reads from an EPUB's OPF. They're per-file or per-library
+# ids, so they're only ever used to remember a mapping this user already has — never
+# to search. Anything else Folio sends is ignored.
+FOLIO_ID_SCHEMES = ("uuid", "calibre", "google", "amazon", "asin", "goodreads", "mobi-asin")
+FOLIO_CHAPTERS_MAX = 400
+FOLIO_HC_BUDGET = 15             # seconds of Hardcover a single request may spend
+# Re-resolving a parked identity: 5 min, 30 min, 2 h, then every 12 h.
+FOLIO_BACKOFF = (300, 1800, 7200, 43200)
+FOLIO_HEAL_INTERVAL = 60         # background loop tick
+FOLIO_HEAL_PER_TICK = 10         # identities re-asked of Hardcover per tick, at most
+
+
+def _isbn(v):
+    v = re.sub(r"[^0-9X]", "", str(v).upper())
+    return v if len(v) in (10, 13) else None
+
+
 def _folio_identity(raw):
+    """A reader file's identity, tolerant of whatever shape arrives."""
     raw = raw if isinstance(raw, dict) else {}
     authors = raw.get("authors")
     if isinstance(authors, str):
         authors = [authors]
-    authors = [str(a).strip()[:120] for a in (authors or []) if str(a or "").strip()][:5]
+    if not isinstance(authors, list):
+        authors = []
+    authors = [str(a).strip()[:120] for a in authors if str(a or "").strip()][:5]
     isbns = raw.get("isbn")
     if isinstance(isbns, (str, int)):
         isbns = [isbns]
-    isbns = [re.sub(r"[^0-9X]", "", str(i).upper()) for i in (isbns or [])]
+    if not isinstance(isbns, list):
+        isbns = []
+    ids = {}
+    idents = raw.get("identifiers")
+    if isinstance(idents, dict):
+        for scheme, value in list(idents.items())[:30]:
+            scheme = str(scheme or "").strip().lower()
+            value = str(value or "").strip()[:120]
+            if not scheme or not value:
+                continue
+            if scheme.startswith("isbn"):
+                isbns.append(value)
+            elif scheme in FOLIO_ID_SCHEMES:
+                ids[scheme] = value
     cal = raw.get("calibre_id")
+    if cal is None and ids.get("calibre", "").isdigit():
+        cal = ids["calibre"]
+    clean = [i for i in (_isbn(x) for x in isbns[:20]) if i]
+    # 13-digit first, then sorted: the same book always yields the same first key
+    clean = sorted(dict.fromkeys(clean), key=lambda i: (len(i) != 13, i))[:8]
     return {"title": str(raw.get("title") or "").strip()[:300], "authors": authors,
-            "isbn": list(dict.fromkeys(i for i in isbns if len(i) in (10, 13)))[:6],
-            "calibre_id": int(cal) if isinstance(cal, int) or (isinstance(cal, str) and cal.isdigit()) else None}
+            "isbn": clean,
+            "calibre_id": int(cal) if isinstance(cal, int) and not isinstance(cal, bool)
+            or (isinstance(cal, str) and cal.isdigit()) else None,
+            "ids": {k: v for k, v in ids.items() if k != "calibre"}}
 
 
 def _folio_title_key(t):
@@ -5220,12 +5324,16 @@ def _folio_title_key(t):
 
 
 def _folio_keys(ident):
-    """(matched_by, key) pairs, strongest first."""
-    keys = [("isbn", f"isbn:{i}") for i in ident["isbn"]]
-    if ident["calibre_id"] is not None:
+    """(matched_by, key) pairs, strongest first. The first one is the identity's
+    stable name: it groups parked sessions and keys their retry schedule."""
+    keys = [("isbn", f"isbn:{i}") for i in ident.get("isbn") or []]
+    if ident.get("calibre_id") is not None:
         keys.append(("calibre", f"calibre:{ident['calibre_id']}"))
-    if ident["title"]:
-        surname = (_norm_txt(ident["authors"][0]).split() or [""])[-1] if ident["authors"] else ""
+    for scheme, value in sorted((ident.get("ids") or {}).items()):
+        keys.append(("identifier", f"id:{scheme}:{value}"))
+    if ident.get("title"):
+        authors = ident.get("authors") or []
+        surname = (_norm_txt(authors[0]).split() or [""])[-1] if authors else ""
         keys.append(("title", f"title:{_folio_title_key(ident['title'])}|{surname}"))
     return keys
 
@@ -5236,70 +5344,119 @@ def _folio_book_out(con, bid, matched_by):
             "cover": b["cover"], "pages": b["pages"], "matched_by": matched_by}
 
 
-def folio_resolve(uid, ident):
-    """Find (or add from Hardcover) the book a reader file is. Returns (book_id,
-    matched_by) or (None, None). Order: this user's remembered mappings, the household
-    catalogue by title, Hardcover by ISBN, Hardcover by title — the same search and
-    catalogue helpers /api/books/search and /api/books/add use."""
+def folio_resolve_local(con, uid, ident):
+    """No network: this user's remembered mappings, then the household catalogue by
+    title. Returns (book_id, matched_by) or (None, None)."""
     keys = _folio_keys(ident)
-    if not keys:
-        return None, None
-    with db() as con:
-        for how, k in keys:
-            r = con.execute("""SELECT m.book_id FROM book_identities m JOIN books b ON b.id=m.book_id
-                WHERE m.user_id=? AND m.ident=?""", (uid, k)).fetchone()
-            if r:
-                return r["book_id"], how
-    bid = how = None
-    author = ident["authors"][0] if ident["authors"] else ""
-    if ident["title"]:
+    for how, k in keys:
+        r = con.execute("""SELECT m.book_id FROM book_identities m JOIN books b ON b.id=m.book_id
+            WHERE m.user_id=? AND m.ident=?""", (uid, k)).fetchone()
+        if r:
+            return r["book_id"], how
+    if ident.get("title"):
         want = _folio_title_key(ident["title"])
-        with db() as con:
-            hits = [r for r in con.execute("SELECT id, title, author FROM books")
-                    if _folio_title_key(r["title"]) == want and _author_overlap(r["author"], author)]
-            if hits:
-                shelf = {r["book_id"] for r in con.execute(
-                    "SELECT book_id FROM book_states WHERE user_id=?", (uid,))}
-                bid = sorted(hits, key=lambda r: (r["id"] not in shelf, r["id"]))[0]["id"]
-                how = "title"
-    doc = None
-    if not bid:
-        for isbn in ident["isbn"][:2]:
-            for h in hc_search_rows(isbn, 5):
-                d = h.get("document") or {}
-                if not d.get("id"):
-                    continue
-                listed = [re.sub(r"[^0-9X]", "", str(x).upper()) for x in (d.get("isbns") or [])]
-                if isbn in listed or (not listed and ident["title"]
-                                      and _title_matches(_clean_title(ident["title"]), d.get("title") or "")):
-                    doc, how = d, "isbn"
+        author = (ident.get("authors") or [""])[0]
+        hits = [r for r in con.execute("SELECT id, title, author FROM books")
+                if _folio_title_key(r["title"]) == want and _author_overlap(r["author"], author)]
+        if hits:
+            shelf = {r["book_id"] for r in con.execute(
+                "SELECT book_id FROM book_states WHERE user_id=?", (uid,))}
+            return sorted(hits, key=lambda r: (r["id"] not in shelf, r["id"]))[0]["id"], "title"
+    return None, None
+
+
+def folio_resolve_remote(ident, budget=FOLIO_HC_BUDGET):
+    """Hardcover by ISBN, then by title — the helpers /api/books/search and
+    /api/books/add use. Returns (book_id, matched_by, status) where status is
+    'ok', 'nomatch' (Hardcover answered: no such book) or 'unavailable' (it couldn't
+    answer — down, slow, rate-limited, no token). Never raises."""
+    try:
+        with hc_scope(budget=budget, fast=True) as hc:
+            doc = how = None
+            for isbn in (ident.get("isbn") or [])[:2]:
+                for h in hc_search_rows(isbn, 5):
+                    d = h.get("document") or {}
+                    if not d.get("id"):
+                        continue
+                    listed = [_isbn(x) for x in (d.get("isbns") or [])]
+                    if isbn in listed or (not d.get("isbns") and ident.get("title")
+                                          and _title_matches(_clean_title(ident["title"]), d.get("title") or "")):
+                        doc, how = d, "isbn"
+                        break
+                if doc:
                     break
-            if doc:
-                break
-    if not bid and not doc and ident["title"]:
-        doc = hc_best(_clean_title(ident["title"]), author)
-        how = "search" if doc else None
-    if doc:
-        try:
-            item = hc_book_by_id(int(doc["id"]))
-        except Exception:  # noqa: BLE001 — Hardcover hiccup: the search doc will do
-            item = None
-        item = item or _hc_row(doc)
+            if not doc and ident.get("title"):
+                doc = hc_best(_clean_title(ident["title"]), (ident.get("authors") or [""])[0])
+                how = "search" if doc else None
+            if not doc:
+                return None, None, ("unavailable" if hc["failed"] else "nomatch")
+            item = hc_book_by_id(int(doc["id"])) or _hc_row(doc)
         with db() as con:
             existed = con.execute("SELECT 1 FROM books WHERE hardcover_id=?",
                                   (item["hc_id"],)).fetchone()
             bid = upsert_book(con, item)
-        if how == "search" and not existed:
-            how = "created"
-    if not bid:
-        return None, None
+        return bid, ("created" if how == "search" and not existed else how), "ok"
+    except Exception:  # noqa: BLE001 — an outage must park, never 500
+        log.exception("folio: Hardcover lookup failed")
+        return None, None, "unavailable"
+
+
+def folio_remember(con, uid, ident, bid, how):
     now = datetime.now().isoformat()
-    with db() as con:
-        for _, k in keys:
-            con.execute("""INSERT INTO book_identities(user_id,ident,book_id,matched_by,created_at)
-                VALUES(?,?,?,?,?) ON CONFLICT(user_id,ident) DO UPDATE SET
-                  book_id=excluded.book_id, matched_by=excluded.matched_by""", (uid, k, bid, how, now))
-    return bid, how
+    for _, k in _folio_keys(ident):
+        con.execute("""INSERT INTO book_identities(user_id,ident,book_id,matched_by,created_at)
+            VALUES(?,?,?,?,?) ON CONFLICT(user_id,ident) DO UPDATE SET
+              book_id=excluded.book_id, matched_by=excluded.matched_by""", (uid, k, bid, how, now))
+
+
+def folio_is_ignored(con, uid, ident):
+    keys = [k for _, k in _folio_keys(ident)]
+    if not keys:
+        return False
+    return con.execute(f"""SELECT 1 FROM folio_identity_state WHERE user_id=? AND status='ignored'
+        AND identity_key IN ({_ph(keys)}) LIMIT 1""", (uid, *keys)).fetchone() is not None
+
+
+def _folio_due(con, uid, key):
+    r = con.execute("""SELECT next_attempt_at FROM folio_identity_state WHERE user_id=?
+        AND identity_key=? AND status='pending'""", (uid, key)).fetchone()
+    return not r or not r["next_attempt_at"] or r["next_attempt_at"] <= datetime.now().isoformat()
+
+
+def _folio_note_miss(con, uid, key, ident, status):
+    """Schedule the next try. 'No match' climbs the backoff; an outage retries soon
+    (it heals on its own) but never more often than the first step."""
+    r = con.execute("""SELECT attempts FROM folio_identity_state WHERE user_id=?
+        AND identity_key=?""", (uid, key)).fetchone()
+    attempts = (r["attempts"] if r else 0) + 1
+    step = FOLIO_BACKOFF[min(attempts, len(FOLIO_BACKOFF)) - 1] if status == "nomatch" \
+        else FOLIO_BACKOFF[0]
+    now = datetime.now()
+    con.execute("""INSERT INTO folio_identity_state(user_id,identity_key,status,identity,attempts,
+          next_attempt_at,last_error,updated_at) VALUES(?,?,'pending',?,?,?,?,?)
+        ON CONFLICT(user_id,identity_key) DO UPDATE SET attempts=excluded.attempts,
+          next_attempt_at=excluded.next_attempt_at, last_error=excluded.last_error,
+          updated_at=excluded.updated_at
+        WHERE folio_identity_state.status='pending'""",
+        (uid, key, json.dumps(ident), attempts,
+         (now + timedelta(seconds=step)).isoformat(timespec="seconds"),
+         "no match" if status == "nomatch" else "unavailable", now.isoformat()))
+
+
+def _folio_begin(con):
+    """Each session is one IMMEDIATE transaction: the duplicate check and the writes
+    happen under the write lock, so a retry racing the original can't double-insert,
+    and a crash mid-batch leaves every session either fully applied or not at all."""
+    con.execute("BEGIN IMMEDIATE")
+
+
+def _folio_known(con, cid):
+    """(table, user_id) if this client_id already arrived, as a session or parked."""
+    r = con.execute("SELECT user_id FROM reading_sessions WHERE client_id=?", (cid,)).fetchone()
+    if r:
+        return "accepted", r["user_id"]
+    r = con.execute("SELECT user_id FROM folio_unmatched WHERE client_id=?", (cid,)).fetchone()
+    return ("parked", r["user_id"]) if r else (None, None)
 
 
 @app.post("/api/reading/resolve")
@@ -5307,11 +5464,28 @@ async def folio_resolve_ep(request: Request, user=Depends(current_user)):
     """Map a reader file to a Marquee book, adding it to the catalogue if needed.
     Never touches the shelf — the first session does that."""
     ident = _folio_identity(await _json_obj(request))
-    bid, how = folio_resolve(user["id"], ident)
-    if not bid:
-        return _folio_err(404, "no match")
+    return await run_in_threadpool(_folio_resolve_work, user["id"], ident)
+
+
+def _folio_resolve_work(uid, ident):
     with db() as con:
-        return _folio_book_out(con, bid, how)
+        bid, how = folio_resolve_local(con, uid, ident)
+        ignored = not bid and folio_is_ignored(con, uid, ident)
+    status = "ok"
+    if not bid and not ignored and _folio_keys(ident):
+        bid, how, status = folio_resolve_remote(ident)
+    if bid:
+        with db() as con:
+            folio_remember(con, uid, ident, bid, how)
+        folio_heal_soon(uid)                 # this book may unlock parked sessions
+        with db() as con:
+            return _folio_book_out(con, bid, how)
+    if ignored:
+        return JSONResponse({"error": "no match", "detail": "ignored", "ignored": True}, 404)
+    # 404 either way (Folio then sends sessions with the identity, and they park);
+    # `retry` says whether that was a real "no" or Hardcover not answering.
+    return JSONResponse({"error": "no match", "detail": "no match",
+                         "retry": status == "unavailable"}, 404)
 
 
 # --- the batch upload ---------------------------------------------------------------
@@ -5332,24 +5506,25 @@ def _folio_time(v, field):
 
 
 def _frac(v):
-    if v is None:
+    if v is None or isinstance(v, bool):
         return None
     try:
         f = float(v)
     except (TypeError, ValueError):
         return None
-    return None if f != f else round(min(1.0, max(0.0, f)), 5)
+    return None if f != f or f in (float("inf"), float("-inf")) else round(min(1.0, max(0.0, f)), 5)
 
 
 def _nonneg_int(v):
     try:
         return max(0, int(v)) if v is not None and not isinstance(v, bool) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
 def _folio_parse(raw):
-    """One uploaded session → a clean dict, or ValueError with the reason Folio gets."""
+    """One uploaded session → a clean dict, or ValueError with the reason Folio gets.
+    Unknown fields are ignored; malformed optional ones are dropped, not fatal."""
     started = _folio_time(raw.get("started_at"), "started_at")
     ended = _folio_time(raw.get("ended_at"), "ended_at")
     if ended < started:
@@ -5364,11 +5539,16 @@ def _folio_parse(raw):
     st, en = raw.get("start") or {}, raw.get("end") or {}
     st, en = (st if isinstance(st, dict) else {}), (en if isinstance(en, dict) else {})
     chapters = []
-    for c in (raw.get("chapters") or [])[:200] if isinstance(raw.get("chapters"), list) else []:
+    chs = raw.get("chapters") if isinstance(raw.get("chapters"), list) else []
+    for c in chs[:FOLIO_CHAPTERS_MAX]:          # truncated, never rejected
         if isinstance(c, dict) and str(c.get("title") or "").strip():
-            chapters.append({"title": str(c["title"]).strip()[:120],
-                             "seconds": _nonneg_int(c.get("seconds")) or 0,
-                             "pages_turned": _nonneg_int(c.get("pages_turned")) or 0})
+            ch = {"title": str(c["title"]).strip()[:120],
+                  "seconds": _nonneg_int(c.get("seconds")) or 0,
+                  "pages_turned": _nonneg_int(c.get("pages_turned")) or 0}
+            sf, ef = _frac(c.get("start_fraction")), _frac(c.get("end_fraction"))
+            if sf is not None and ef is not None:
+                ch["start_fraction"], ch["end_fraction"] = sf, ef
+            chapters.append(ch)
     meta = {k: v for k, v in (("start_chapter", str(st.get("chapter") or "").strip()[:120]),
                               ("end_chapter", str(en.get("chapter") or "").strip()[:120]),
                               ("chapters", chapters)) if v}
@@ -5382,7 +5562,8 @@ def _folio_parse(raw):
 
 
 def _folio_apply(con, uid, device_id, client_id, bid, s):
-    """Insert one session and move the shelf on. Returns milestone ids it earned."""
+    """Insert one session and move the shelf on. Returns milestone ids it earned.
+    Runs inside the caller's transaction."""
     b = con.execute("SELECT pages FROM books WHERE id=?", (bid,)).fetchone()
     pages = b["pages"] if b else None
     pos = lambda f: round(f * pages) if pages and f is not None else None
@@ -5420,17 +5601,168 @@ def _folio_apply(con, uid, device_id, client_id, bid, s):
     return record_reading_milestones(con, uid, "book", bid, again=True) if finishing else []
 
 
+def folio_store(uid, device_id, cid, bid, s):
+    """Apply one session atomically. 'accepted', or 'duplicate' if it got here first
+    by another road (a parallel retry, a heal)."""
+    with db() as con:
+        _folio_begin(con)
+        if _folio_known(con, cid)[0]:
+            return "duplicate"
+        try:
+            _folio_apply(con, uid, device_id, cid, bid, s)
+        except sqlite3.IntegrityError:
+            con.rollback()
+            return "duplicate"
+        return "accepted"
+
+
+def folio_park(uid, device_id, cid, s, raw):
+    """Keep a session whose book can't be told yet. 'parked' or 'duplicate'."""
+    keys = _folio_keys(s["book"])
+    with db() as con:
+        _folio_begin(con)
+        if _folio_known(con, cid)[0]:
+            return "duplicate"
+        try:
+            con.execute("""INSERT INTO folio_unmatched(user_id,device_id,client_id,identity_key,
+                identity,session,started_at,active_seconds,created_at,attempts)
+                VALUES(?,?,?,?,?,?,?,?,?,0)""",
+                (uid, device_id, cid, keys[0][1], json.dumps(s["book"]), json.dumps(raw),
+                 s["started"], s["active"], datetime.now().isoformat(timespec="seconds")))
+        except sqlite3.IntegrityError:
+            con.rollback()
+            return "duplicate"
+        return "parked"
+
+
+def folio_import_parked(uid, key, bid):
+    """Every parked session for one identity, through the same path as a fresh batch:
+    oldest first, one transaction each, client_id still idempotent. Returns how many
+    became sessions."""
+    with db() as con:
+        rows = con.execute("""SELECT id, client_id, device_id, session FROM folio_unmatched
+            WHERE user_id=? AND identity_key=? ORDER BY started_at""", (uid, key)).fetchall()
+    imported = 0
+    for r in rows:
+        try:
+            s = _folio_parse(json.loads(r["session"]))
+        except (ValueError, TypeError):
+            s = None
+        with db() as con:
+            _folio_begin(con)
+            gone = con.execute("SELECT 1 FROM folio_unmatched WHERE id=?", (r["id"],)).fetchone()
+            if not gone:
+                continue                       # another heal took it
+            if s and not con.execute("SELECT 1 FROM reading_sessions WHERE client_id=?",
+                                     (r["client_id"],)).fetchone():
+                _folio_apply(con, uid, r["device_id"], r["client_id"], bid, s)
+                imported += 1
+            con.execute("DELETE FROM folio_unmatched WHERE id=?", (r["id"],))
+    with db() as con:
+        con.execute("""DELETE FROM folio_identity_state WHERE user_id=? AND identity_key=?
+            AND status='pending'""", (uid, key))
+    if imported:
+        log.info("folio: imported %d parked session(s) for user %s (%s)", imported, uid, key)
+    return imported
+
+
+_folio_heal_locks = {}
+_folio_heal_guard = threading.Lock()
+
+
+def folio_heal(uid=None, remote=True, force_key=None, budget=FOLIO_HC_BUDGET, limit=None):
+    """Re-resolve parked identities. Locally every time (a manual match or another
+    session may have taught Marquee the book); of Hardcover only when an identity is
+    due under its backoff (or `force_key` asks), within `budget` seconds."""
+    with db() as con:
+        q = "SELECT user_id, identity_key, MAX(identity) AS identity FROM folio_unmatched"
+        args = []
+        if uid is not None:
+            q += " WHERE user_id=?"; args.append(uid)
+        groups = con.execute(q + " GROUP BY user_id, identity_key ORDER BY MIN(created_at)",
+                             args).fetchall()
+    started, asked, healed = time.time(), 0, 0
+    for g in groups:
+        u, key = g["user_id"], g["identity_key"]
+        with _folio_heal_guard:
+            lock = _folio_heal_locks.setdefault((u, key), threading.Lock())
+        if not lock.acquire(blocking=False):
+            continue                           # someone's already on it
+        try:
+            with db() as con:
+                variants = _folio_group_identities(con, u, key)
+            if not variants:
+                continue
+            ident = variants[0]
+            with db() as con:
+                if folio_is_ignored(con, u, ident):
+                    con.execute("DELETE FROM folio_unmatched WHERE user_id=? AND identity_key=?",
+                                (u, key))
+                    continue
+                bid, how = folio_resolve_local(con, u, ident)
+                due = force_key == key or _folio_due(con, u, key)
+            status = "nomatch"
+            if not bid and remote and due:
+                left = budget - (time.time() - started)
+                if left < 2 or (limit and asked >= limit):
+                    continue
+                asked += 1
+                bid, how, status = folio_resolve_remote(ident, budget=left)
+            if bid:
+                with db() as con:
+                    for variant in variants:
+                        folio_remember(con, u, variant, bid, how)
+                healed += folio_import_parked(u, key, bid)
+            elif remote and due:
+                with db() as con:
+                    _folio_note_miss(con, u, key, ident, status)
+                    con.execute("""UPDATE folio_unmatched SET attempts=attempts+1,
+                        last_attempt_at=? WHERE user_id=? AND identity_key=?""",
+                        (datetime.now().isoformat(timespec="seconds"), u, key))
+        except Exception:  # noqa: BLE001 — one bad identity mustn't stop the others
+            log.exception("folio: heal failed for %s", key)
+        finally:
+            lock.release()
+    return healed
+
+
+def folio_heal_soon(uid):
+    """Kick a heal for one user off the request thread — a batch or resolve shouldn't
+    wait on Hardcover for sessions it already has."""
+    threading.Thread(target=folio_heal, kwargs={"uid": uid}, daemon=True).start()
+
+
+def folio_heal_loop():
+    """The background half of self-healing: parked identities are re-asked on their
+    backoff schedule, so a Hardcover outage clears without anyone touching anything."""
+    time.sleep(40)
+    while True:
+        try:
+            folio_heal(limit=FOLIO_HEAL_PER_TICK, budget=45)
+        except Exception:  # noqa: BLE001
+            log.exception("folio heal loop failed")
+        time.sleep(FOLIO_HEAL_INTERVAL)
+
+
 @app.post("/api/reading/sessions/batch")
 async def folio_batch(request: Request, user=Depends(current_user)):
-    """Folio's outbox, emptied. Idempotent on client_id: a retry lands every session
-    it already sent in `duplicates`, never twice in the log."""
+    """Folio's outbox, emptied. Every session ends up accepted, parked (book not
+    known yet), ignored (the user said so), a duplicate, or rejected — with `retry`
+    saying whether resending could ever help. Hardcover being down parks; it never
+    rejects and never 500s."""
     body = await _json_obj(request)
     sessions = body.get("sessions")
     if not isinstance(sessions, list):
         return _folio_err(400, "sessions must be a list")
     if len(sessions) > FOLIO_BATCH_MAX:
         return _folio_err(413, f"at most {FOLIO_BATCH_MAX} sessions per batch")
-    uid, tok = user["id"], _bearer_token(request)
+    tok = _bearer_token(request)
+    # the work blocks (SQLite, maybe Hardcover): off the event loop, so one slow
+    # batch can't stall every other request
+    return await run_in_threadpool(_folio_batch_work, user["id"], tok, body, sessions)
+
+
+def _folio_batch_work(uid, tok, body, sessions):
     with db() as con:
         if not folio_prefs(con, uid)["enabled"]:
             return _folio_err(403, "integration disabled")
@@ -5440,56 +5772,216 @@ async def folio_batch(request: Request, user=Depends(current_user)):
                 AND revoked_at IS NULL""", (body["device_id"], uid)).fetchone()
         # the server forgot the device (or Folio skipped registering): adopt the token
         device_id = dev["id"] if dev else (_folio_register(con, uid, tok) if tok else None)
-    accepted, duplicates, rejected, todo = [], [], [], []
-    seen = set()
+    out = {"accepted": [], "parked": [], "ignored": [], "duplicates": [], "rejected": []}
+    reject = lambda cid, msg, retry=False: out["rejected"].append(
+        {"client_id": cid or None, "error": msg, "retry": retry})
+    seen, todo = set(), []
     for raw in sessions:
         cid = str(raw.get("client_id") or "").strip()[:100] if isinstance(raw, dict) else ""
         if not cid:
-            rejected.append({"client_id": cid or None, "error": "missing client_id"})
+            reject(None, "missing client_id")
             continue
         # a retry is a duplicate whatever it now says — checked before validation, so
         # an id that was accepted once can never also come back rejected
         if cid in seen:
-            duplicates.append(cid)
+            out["duplicates"].append(cid)
             continue
         seen.add(cid)
         with db() as con:
-            prior = con.execute("SELECT user_id FROM reading_sessions WHERE client_id=?",
-                                (cid,)).fetchone()
-        if prior:
-            if prior["user_id"] == uid:
-                duplicates.append(cid)
+            where, owner = _folio_known(con, cid)
+        if where:
+            if owner == uid:
+                out["duplicates"].append(cid)
             else:
-                rejected.append({"client_id": cid, "error": "client_id already used"})
+                reject(cid, "client_id already used")
             continue
         try:
-            todo.append((cid, _folio_parse(raw)))
+            s = _folio_parse(raw)
         except ValueError as e:
-            rejected.append({"client_id": cid, "error": str(e)})
-    # milestones a finish earns are banked server-side; the apps pick them up from
-    # /api/celebrations exactly as they do for a finish logged on the web
-    # oldest first, so a finish uploaded alongside the sessions before it lands last
-    for cid, s in sorted(todo, key=lambda t: t[1]["started"]):
-        bid = s["book_id"]
-        if bid:
-            with db() as con:
-                bid = bid if con.execute("SELECT 1 FROM books WHERE id=?", (bid,)).fetchone() else None
-        if not bid:
-            bid, _ = folio_resolve(uid, s["book"])
-        if not bid:
-            rejected.append({"client_id": cid, "error": "unresolved book"})
+            reject(cid, str(e))
             continue
+        if not s["book_id"] and not _folio_keys(s["book"]):
+            reject(cid, "no book identity")
+            continue
+        todo.append((cid, s, raw))
+    # one Hardcover answer per identity per batch, within one shared time budget
+    answers, started = {}, time.time()
+    # oldest first, so a finish uploaded alongside the sessions before it lands last
+    for cid, s, raw in sorted(todo, key=lambda t: t[1]["started"]):
         try:
-            with db() as con:
-                _folio_apply(con, uid, device_id, cid, bid, s)
-            accepted.append(cid)
-        except sqlite3.IntegrityError:        # the same id racing in on a parallel retry
-            duplicates.append(cid)
+            bid = s["book_id"]
+            if bid:
+                with db() as con:
+                    bid = bid if con.execute("SELECT 1 FROM books WHERE id=?", (bid,)).fetchone() else None
+            if not bid:
+                key = _folio_keys(s["book"])[0][1]
+                with db() as con:
+                    bid, how = folio_resolve_local(con, uid, s["book"])
+                    if not bid and folio_is_ignored(con, uid, s["book"]):
+                        out["ignored"].append(cid)
+                        continue
+                    due = _folio_due(con, uid, key)
+                if not bid and key in answers:
+                    bid = answers[key]
+                elif not bid and due:
+                    left = FOLIO_HC_BUDGET - (time.time() - started)
+                    status = "unavailable"
+                    if left >= 2:
+                        bid, how, status = folio_resolve_remote(s["book"], budget=left)
+                    answers[key] = bid
+                    with db() as con:
+                        if bid:
+                            folio_remember(con, uid, s["book"], bid, how)
+                        else:
+                            _folio_note_miss(con, uid, key, s["book"], status)
+            if bid:
+                result = folio_store(uid, device_id, cid, bid, s)
+                out["accepted" if result == "accepted" else "duplicates"].append(cid)
+            else:
+                result = folio_park(uid, device_id, cid, s, raw)
+                out["parked" if result == "parked" else "duplicates"].append(cid)
+        except Exception:  # noqa: BLE001 — a transient failure for this one session only
+            log.exception("folio: session %s failed", cid)
+            reject(cid, "server error, send again later", retry=True)
     with db() as con:
         if device_id:
             con.execute("UPDATE folio_devices SET last_sync_at=? WHERE id=?",
                         (datetime.now().replace(microsecond=0).isoformat(), device_id))
-    return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
+        pending = con.execute("SELECT 1 FROM folio_unmatched WHERE user_id=? LIMIT 1",
+                              (uid,)).fetchone()
+    if pending:
+        folio_heal_soon(uid)
+    return out
+
+
+# --- Settings: books Folio is still waiting on ---------------------------------------
+
+def folio_waiting(con, uid):
+    rows = con.execute("""SELECT u.identity_key, MAX(u.identity) AS identity, COUNT(*) AS n,
+          SUM(COALESCE(u.active_seconds,0)) AS secs, MIN(u.started_at) AS first_at,
+          MAX(u.started_at) AS last_at, s.next_attempt_at, s.last_error, s.attempts
+        FROM folio_unmatched u LEFT JOIN folio_identity_state s
+          ON s.user_id=u.user_id AND s.identity_key=u.identity_key
+        WHERE u.user_id=? GROUP BY u.identity_key ORDER BY MAX(u.started_at) DESC""",
+        (uid,)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            ident = json.loads(r["identity"] or "{}")
+        except ValueError:
+            ident = {}
+        out.append({"key": r["identity_key"], "title": ident.get("title") or "Untitled",
+                    "authors": ident.get("authors") or [], "isbn": (ident.get("isbn") or [None])[0],
+                    "sittings": r["n"], "minutes": round((r["secs"] or 0) / 60),
+                    "first_at": r["first_at"], "last_at": r["last_at"],
+                    "next_attempt_at": r["next_attempt_at"],
+                    # 'no match' | 'unavailable' | None (not asked yet)
+                    "reason": r["last_error"], "attempts": r["attempts"] or 0})
+    return out
+
+
+def _folio_group_identities(con, uid, key):
+    """Every distinct identity parked under one key — one file can arrive with an
+    ISBN and a uuid once and with only a title the next time. Richest first."""
+    out = []
+    for r in con.execute("""SELECT DISTINCT identity FROM folio_unmatched
+            WHERE user_id=? AND identity_key=?""", (uid, key)):
+        try:
+            out.append(json.loads(r["identity"]))
+        except (TypeError, ValueError):
+            pass
+    return sorted(out, key=lambda i: -len(_folio_keys(i)))
+
+
+def _folio_waiting_identity(con, uid, key):
+    r = con.execute("""SELECT MAX(identity) AS identity, COUNT(*) AS n FROM folio_unmatched
+        WHERE user_id=? AND identity_key=?""", (uid, key)).fetchone()
+    if not r or not r["n"]:
+        return None
+    try:
+        return json.loads(r["identity"])
+    except (TypeError, ValueError):
+        return {}
+
+
+@app.post("/api/integrations/folio/waiting/match")
+async def folio_waiting_match(request: Request, user=Depends(current_user)):
+    """Link a waiting identity to a book by hand — one already on the shelf
+    (`book_id`) or a Hardcover search result (`hc_id`, as /api/books/add takes) —
+    and import its parked sittings."""
+    body = await _json_obj(request)
+    return await run_in_threadpool(_folio_match_work, user["id"], body)
+
+
+def _folio_match_work(uid, body):
+    key = str(body.get("key") or "")
+    with db() as con:
+        ident = _folio_waiting_identity(con, uid, key)
+    if ident is None:
+        return _folio_err(404, "nothing waiting for that book")
+    bid = None
+    if isinstance(body.get("book_id"), int):
+        with db() as con:
+            r = con.execute("SELECT id FROM books WHERE id=?", (body["book_id"],)).fetchone()
+        bid = r["id"] if r else None
+    elif body.get("hc_id"):
+        # same rule as /api/books/add: the shared catalogue row comes from Hardcover,
+        # falling back to a scrubbed copy of the search result if it's unreachable
+        item = None
+        try:
+            with hc_scope(budget=FOLIO_HC_BUDGET, fast=True):
+                item = hc_book_by_id(int_or_400(body["hc_id"], "hc_id"))
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            item = None
+        item = item or _scrub_book_item(body)
+        with db() as con:
+            bid = upsert_book(con, item)
+    if not bid:
+        return _folio_err(400, "pick a book")
+    with db() as con:
+        for variant in _folio_group_identities(con, uid, key) or [ident]:
+            folio_remember(con, uid, variant, bid, "manual")
+    n = folio_import_parked(uid, key, bid)
+    folio_heal(uid=uid, remote=False)          # the same book may unlock other groups
+    with db() as con:
+        b = con.execute("SELECT title FROM books WHERE id=?", (bid,)).fetchone()
+        return {"ok": True, "imported": n, "book_id": bid, "title": b["title"] if b else None,
+                **folio_state(con, uid)}
+
+
+@app.post("/api/integrations/folio/waiting/ignore")
+async def folio_waiting_ignore(request: Request, user=Depends(current_user)):
+    """Not a book — a personal document. Drop what's parked for it and answer
+    `ignored` for it from now on."""
+    body = await _json_obj(request)
+    uid, key = user["id"], str(body.get("key") or "")
+    with db() as con:
+        ident = _folio_waiting_identity(con, uid, key)
+        if ident is None:
+            return _folio_err(404, "nothing waiting for that book")
+        now = datetime.now().isoformat(timespec="seconds")
+        keys = {k for v in _folio_group_identities(con, uid, key) for _, k in _folio_keys(v)}
+        for k in keys or {key}:
+            con.execute("""INSERT INTO folio_identity_state(user_id,identity_key,status,identity,
+                  attempts,updated_at) VALUES(?,?,'ignored',?,0,?)
+                ON CONFLICT(user_id,identity_key) DO UPDATE SET status='ignored',
+                  next_attempt_at=NULL, updated_at=excluded.updated_at""",
+                (uid, k, json.dumps(ident), now))
+        n = con.execute("DELETE FROM folio_unmatched WHERE user_id=? AND identity_key=?",
+                        (uid, key)).rowcount
+        return {"ok": True, "dropped": n, **folio_state(con, uid)}
+
+
+@app.post("/api/integrations/folio/waiting/retry")
+async def folio_waiting_retry(request: Request, user=Depends(current_user)):
+    """"Look again" — ask Hardcover about one waiting book now, backoff or not."""
+    body = await _json_obj(request)
+    key = str(body.get("key") or "")
+    n = await run_in_threadpool(folio_heal, user["id"], True, key)
+    with db() as con:
+        return {"ok": True, "imported": n, **folio_state(con, user["id"])}
 
 
 # --- one book's reading, in depth (the per-book stats page) -------------------------
@@ -5607,10 +6099,15 @@ def book_stats(book_id: int, user=Depends(current_user)):
             so["sessions"] += 1; so["minutes"] += secs / 60
         for c in meta.get("chapters") or []:
             ch = chapters.setdefault(c["title"], {"title": c["title"], "seconds": 0,
-                                                  "pages_turned": 0, "sessions": 0})
+                                                  "pages_turned": 0, "sessions": 0,
+                                                  "_fsecs": 0, "_fgain": 0.0})
             ch["seconds"] += c.get("seconds") or 0
             ch["pages_turned"] += c.get("pages_turned") or 0
             ch["sessions"] += 1
+            # v1.1: where in the book this chapter's reading ran — printed-page pace
+            if c.get("start_fraction") is not None and c.get("end_fraction") is not None:
+                ch["_fsecs"] += c.get("seconds") or 0
+                ch["_fgain"] += max(0.0, c["end_fraction"] - c["start_fraction"])
         sessions.append({
             "id": r["id"], "started_at": r["started_at"], "ended_at": r["ended_at"],
             "minutes": round(secs / 60), "seconds": round(secs),
@@ -5660,8 +6157,16 @@ def book_stats(book_id: int, user=Depends(current_user)):
         toc = []
     ch_rows = []
     for c in chapters.values():
+        fsecs, fgain = c.pop("_fsecs"), c.pop("_fgain")
         c["minutes"] = round(c["seconds"] / 60, 1)
-        c["per_hour"] = round(c["pages_turned"] / (c["seconds"] / 3600), 1) if c["seconds"] >= 60 else None
+        c["per_hour"], c["pace_unit"] = None, None
+        if fsecs >= 60 and fgain > 0:
+            # printed pages an hour when the book has a page count, else percent
+            c["per_hour"] = round(fgain * (pages or 100) / (fsecs / 3600), 1)
+            c["pace_unit"] = "pages" if pages else "pct"
+        elif c["seconds"] >= 60 and c["pages_turned"]:
+            c["per_hour"] = round(c["pages_turned"] / (c["seconds"] / 3600), 1)
+            c["pace_unit"] = "screens"           # fallback: screens turned on the reader
         ch_rows.append(c)
     return {
         "book": {"id": b["id"], "title": b["title"], "author": b["author"], "cover": b["cover"],
@@ -7407,6 +7912,7 @@ def startup():
     threading.Thread(target=notif_loop, daemon=True).start()
     threading.Thread(target=imdb_loop, daemon=True).start()
     threading.Thread(target=manga_release_loop, daemon=True).start()
+    threading.Thread(target=folio_heal_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
