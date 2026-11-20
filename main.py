@@ -40,7 +40,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120e"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120f"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -509,6 +509,7 @@ def _hc_row(doc):
             "pages": doc.get("pages") or None,
             "cover": img_url,
             "series": series or "",
+            "series_pos": fs.get("position") if (fs.get("series") or {}).get("name") == series else None,
             "rating": round(doc["rating"], 2) if doc.get("rating") else None,
             "community_rating": round(doc["rating"], 2) if doc.get("rating") else None,
             "ratings_count": doc.get("ratings_count") or 0,
@@ -3796,6 +3797,7 @@ def _state_row(r, kind):
                     "community_rating": r["community_rating"] if "community_rating" in r.keys() else None,
                     "chapters": r["chapters"] if "chapters" in r.keys() else None,
                     "series": (r["series"] if "series" in r.keys() else None) or "",
+                    "series_pos": r["series_pos"] if "series_pos" in r.keys() else None,
                     "genres": (r["genres"] if "genres" in r.keys() else None) or ""})
     else:
         try:
@@ -4023,11 +4025,18 @@ def books_browse(by: str, name: str, user=Depends(current_user)):
     cat = _hc_dedupe(cat, by_position=(by == "series"))
     pos_by_hc = {r["hc_id"]: r.get("series_pos") for r in cat}
 
-    shelf = []
+    shelf, learned = [], []
     for r in mine:
         row = _state_row(r, "book")
-        row["series_pos"] = pos_by_hc.get(r["hardcover_id"])
+        pos = _num_or_none(pos_by_hc.get(r["hardcover_id"]))
+        if by == "series" and pos is not None and pos != r["series_pos"]:
+            learned.append((pos, r["id"]))
+        # Hardcover's answer when there is one, else the number remembered from last time
+        row["series_pos"] = pos if pos is not None else r["series_pos"]
         shelf.append(row)
+    if learned:
+        with db() as con:
+            con.executemany("UPDATE books SET series_pos=? WHERE id=?", learned)
     if by == "series":
         shelf.sort(key=lambda x: (not x["series_pos"], x["series_pos"] or 0,
                                   x["year"] or 0))
@@ -4038,6 +4047,39 @@ def books_browse(by: str, name: str, user=Depends(current_user)):
             if r["hc_id"] not in owned and _book_key(r["title"]) not in have][:30]
     return {"by": by, "name": (head or {}).get("name") or name,
             "header": head, "shelf": shelf, "more": more}
+
+
+def _num_or_none(v):
+    try:
+        return float(v) if v is not None and v != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _backfill_series_pos():
+    """At start: remember each shelved book's place in its series (from Hardcover), so
+    the "#N" survives a Hardcover outage. Additions, rematches and series pages store it
+    as they go; this catches whatever's still missing."""
+    time.sleep(30)
+    with db() as con:
+        rows = con.execute("""SELECT id, hardcover_id FROM books WHERE hardcover_id IS NOT NULL
+            AND series IS NOT NULL AND series!='' AND series_pos IS NULL""").fetchall()
+    done = 0
+    for r in rows:
+        try:
+            it = hc_book_by_id(r["hardcover_id"])
+        except Exception:  # noqa: BLE001
+            it = None
+        if it is None:
+            log.info("series_pos backfill: Hardcover unavailable, will retry next start")
+            return
+        pos = _num_or_none(it.get("series_pos"))
+        if pos is not None:
+            with db() as con:
+                con.execute("UPDATE books SET series_pos=? WHERE id=?", (pos, r["id"]))
+            done += 1
+        time.sleep(0.4)
+    log.info("series_pos backfill: %d of %d books numbered", done, len(rows))
 
 
 def _clean_title(t):
@@ -4138,16 +4180,17 @@ def upsert_book(con, item):
     if hc:
         row = con.execute("SELECT id FROM books WHERE hardcover_id=?", (hc,)).fetchone()
         con.execute("""INSERT INTO books(hardcover_id,title,author,cover,year,pages,series,
-            rating,genres,slug,olid,details) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            rating,genres,slug,olid,details,series_pos) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(hardcover_id) DO UPDATE SET title=excluded.title, author=excluded.author,
               cover=COALESCE(excluded.cover, books.cover), year=COALESCE(excluded.year, books.year),
               pages=COALESCE(excluded.pages, books.pages), series=COALESCE(excluded.series, books.series),
+              series_pos=COALESCE(excluded.series_pos, books.series_pos),
               rating=COALESCE(excluded.rating, books.rating), genres=COALESCE(excluded.genres, books.genres),
               slug=COALESCE(excluded.slug, books.slug)""",
             (hc, item.get("title"), item.get("author"), item.get("cover"), item.get("year"),
              item.get("pages"), item.get("series") or None, item.get("rating"),
              item.get("genres") or None, item.get("slug"), item.get("olid"),
-             json.dumps({"desc": item["desc"]}) if item.get("desc") else None))
+             json.dumps({"desc": item["desc"]}) if item.get("desc") else None, _num_or_none(item.get("series_pos"))))
         return con.execute("SELECT id FROM books WHERE hardcover_id=?", (hc,)).fetchone()["id"]
     # legacy path (Goodreads rows that only matched Open Library)
     con.execute("""INSERT INTO books(olid,title,author,cover,year,pages,genres,details)
@@ -4200,11 +4243,11 @@ def migrate_hardcover(user=Depends(admin_user)):
                 missed += 1; misses.append(r["title"] + " (dup)"); continue
             con.execute("""UPDATE books SET hardcover_id=?, series=?, rating=?, slug=?,
                 cover=COALESCE(?,cover), pages=COALESCE(?,pages), year=COALESCE(?,year),
-                genres=COALESCE(?,genres),
+                genres=COALESCE(?,genres), series_pos=?,
                 details=json_set(COALESCE(details,'{}'),'$.desc',?) WHERE id=?""",
                 (it["hc_id"], it["series"] or None, it["rating"], it["slug"],
                  it["cover"], it["pages"], it["year"], it["genres"] or None,
-                 it["desc"] or "", r["id"]))
+                 _num_or_none(it.get("series_pos")), it["desc"] or "", r["id"]))
         matched += 1
         time.sleep(0.25)
     return {"matched": matched, "missed": missed, "misses": misses}
@@ -4811,14 +4854,14 @@ async def book_rematch(book_id: int, request: Request, user=Depends(current_user
         # "The Hobbit" relabelled "The Hobbit, or There and Back Again")
         title = b["title"] if _book_key(b["title"]) == _book_key(it["title"]) \
             else (it["title"] or b["title"])
-        con.execute("""UPDATE books SET hardcover_id=?, title=?, author=?, series=?,
+        con.execute("""UPDATE books SET hardcover_id=?, title=?, author=?, series=?, series_pos=?,
             rating=?, slug=?, cover=COALESCE(?,cover), pages=COALESCE(?,pages),
             year=COALESCE(?,year), genres=COALESCE(?,genres), chapters=NULL,
             details=json_remove(json_set(COALESCE(details,'{}'),'$.desc',?),
                                 '$.toc','$.olid_toc')
             WHERE id=?""",
             (it["hc_id"], title, it["author"] or b["author"],
-             it["series"] or None, it["rating"], it["slug"], it["cover"], it["pages"],
+             it["series"] or None, _num_or_none(it.get("series_pos")), it["rating"], it["slug"], it["cover"], it["pages"],
              it["year"], it["genres"] or None, it["desc"] or "", book_id))
         if it["pages"]:      # a 1,178-page omnibus → a 320-page novel: keep progress sane
             con.execute("""UPDATE book_states
@@ -8718,6 +8761,7 @@ def startup():
                      "ALTER TABLE books ADD COLUMN genres TEXT",
                      "ALTER TABLE books ADD COLUMN chapters INTEGER",
                      "ALTER TABLE books ADD COLUMN series TEXT",
+                     "ALTER TABLE books ADD COLUMN series_pos REAL",
                      "ALTER TABLE books ADD COLUMN hardcover_id INTEGER",
                      "ALTER TABLE books ADD COLUMN rating REAL",
                      "ALTER TABLE books ADD COLUMN slug TEXT",
@@ -8773,6 +8817,7 @@ def startup():
     threading.Thread(target=manga_release_loop, daemon=True).start()
     threading.Thread(target=folio_heal_loop, daemon=True).start()
     threading.Thread(target=shelfmark_loop, daemon=True).start()
+    threading.Thread(target=_backfill_series_pos, daemon=True).start()
 
 
 if __name__ == "__main__":
