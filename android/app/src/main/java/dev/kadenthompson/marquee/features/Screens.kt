@@ -32,7 +32,7 @@ object Screens {
     @Composable fun ReadingShelf(kind: String, state: String?) = Todo("Shelf", true)
     @Composable fun ReadingStats() = dev.kadenthompson.marquee.features.reading.ReadingStatsScreen()
     @Composable fun Profile(username: String) = dev.kadenthompson.marquee.features.you.ProfileScreen(username)
-    @Composable fun Recap(year: Int, username: String?) = Todo("Recap", true)
+    @Composable fun Recap(year: Int, username: String?) = dev.kadenthompson.marquee.features.recap.RecapScreen(year, username)
     @Composable fun Watched(username: String?, kind: String) = dev.kadenthompson.marquee.features.you.WatchedGridScreen(username, kind)
     @Composable fun History() = dev.kadenthompson.marquee.features.you.HistoryScreen()
     @Composable fun Notifications() = dev.kadenthompson.marquee.features.you.NotificationsScreen()
@@ -40,7 +40,7 @@ object Screens {
     @Composable fun Folio() = dev.kadenthompson.marquee.features.you.FolioScreen()
     @Composable fun Devices() = dev.kadenthompson.marquee.features.you.SettingsScreen()
     @Composable fun ShowsWatchlist() = dev.kadenthompson.marquee.features.library.ShowsWatchlistScreen()
-    @Composable fun RequestStates() = Todo("Request states", true)
+    @Composable fun RequestStates() = dev.kadenthompson.marquee.features.requests.RequestStatesGallery()
 
     @Composable
     private fun Todo(title: String, pushed: Boolean = false) {

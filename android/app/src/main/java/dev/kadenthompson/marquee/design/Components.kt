@@ -218,8 +218,8 @@ fun PrimaryButton(
     val haptic = LocalHapticFeedback.current
     Row(
         modifier.then(if (fill) Modifier.fillMaxWidth() else Modifier)
-            .clip(CircleShape).background(C.brassFill)
             .alpha(if (enabled) 1f else 0.4f)
+            .clip(CircleShape).background(C.brassFill)
             .clickable(enabled = enabled && !busy) { haptic.performHapticFeedback(HapticFeedbackType.ContextClick); onClick() }
             .padding(vertical = 14.dp, horizontal = 20.dp),
         horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
@@ -249,9 +249,8 @@ fun ChipButton(
     val tint = when { destructive -> C.velvet; on -> C.brass; else -> C.inkSoft }
     val shape = RoundedCornerShape(10.dp)
     Row(
-        modifier.clip(shape).background(if (on) C.brassSoft else C.panel)
+        modifier.alpha(if (enabled) 1f else 0.45f).clip(shape).background(if (on) C.brassSoft else C.panel)
             .border(1.dp, if (on) C.brassDim else C.hairline, shape)
-            .alpha(if (enabled) 1f else 0.45f)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 9.dp, horizontal = 13.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),

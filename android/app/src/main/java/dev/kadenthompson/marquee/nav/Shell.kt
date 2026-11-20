@@ -101,6 +101,7 @@ fun MainShell() {
     val nav = rememberNavController()
     val stack by nav.currentBackStack.collectAsState()
     val current: Tab = stack.asReversed().firstNotNullOfOrNull { e -> tabOf(e.destination) } ?: Tab.NEXT
+    val fullScreen = stack.lastOrNull()?.destination?.hasRoute<RecapRoute>() == true
     val wide = isMediumWindow()
     val snackbar = remember { androidx.compose.material3.SnackbarHostState() }
 
@@ -139,7 +140,7 @@ fun MainShell() {
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             snackbarHost = { SnackbarHost(snackbar) { Snackbar(it, containerColor = C.panelRaised, contentColor = C.ink, actionColor = C.brass) } },
             bottomBar = {
-                if (!wide) NavigationBar(containerColor = C.panel, tonalElevation = 0.dp) {
+                if (!wide && !fullScreen) NavigationBar(containerColor = C.panel, tonalElevation = 0.dp) {
                     tabs.forEach { t ->
                         val sel = t.tab == current
                         NavigationBarItem(
@@ -156,7 +157,7 @@ fun MainShell() {
             },
         ) { pad ->
             Row(Modifier.fillMaxSize().padding(pad).consumeWindowInsets(pad)) {
-                if (wide) NavigationRail(containerColor = C.panel, header = { Spacer(Modifier.statusBarsPadding().height(8.dp)) }) {
+                if (wide && !fullScreen) NavigationRail(containerColor = C.panel, header = { Spacer(Modifier.statusBarsPadding().height(8.dp)) }) {
                     tabs.forEach { t ->
                         val sel = t.tab == current
                         NavigationRailItem(

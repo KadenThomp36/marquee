@@ -31,6 +31,9 @@ fun RootView() {
         session.loadRequestConfig()
         session.loadBookRequestConfig()
         session.checkCelebrations()
+        // This year's Year in Review premieres by itself, once, on whichever device opens first.
+        val idx = runCatching { session.client?.get<dev.kadenthompson.marquee.model.RecapIndex>("recap") }.getOrNull()
+        idx?.autoshow?.let { y -> kotlinx.coroutines.delay(1200); dev.kadenthompson.marquee.nav.Navigator.open(dev.kadenthompson.marquee.nav.RecapRoute(y)) }
     }
     // Plex may have finished a season for you while you were away.
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
