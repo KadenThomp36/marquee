@@ -2,7 +2,7 @@
 
 ## Unreleased — Year in Review, and a tidier Duo
 
-Needs web build `20261120c`.
+Needs web build `20261120d`.
 
 - **Year in Review, rebuilt.** A night at the pictures: a countdown leader rolls it
   in, a guessing game ("how many hours do you think…?"), then show of the year, your
