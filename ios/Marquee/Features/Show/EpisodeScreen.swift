@@ -27,6 +27,7 @@ struct EpisodeScreen: View {
                     .padding(.bottom, 30)
                 }
                 .scrollEdgeEffectStyle(.soft, for: .top)
+                .mqTopEdgeBlur()
                 .background(alignment: .top) {
                     still(episode).ignoresSafeArea(edges: .top)
                 }

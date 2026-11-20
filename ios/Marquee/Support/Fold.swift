@@ -179,6 +179,7 @@ struct FoldSpread<Leading: View, Trailing: View>: View {
             .padding(.bottom, 30)
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .mqTopEdgeBlur()
         .refreshable(ifAny: refresh)
     }
 }

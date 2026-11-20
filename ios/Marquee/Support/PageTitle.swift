@@ -72,14 +72,12 @@ private struct TopEdgeBlur: ViewModifier {
                 Rectangle()
                     .fill(reduceTransparency ? AnyShapeStyle(Color.mqGround)
                                              : AnyShapeStyle(.ultraThinMaterial))
-                    .mask {
-                        LinearGradient(stops: [.init(color: .black, location: 0),
-                                               .init(color: .black, location: 0.5),
-                                               .init(color: .clear, location: 1)],
-                                       startPoint: .top, endPoint: .bottom)
-                    }
+                    // the same eased curve as the art scrims, so there's no line where it ends
+                    .mask { Scrim.fadeOut(start: 0.4) }
                     .frame(height: 104)
-                    .ignoresSafeArea(edges: .top)
+                    // under the status bar, and on the Duo under the tab rail too: rows that
+                    // scroll beneath the rail would otherwise show through unblurred above it
+                    .ignoresSafeArea(edges: [.top, .trailing])
                     .opacity(under ? 1 : 0)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)

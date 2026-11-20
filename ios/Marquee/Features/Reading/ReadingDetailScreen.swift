@@ -47,6 +47,12 @@ struct ReadingDetailScreen: View {
                 } trailing: {
                     extras(detail, item)
                 }
+                // behind the page like a film's, so it reaches under the Duo's rail and
+                // fades along the eased curve instead of stopping in a line
+                .background(alignment: .top) {
+                    BackdropWash(url: item.cover, height: 300, opacity: 0.22, blur: 20, fadeFrom: 0.3)
+                        .ignoresSafeArea(edges: .top)
+                }
             } else if let error {
                 LoadFailure(message: error) { await load() }
             } else {
@@ -110,12 +116,6 @@ struct ReadingDetailScreen: View {
     @ViewBuilder
     private func hero(_ item: ReadingDetailItem) -> some View {
         ZStack(alignment: .top) {
-            FilledArt(url: item.cover, height: 220)
-                .opacity(0.22)
-                .blur(radius: 20)
-                .mask(LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom))
-                .accessibilityHidden(true)
-
             HStack(alignment: .top, spacing: 16) {
                 CoverArt(url: item.cover, radius: 12).frame(width: MQ.heroPoster(typeSize) - 2)
 
