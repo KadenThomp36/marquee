@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120d";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120e";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -393,17 +393,22 @@ function paintSeasonStates(seasons) {
     }
   });
 }
+// the live line under the request button: what's happening, in words, with a real bar
 function dlPill(dl) {
   if (!dl) return "";
-  if (dl.progress != null) return `<span class="dl-pill"><span class="dl-bar"><i style="width:${dl.progress}%"></i></span>${dl.progress}%${dl.eta ? ` · ${esc(dl.eta)}` : ""}</span>`;
-  return `<span class="dl-pill">Downloading…</span>`;
+  const p = dl.progress;
+  return `<span class="rq-live dl"><span class="rq-live-t"><span class="brq-dot"></span><b>Downloading</b>${p != null ? `<em>${p}%</em>` : ""}${dl.eta ? `<i>${esc(dl.eta)} left</i>` : ""}</span>
+    <span class="rq-live-bar"><i style="width:${Math.max(3, p || 0)}%"></i></span></span>`;
 }
+const rqWaiting = (what, rest) => `<span class="rq-live req"><span class="rq-live-t"><span class="brq-dot"></span><b>${what}</b><i>${rest}</i></span></span>`;
 function paintReq(slot, itemType, tmdbId, st) {
   const status = st.status;
   if (itemType === "movie") {
     if (status === "available") slot.innerHTML = `<span class="btn onplex">${I.check} On Plex</span>`;
     else if (["pending", "processing", "partial"].includes(status))
-      slot.innerHTML = `<span class="btn requested">${OV_ICON} Requested</span>${st.download ? dlPill(st.download) : ""}`;
+      slot.innerHTML = `<span class="btn requested">${OV_ICON} Requested</span>${st.download ? dlPill(st.download)
+        : status === "processing" ? rqWaiting("Approved", "waiting for a download")
+        : status === "partial" ? rqWaiting("Partly on Plex", "the rest is on its way") : rqWaiting("Waiting", "for approval")}`;
     else {
       slot.innerHTML = `<button class="btn seerbtn">${OV_ICON} Request</button>`;
       slot.querySelector("button").onclick = async () => {
@@ -2644,6 +2649,7 @@ function renderRDetail(d) {
       </div></div>
     <div class="rdt-body reveal">
       ${rdActChips(kind, it)}
+      ${kind === "book" && it.id ? `<div id="brqslot" class="brq-slot"></div>` : ""}
       ${d.tracked ? `
       <div id="rdtstates">
         <div class="rd-states">${[["want", "Want to read"], ["reading", "Reading"], ["finished", "Finished"]].map(([x, l]) =>
@@ -2852,6 +2858,7 @@ function renderRDetail(d) {
   if (it.id) reviewsBlock(kind, it.id, { watched: st.state === "finished" }).then(el => { const c = $("#rd-reviews"); if (c) c.appendChild(el); });
   wireRdActChips(kind, it);
   rdTickTimers();
+  if (kind === "book" && it.id) mountBookRequest($("#brqslot"), it.id);
 }
 /* Favorite / List / Share for a book or manga — the same chips the show and movie
    pages carry. An untracked Hardcover preview has no Marquee id yet, so it can only
@@ -4910,6 +4917,7 @@ routes.profile = async (username) => {
       ${me ? `<div class="hublinks reveal">
         <a class="hublink" href="#/lists">${I.bookmark}<span>My Lists</span>${I.chevR}</a>
         <a class="hublink" href="#/history">${I.ticket}<span>History</span>${I.chevR}</a>
+        <a class="hublink" href="#/requests" data-brq-link hidden>${BRQ_ICO}<span>Book requests</span>${I.chevR}</a>
       </div>` : ""}
 
       <div id="members-strip"></div>
@@ -4948,6 +4956,7 @@ routes.profile = async (username) => {
     wireFavorites(view, me);
     loadWatchedRails(p.username, me, view, p.features);
     loadMembers(view);
+    brqEnabled().then(on => { const l = $("[data-brq-link]", view); if (l) l.hidden = !on; });
     loadProfileStats(statsPath, advPath, view);
     loadProfileReading(p.username, me, p.features, p.display_name.split(" ")[0], view);
     if (window.renderProfileLists) {
@@ -6310,6 +6319,183 @@ async function checkRecapPopup() {
 }
 
 
+/* ---------- book requests (Shelfmark): find an ebook, download it, land it in Calibre ----------
+   One card does the whole story on a book's page and on the Requests page: what's happening
+   in plain words, a bar that only ever moves forward, and the one action that makes sense
+   right now (Request / Cancel / Choose a copy / Try again). Polls while something's moving. */
+let BRQ_ON = null;   // is Shelfmark configured on the server?
+const BRQ_ICO = `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M12 4v10m0 0-4-4m4 4 4-4M5 19h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const BRQ_STATE = {
+  finding: ["find", "Looking for copies", "Searching every indexer. This takes a minute or two."],
+  downloading: ["dl", "Downloading", ""],
+  importing: ["dl", "Adding to Calibre", "The file's in. Calibre picks it up within a few minutes."],
+  done: ["ok", "In Calibre", "Ready to Get from the Palma's Calibre tab."],
+  pick: ["warn", "Choose a copy", ""],
+  failed: ["bad", "Couldn't get it", ""],
+  cancelled: ["off", "Cancelled", ""],
+};
+async function brqEnabled() {
+  if (BRQ_ON === null) { try { BRQ_ON = !!(await api("/book-requests/config")).enabled; } catch { BRQ_ON = false; } }
+  return BRQ_ON;
+}
+const brqActive = r => r && ["finding", "downloading", "importing"].includes(r.state);
+function brqCard(r, { compact = false, showBook = true } = {}) {
+  const [tone, label, sub0] = BRQ_STATE[r.state] || ["off", r.state, ""];
+  const sub = r.state === "downloading" ? (r.message || "") : r.state === "pick" || r.state === "failed" ? (r.message || sub0) : sub0;
+  const pct = r.state === "done" ? 100 : r.progress || 0;
+  const bar = r.state === "finding" ? `<div class="brq-bar find"><i></i></div>`
+    : ["downloading", "importing", "done"].includes(r.state) ? `<div class="brq-bar"><i style="width:${Math.max(3, pct)}%"></i></div>` : "";
+  const acts = [];
+  if (r.state === "pick") acts.push(`<button class="btn pri sm" data-brq="pick">Choose a copy</button>`);
+  if (r.state === "failed" || r.state === "cancelled") acts.push(`<button class="btn sm" data-brq="retry">Try again</button>`);
+  if (brqActive(r) && r.mine) acts.push(`<button class="btn ghost sm" data-brq="cancel">Cancel</button>`);
+  if (r.state === "downloading" && r.attempts > 0) acts.push(`<button class="btn ghost sm" data-brq="pick">Other copies</button>`);
+  return `<div class="brq ${tone}${compact ? " compact" : ""}" data-rid="${r.id}">
+    ${showBook ? `<img class="brq-cover" src="${POSTER(r.cover)}" alt="">` : ""}
+    <div class="brq-main">
+      ${showBook ? `<div class="brq-title">${esc(r.title)}</div>
+        <div class="brq-by">${esc(r.author || "")}${r.requested_by ? `<span>asked for by ${r.mine ? "you" : esc(r.requested_by)}</span>` : ""}</div>` : ""}
+      <div class="brq-state"><span class="brq-dot"></span><b>${label}</b>${r.state === "downloading" ? `<em>${Math.round(pct)}%</em>` : ""}</div>
+      ${bar}
+      ${sub ? `<div class="brq-sub">${esc(sub)}</div>` : ""}
+      ${r.copy && !compact && r.state !== "finding" ? `<div class="brq-copy">${esc(r.copy.title || "")}${r.copy.size ? ` · ${esc(r.copy.size)}` : ""}${r.copy.format ? ` · ${esc(r.copy.format.toUpperCase())}` : ""}</div>` : ""}
+      ${acts.length ? `<div class="brq-acts">${acts.join("")}</div>` : ""}
+    </div></div>`;
+}
+async function brqAct(rid, act, after) {
+  if (act === "pick") return brqPickSheet(rid, after);
+  try {
+    await api(`/book-requests/${rid}/${act}`, { method: "POST", body: {} });
+    toast(act === "cancel" ? "Request cancelled" : "Looking for copies again");
+  } catch {}
+  after && after();
+}
+function wireBrq(host, after) {
+  host.onclick = e => {
+    const b = e.target.closest("[data-brq]"); if (!b) return;
+    const rid = +b.closest("[data-rid]").dataset.rid;
+    b.disabled = true;
+    brqAct(rid, b.dataset.brq, after);
+  };
+}
+// every copy the indexers had, best first, with the ones already tried marked
+async function brqPickSheet(rid, after) {
+  let r; try { r = await api(`/book-requests/${rid}`); } catch { return; }
+  const ch = r.choices || [];
+  const row = (c, i) => `<button class="brq-ch${c.recommended ? " rec" : ""}${c.tried ? " tried" : ""}" data-i="${i}">
+      <span class="brq-ch-t">${esc(c.title || "Untitled copy")}</span>
+      <span class="brq-ch-m">${[c.format && c.format.toUpperCase(), c.size, c.seeders != null ? `${c.seeders} seeder${c.seeders === 1 ? "" : "s"}` : "usenet", c.indexer]
+        .filter(Boolean).map(esc).join(" · ")}</span>
+      ${c.tried ? `<span class="brq-tag">tried</span>` : i === 0 && c.recommended ? `<span class="brq-tag best">best match</span>` : ""}
+    </button>`;
+  const rec = ch.filter(c => c.recommended), rest = ch.filter(c => !c.recommended);
+  const sh = sheet(`<div class="sh-t">Choose a copy</div>
+    <p class="hint brq-ph">${esc(r.title)}${r.author ? ` by ${esc(r.author)}` : ""}. Copies that matched the book come first; the rest are everything else that looked like an ebook.</p>
+    ${ch.length ? `${rec.length ? `<div class="brq-chg">Good matches</div>${rec.map(c => row(c, ch.indexOf(c))).join("")}` : ""}
+      ${rest.length ? `<div class="brq-chg">Other copies</div>${rest.map(c => row(c, ch.indexOf(c))).join("")}` : ""}`
+      : `<div class="empty">No copies to choose from. Try again later; indexers change.</div>`}
+    <button class="btn ghost" data-a="close">Close</button>`, { cls: "editor brqsheet" });
+  sh.el.addEventListener("click", async e => {
+    if (e.target.closest('[data-a="close"]')) return sh.close();
+    const b = e.target.closest(".brq-ch"); if (!b) return;
+    const c = ch[+b.dataset.i];
+    $$(".brq-ch", sh.el).forEach(x => (x.disabled = true));
+    b.classList.add("going");
+    try {
+      await api(`/book-requests/${rid}/pick`, { body: { source_id: c.source_id } });
+      toast("Downloading that copy"); sh.close(); after && after();
+    } catch { $$(".brq-ch", sh.el).forEach(x => (x.disabled = false)); b.classList.remove("going"); }
+  });
+}
+
+// the card on a book's own page
+let _brqTimer = null;
+async function mountBookRequest(slot, bookId) {
+  clearTimeout(_brqTimer);
+  if (!slot || !(await brqEnabled())) return;
+  let d; try { d = await api(`/book-requests?book_id=${bookId}`); } catch { return; }
+  if (!slot.isConnected) return;
+  const r = (d.requests || [])[0];
+  if (!r || r.state === "cancelled") {
+    slot.innerHTML = `<div class="brq ask"><div class="brq-main">
+      <div class="brq-state"><span class="brq-dot"></span><b>Get the ebook</b></div>
+      <div class="brq-sub">Marquee finds a copy and sends it to Calibre. The Palma can Get it from there.</div>
+      <div class="brq-acts"><button class="btn pri sm" id="brqgo">${BRQ_ICO} Request ebook</button></div></div></div>`;
+    $("#brqgo", slot).onclick = async e => {
+      const b = e.currentTarget; b.disabled = true; b.textContent = "Requesting…";
+      try {
+        const nr = await api("/book-requests", { body: { book_id: bookId }, quiet: true });
+        toast(nr.already ? "Already requested. Following that one." : "Requested. Looking for copies.");
+        mountBookRequest(slot, bookId);
+      } catch (err) {
+        b.disabled = false; b.innerHTML = `${BRQ_ICO} Request ebook`;
+        slot.insertAdjacentHTML("beforeend", `<div class="brq-err">${esc(err.message || "Couldn't request it.")} <a href="#/requests">Search for it instead</a></div>`);
+      }
+    };
+    return;
+  }
+  slot.innerHTML = brqCard(r, { showBook: false });
+  wireBrq(slot, () => mountBookRequest(slot, bookId));
+  if (brqActive(r)) _brqTimer = setTimeout(() => { if (slot.isConnected && !document.hidden) mountBookRequest(slot, bookId); else if (slot.isConnected) _brqTimer = setTimeout(() => mountBookRequest(slot, bookId), 4000); }, 4000);
+}
+
+// #/requests — search for any book, and everything the household has asked for
+routes.requests = async () => {
+  navHere("Requests");
+  view.innerHTML = `<div class="page-head"><h1>Book requests</h1></div><div class="brq-page">${skRows(2)}</div>`;
+  if (!(await brqEnabled())) {
+    $(".brq-page").innerHTML = `<div class="empty">Book requests aren't set up. An admin can add the downloader's address in Settings › Household.</div>`;
+    return;
+  }
+  $(".brq-page").innerHTML = `
+    <form class="brq-search" id="brqform" autocomplete="off">
+      <input id="brqq" type="search" placeholder="Search for a book to request" aria-label="Search for a book to request">
+      <button class="btn pri" type="submit">Search</button>
+    </form>
+    <div id="brqres"></div>
+    <div class="section"><h2>Requested</h2><div class="rule"></div></div>
+    <div id="brqlist" class="brq-list">${skRows(1)}</div>`;
+  let timer = null;
+  const paintList = async () => {
+    clearTimeout(timer);
+    const host = $("#brqlist"); if (!host) return;
+    let d; try { d = await api("/book-requests"); } catch { return; }
+    if (!host.isConnected) return;
+    const rs = (d.requests || []).filter(r => r.state !== "cancelled");
+    host.innerHTML = rs.length ? rs.map(r => brqCard(r)).join("")
+      : `<div class="empty">Nothing requested yet. Search above, or use Request ebook on any book's page.</div>`;
+    wireBrq(host, paintList);
+    if (rs.some(brqActive)) timer = setTimeout(() => { if (!document.hidden) paintList(); else timer = setTimeout(paintList, 5000); }, 4000);
+  };
+  $("#brqform").onsubmit = async e => {
+    e.preventDefault();
+    const q = $("#brqq").value.trim(), res = $("#brqres");
+    if (!q) return;
+    res.innerHTML = `<div class="brq-results">${skRows(2)}</div>`;
+    let d; try { d = await api(`/book-requests/search?q=${encodeURIComponent(q)}`); } catch { res.innerHTML = ""; return; }
+    if (d.unavailable) { res.innerHTML = `<div class="empty">The book downloader isn't answering. Try again in a minute.</div>`; return; }
+    const rows = d.results || [];
+    res.innerHTML = rows.length ? `<div class="brq-results">${rows.map((b, i) => `<div class="brq-hit">
+        <img src="${POSTER(b.cover)}" alt="" loading="lazy">
+        <div class="brq-hit-t"><b>${esc(b.title)}</b><span>${esc((b.authors || []).join(", "))}${b.year ? ` · ${b.year}` : ""}</span></div>
+        ${b.request ? `<span class="brq-tag">${esc((BRQ_STATE[b.request.state] || [, b.request.state])[1])}</span>`
+          : `<button class="btn sm" data-hit="${i}">${BRQ_ICO} Request</button>`}</div>`).join("")}</div>`
+      : `<div class="empty">No books found for “${esc(q)}”.</div>`;
+    res.onclick = async ev => {
+      const b = ev.target.closest("[data-hit]"); if (!b) return;
+      const hit = rows[+b.dataset.hit];
+      b.disabled = true; b.textContent = "Requesting…";
+      try {
+        const r = await api("/book-requests", { body: hit });
+        toast(r.already ? "Already requested" : `Requested ${hit.title}`);
+        b.outerHTML = `<span class="brq-tag">${r.already ? "Already requested" : "Requested"}</span>`;
+        paintList();
+      } catch { b.disabled = false; b.innerHTML = `${BRQ_ICO} Request`; }
+    };
+  };
+  paintList();
+};
+
 /* ---------- settings ---------- */
 const PLEX_LOGO = `<svg class="plexlogo" viewBox="0 0 24 24" aria-hidden="true">
   <rect x="1.5" y="1.5" width="21" height="21" rx="5" fill="#1a1a1a"/>
@@ -6370,6 +6556,7 @@ routes.settings = async () => {
     const users = await api("/users");
     const reg = await api("/admin/registration").catch(() => ({ closed: false }));
     const rcs = await api("/admin/recap").catch(() => ({ release_md: "12-26" }));
+    const smc = await api("/admin/shelfmark").catch(() => ({ url: null }));
     const [rcm, rcd] = (rcs.release_md || "12-26").split("-").map(Number);
     usersHtml = `<div class="panel"><h3>Household</h3>
       <div class="userlist">${users.map(u => `
@@ -6388,6 +6575,11 @@ routes.settings = async () => {
         <span class="hint">${reg.closed ? "closed — only accounts you create can log in (safe for a public link)" : "OPEN — anyone with the link can register"}</span></span>
         <button class="switch-btn ${reg.closed ? "" : "on"}" id="regtoggle" role="switch" aria-checked="${!reg.closed}"><span></span></button>
       </label>
+      <div class="toggle-row sm-admin"><span>Book downloader
+        <span class="hint">The address of Shelfmark on your network, for book requests. Marquee talks to it from the server, so it never needs to be public.</span></span>
+        <span class="sm-admin-pick"><input id="smurl" placeholder="http://…:8084" value="${esc(smc.url || "")}" autocapitalize="none" spellcheck="false">
+          <button class="btn" id="smsave">Save</button></span>
+      </div>
       <div class="toggle-row ry-admin"><span>Year in Review goes live
         <span class="hint">Everyone's recap opens on this day and pops up once the next time they visit. It keeps counting until New Year.</span></span>
         <span class="ry-admin-pick">
@@ -6632,6 +6824,15 @@ routes.settings = async () => {
     } catch {}
   };
   if ($("#rcmonth")) { $("#rcmonth").onchange = saveRelease; $("#rcday").onchange = saveRelease; }
+  if ($("#smsave")) $("#smsave").onclick = async () => {
+    const b = $("#smsave"); b.disabled = true;
+    try {
+      const r = await api("/admin/shelfmark", { body: { url: $("#smurl").value.trim() } });
+      BRQ_ON = null;
+      toast(!r.url ? "Book requests turned off" : r.reachable ? "Saved. The downloader answered." : "Saved, but the downloader didn't answer from the server");
+    } catch {}
+    b.disabled = false;
+  };
   if ($("#regtoggle")) $("#regtoggle").onclick = async () => {
     const b = $("#regtoggle"), nowOn = b.classList.contains("on");   // on = sign-ups open
     await api("/admin/registration", { body: { closed: nowOn } });   // if currently open, close it
