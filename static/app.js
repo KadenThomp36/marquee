@@ -26,6 +26,8 @@ const I = {
   camera: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg>`,
   image: `<svg class="ico" viewBox="0 0 24 24" fill="none"><rect x="3.5" y="5" width="17" height="14" rx="2.2" stroke="currentColor" stroke-width="1.8"/><circle cx="8.5" cy="10" r="1.7" fill="currentColor"/><path d="m5 17 4.5-4.5 3.5 3.5 3-2.5 3 3" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
   chevR: `<svg viewBox="0 0 24 24" fill="none"><path d="m9 5.5 7 6.5-7 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  chevL: `<svg viewBox="0 0 24 24" fill="none"><path d="m15 5.5-7 6.5 7 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  play: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M7.5 5.2v13.6a.7.7 0 0 0 1.06.6l11.1-6.8a.7.7 0 0 0 0-1.2L8.56 4.6a.7.7 0 0 0-1.06.6Z" fill="currentColor"/></svg>`,
   eye: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/></svg>`,
   flag: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M5 21V4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M5 4.5h13l-2.4 4 2.4 4H5z" fill="currentColor" opacity=".55"/></svg>`,
   reply: `<svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M10 8V4.5L3.5 11 10 17.5V14c5 0 8 1.6 10 5 0-6-3.5-11-10-11z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`,
@@ -4768,8 +4770,8 @@ function recapTeaser(me, p) {
       <div class="rt-glow"></div>
       <div class="rt-body">
         <div class="rt-kicker">Year in Review</div>
-        <div class="rt-title">${first} ${y}, wrapped</div>
-        <div class="rt-sub">A slideshow of everything watched in ${y}</div>
+        <div class="rt-title">${first} ${y}, now showing</div>
+        <div class="rt-sub">The year in lights, with a quiz, a ticket and a few surprises</div>
       </div>
       <div class="rt-go">${I.chevR}</div></a>`;
   }
@@ -4779,7 +4781,7 @@ function recapTeaser(me, p) {
       <div class="rt-body">
         <div class="rt-kicker">Year in Review</div>
         <div class="rt-title">${p.recap_year || new Date().getFullYear()} is still being written</div>
-        <div class="rt-sub">Your Wrapped slideshow unlocks in December ${I.lock}</div>
+        <div class="rt-sub">Premieres ${p.recap_release ? fmtDate(p.recap_release).replace(/,? \d{4}$/, "") : "in December"} ${I.lock}</div>
       </div>
       <div class="rt-go">${I.lock}</div></div>`;
   }
@@ -5865,14 +5867,17 @@ function advancedSection(a) {
 /* stats now live on the profile — keep old #/stats links working */
 routes.stats = () => { history.replaceState(null, "", "#/profile"); parseHash(); };
 
-/* ---------- year in review (flagship recap — a Wrapped-style slideshow) ---------- */
-// The recap only unlocks in December (current year) — see the backend. The route is the
-// "history spot": a landing that plays the slideshow; the first-view December auto-popup
-// is handled by checkRecapPopup() on boot.
+/* ---------- year in review: a night at the pictures ---------- */
+// A story-format slideshow told like a film: a countdown leader rolls it in, every
+// slide is lit by its own stage gel, and the credits end on a ticket you can share.
+// It lives in a 9:16 card sized with container units, so the same composition holds on
+// a phone (full screen), a laptop (a card in the dark) or a tablet. Releases on a set
+// day (admin setting, Boxing Day by default) and auto-presents once — checkRecapPopup().
 routes.recap = async (username, year) => {
   const me = !username || username.toLowerCase() === (ME.username || "").toLowerCase();
   const yr = parseInt(year, 10) || new Date().getFullYear();
-  const path = me ? `/recap/${yr}` : `/profile/${encodeURIComponent(username)}/recap/${yr}`;
+  const preview = me && ME.is_admin && /[?&]preview\b/.test(location.hash);
+  const path = me ? `/recap/${yr}${preview ? "?preview=1" : ""}` : `/profile/${encodeURIComponent(username)}/recap/${yr}`;
   const who = me ? "profile" : "u/" + encodeURIComponent(username);
   view.innerHTML = `<div class="recap-load">${skRows(2)}</div>`;
   let d; try { d = await api(path); } catch { location.hash = "#/" + who; return; }
@@ -5880,233 +5885,425 @@ routes.recap = async (username, year) => {
   renderRecapLanding(d, me, username, who, yr);
 };
 
+const RY_FIRST = (me, username) => me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s";
+const ryPlural = (n, one, many) => `${(n || 0).toLocaleString()} ${n === 1 ? one : (many || one + "s")}`;
+const ryHourLabel = h => h == null ? "" : h === 0 ? "midnight" : h === 12 ? "noon" : `${h % 12} ${h < 12 ? "am" : "pm"}`;
+const ryHours = m => Math.round((m || 0) / 60);
+// a day inside the year being reviewed doesn't need the year again
+const ryDay = d => d ? new Date(d.length <= 10 ? d + "T00:00" : d).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+const RY_GLYPH = { owl: "🦉", lark: "🌅", weekender: "🛋️", cinephile: "🎬", bookworm: "📚", binger: "🍿",
+  devotee: "📺", explorer: "🧭", regular: "☕" };
+
 function yrSwitch(years, cur, me, who) {
   years = (years && years.length) ? years : [cur];
-  return `<div class="rc-switch">${years.map(y =>
-    `<a class="rc-yr ${y === cur ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}">${y}</a>`).join("")}</div>`;
+  return `<nav class="rc-switch" aria-label="Other years">${years.map(y =>
+    `<a class="rc-yr ${y === cur ? "on" : ""}" href="#/${me ? "recap" : who + "/recap"}/${y}" ${y === cur ? 'aria-current="page"' : ""}>${y}</a>`).join("")}</nav>`;
+}
+
+// what a number of hours is like — the line under the big reveal
+function ryCompare(minutes) {
+  const h = (minutes || 0) / 60;
+  if (h < 1) return "";
+  if (h < 8) return `About ${Math.max(1, Math.round(h / 2))} feature film${Math.round(h / 2) === 1 ? "" : "s"}' worth.`;
+  if (h < 24) return `That's a whole waking day, start to finish.`;
+  const days = h / 24, flights = Math.round(h / 22);
+  return `That's ${days < 10 ? days.toFixed(1) : Math.round(days)} days back to back${flights >= 2
+    ? ` — or ${flights} flights from London to Sydney` : ""}.`;
+}
+
+// three answers for the guessing game: the true one and two that are believably off
+function ryQuiz(d) {
+  const hrs = ryHours(d.minutes);
+  const useHours = hrs >= 4;
+  const truth = useHours ? hrs : (d.episodes || 0) + (d.movies || 0);
+  if (truth < 2) return null;
+  const nice = v => v < 20 ? Math.max(1, Math.round(v)) : v < 200 ? Math.round(v / 5) * 5 : Math.round(v / 10) * 10;
+  let lo = nice(truth * 0.55), hi = nice(truth * 1.75);
+  if (lo === truth) lo = Math.max(1, truth - 1);
+  if (hi === truth) hi = truth + 2;
+  const opts = [lo, truth, hi];
+  const r = d.year % 3;                         // a stable shuffle, so replays match
+  const order = [[1, 0, 2], [0, 2, 1], [2, 1, 0]][r].map(i => opts[i]);
+  return { truth, unit: useHours ? "hours" : "things", order,
+    q: useHours ? "How many hours do you think you spent watching?" : "How many episodes and films do you think you watched?" };
+}
+
+// the ticket: the summary that ends the show, sits on the landing, and gets shared
+function ryTicket(d, me, username, { stub = true } = {}) {
+  const R = d.reading, watched = (d.episodes || 0) + (d.movies || 0) > 0;
+  const shows = (d.top_shows || []).slice(0, 5);
+  const nums = [];
+  if (watched) nums.push([ryHours(d.minutes).toLocaleString(), "hours watched"],
+    [(d.episodes || 0).toLocaleString(), d.episodes === 1 ? "episode" : "episodes"],
+    [(d.movies || 0).toLocaleString(), d.movies === 1 ? "film" : "films"]);
+  if (R && R.books) nums.push([R.books, R.books === 1 ? "book" : "books"]);
+  else if (R && R.manga) nums.push([R.manga, "manga"]);
+  else if (watched) nums.push([d.days_watched || 0, "days with a show"]);
+  const name = me ? (ME.display_name || ME.username) : username;
+  return `<div class="ry-ticket">
+    <div class="ryt-head"><span class="ryt-brand">Marquee</span><span class="ryt-year">${d.year}</span></div>
+    ${d.persona ? `<div class="ryt-persona"><small>${me ? "You were" : "They were"}</small>${esc(d.persona.title)}</div>` : ""}
+    ${shows.length ? `<ol class="ryt-shows">${shows.map(s => `<li><span>${esc(s.title)}</span><i>${fmtHours(s.mins)}</i></li>`).join("")}</ol>` : ""}
+    ${R && !shows.length && (R.covers || []).length ? `<div class="ryt-covers">${R.covers.slice(0, 5).map(c =>
+      `<img src="${POSTER(c.cover)}" alt="">`).join("")}</div>` : ""}
+    <div class="ryt-nums">${nums.slice(0, 4).map(([v, l]) => `<div><b>${v}</b><span>${l}</span></div>`).join("")}</div>
+    ${stub ? `<div class="ryt-stub"><span>Admit one</span><b>${esc(name || "")}</b></div>` : ""}
+  </div>`;
 }
 
 function renderRecapLanding(d, me, username, who, yr) {
-  const first = me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s";
+  const first = RY_FIRST(me, username);
   if (d.locked) {
+    const rel = d.release && d.release.slice(0, 4) == yr ? d.release : null;
     view.innerHTML = `<div class="page-head">${crumb(`#/${who}`, "Profile")}</div>
       <div class="recap-gate">
-        <div class="rg-lock">${I.lock}</div>
         <div class="rg-year">${yr}</div>
-        <div class="rg-t">Not yet — check back in December</div>
-        <div class="rg-s">A Year in Review only makes sense once the year's actually a wrap, so ${yr}'s unlocks this December.</div>
-        ${d.years && d.years.length ? `<div class="rg-alt">Look back at a finished year:</div>${yrSwitch(d.years, -1, me, who)}` : ""}
+        <div class="rg-t">Still in production</div>
+        <div class="rg-s">${yr}'s Year in Review premieres ${rel ? `on <b>${fmtDate(rel)}</b>` : "at the end of the year"}. It'll pop up the next time you open Marquee after that.</div>
+        ${d.years && d.years.length ? `<div class="rg-alt">Rewatch an earlier year</div>${yrSwitch(d.years, -1, me, who)}` : ""}
       </div>`;
     return;
   }
   const R = d.reading, watched = (d.episodes || 0) + (d.movies || 0) > 0;
+  const art = (d.top_shows || []).find(s => s.poster) || ((R && R.covers) || [])[0];
   view.innerHTML = `<div class="page-head">${crumb(`#/${who}`, "Profile")}</div>
-    <div class="recap-land">
-      <div class="rl-glow"></div>
-      <div class="rl-kick">Year in Review</div>
-      <div class="rl-year">${d.year}</div>
-      <div class="rl-sub">${first} year ${!watched && R ? "between the covers"
-        : R ? "at the movies, on the couch &amp; between the covers" : "at the movies &amp; on the couch"}</div>
-      ${d.has_data ? `
-        <div class="rl-teasenums">
-          ${watched ? `<span><b>${fmtHours(d.minutes)}</b>watched</span>
-          <span><b>${(d.episodes || 0).toLocaleString()}</b>episodes</span>
-          <span><b>${d.movies || 0}</b>films</span>` : ""}</div>
-        ${R ? `<div class="rl-teasenums rl-read">${rcReadNums(R).map(([v, l]) =>
-          `<span><b>${v}</b>${l}</span>`).join("")}</div>` : ""}
-        <button class="btn pri rl-play" id="rcplay">${I.recap || ""} Play the slideshow</button>`
-        : `<div class="empty" style="padding:22px 0">Nothing tracked in ${d.year}.</div>`}
-      ${yrSwitch(d.years, d.year, me, who)}
+    <div class="ry-land">
+      ${art ? `<div class="ryl-wash" style="background-image:url('${POSTER(art.poster || art.cover)}')"></div>` : ""}
+      <div class="ryl-copy">
+        <h1 class="ryl-year">${d.year}</h1>
+        <p class="ryl-sub">${first} year ${!watched && R ? "between the covers"
+          : R ? "at the movies, on the couch and between the covers" : "at the movies and on the couch"}.</p>
+        ${d.preview ? `<p class="ryl-note">Admin preview — nobody else can see ${d.year} until it premieres.</p>`
+          : !d.final && d.has_data ? `<p class="ryl-note">Still counting: everything you watch until New Year's Eve gets added.</p>` : ""}
+        ${d.has_data ? `<button class="btn pri ryl-play" id="rcplay">${I.play || ""}<span>Play ${me ? "your" : "the"} ${d.year}</span></button>`
+          : `<p class="empty" style="padding:8px 0 0">Nothing tracked in ${d.year}.</p>`}
+        ${yrSwitch(d.years, d.year, me, who)}
+      </div>
+      ${d.has_data ? `<div class="ryl-ticket">${ryTicket(d, me, username)}</div>` : ""}
     </div>`;
-  if ($("#rcplay")) $("#rcplay").onclick = () => openRecap(d, { me, username });
+  if ($("#rcplay")) $("#rcplay").onclick = () => {
+    openRecap(d, { me, username });
+    if (me && !d.preview) api(`/recap/${d.year}/seen`, { method: "POST", body: {} }).catch(() => {});
+  };
 }
 
-// build the ordered slide markup for a recap (empty sections are skipped)
+// The slides, in order. Each is [gel, markup]; a quiet year simply gets fewer.
 function recapSlides(d, me, username) {
-  const whoCap = me ? "Your" : esc((username || "").split(" ")[0] || "Their") + "’s";
-  const mS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
-  const topShow = (d.top_shows || [])[0];
-  const runners = (d.top_shows || []).filter(s => s.poster).slice(1, 5);
+  const first = RY_FIRST(me, username), you = me ? "you" : "they";
   const R = d.reading, watched = (d.episodes || 0) + (d.movies || 0) > 0;
   const S = [];
-  S.push(`<div class="rs intro"><div class="rs-kick">Year in Review</div>
-    <div class="rs-year">${d.year}</div>
-    <div class="rs-lead">${whoCap} year ${!watched && R ? "between the covers"
-      : R ? "on the couch and between the covers" : "on the couch"} — let's rewind it.</div>
-    <div class="rs-hint">tap to begin ›</div></div>`);
-  if (watched) S.push(`<div class="rs"><div class="rs-cap">By the numbers</div>
-    <div class="rs-nums">
-      <div><b>${fmtHours(d.minutes)}</b><span>watched</span></div>
-      <div><b>${(d.episodes || 0).toLocaleString()}</b><span>episodes</span></div>
-      <div><b>${(d.movies || 0).toLocaleString()}</b><span>movies</span></div>
-      <div><b>${d.new_shows || 0}</b><span>new shows</span></div></div></div>`);
-  if (topShow) S.push(`<div class="rs show"><div class="rs-cap">Show of the year</div>
-    ${topShow.poster ? `<img class="rs-poster" src="${POSTER(topShow.poster)}" alt="">` : ""}
-    <div class="rs-title">${esc(topShow.title)}</div>
-    <div class="rs-sub">${topShow.eps} episodes · ${fmtHours(topShow.mins)}</div>
-    ${runners.length ? `<div class="rs-runners">${runners.map(s =>
-      `<img src="${POSTER(s.poster)}" alt="${esc(s.title)}" title="${esc(s.title)}">`).join("")}</div>` : ""}</div>`);
-  if ((d.months || []).some(v => v)) {
-    const mx = Math.max(...d.months, 1);
-    S.push(`<div class="rs"><div class="rs-cap">The shape of your year</div>
-      <div class="rs-bars">${d.months.map((v, i) =>
-        `<div class="rs-bcol"><i style="height:${Math.max(3, Math.round(100 * v / mx))}%"></i><span>${mS[i]}</span></div>`).join("")}</div>
-      ${d.busiest_month ? `<div class="rs-foot">Busiest in <b>${d.busiest_month}</b> · ${d.busiest_month_count} watches</div>` : ""}</div>`);
+  const mS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+
+  // 1 · the countdown leader
+  S.push(["amber", `<div class="ry-intro">
+    <div class="ry-leader" aria-hidden="true"><span>3</span><span>2</span><span>1</span><i></i></div>
+    <div class="ry-intro-t">
+      <h2 class="ry-big-year">${d.year}</h2>
+      <p class="ry-lede">${first} year in lights</p>
+    </div>
+    <p class="ry-tap">Tap to roll film</p></div>`]);
+
+  // 2 · the guessing game
+  const quiz = watched ? ryQuiz(d) : null;
+  if (quiz) S.push(["velvet", `<div class="ry-quiz" data-truth="${quiz.truth}">
+    <p class="ry-q">${me ? quiz.q : quiz.q.replace("do you think you", "do you think they")}</p>
+    <div class="ry-opts">${quiz.order.map(v =>
+      `<button class="ry-opt" data-v="${v}">${v.toLocaleString()}</button>`).join("")}</div>
+    <div class="ry-answer">
+      <p class="ry-num" data-count="${quiz.truth}">${quiz.truth.toLocaleString()}</p>
+      <p class="ry-unit">${quiz.unit === "hours" ? "hours of watching" : "episodes and films"}</p>
+      <p class="ry-say">${ryCompare(d.minutes)}</p>
+    </div></div>`]);
+
+  // 3 · the count
+  if (watched) S.push(["amber", `<div class="ry-count">
+    <p class="ry-say">${me ? "You pressed play on" : "They pressed play on"}</p>
+    <p class="ry-num" data-count="${d.episodes || 0}">${(d.episodes || 0).toLocaleString()}</p>
+    <p class="ry-unit">${d.episodes === 1 ? "episode" : "episodes"}</p>
+    <ul class="ry-facts">
+      ${d.movies ? `<li><b>${d.movies}</b> ${d.movies === 1 ? "film" : "films"}</li>` : ""}
+      ${d.new_shows ? `<li><b>${d.new_shows}</b> new ${d.new_shows === 1 ? "show" : "shows"}</li>` : ""}
+      ${d.days_watched ? `<li><b>${d.days_watched}</b> days with something on</li>` : ""}
+    </ul></div>`]);
+
+  // 4 · show of the year
+  const top = (d.top_shows || [])[0];
+  if (top) {
+    const share = d.tv_minutes ? Math.round(100 * top.mins / d.tv_minutes) : 0;
+    const rest = (d.top_shows || []).slice(1, 5);
+    S.push(["teal", `<div class="ry-showtop">
+      <p class="ry-say">Show of the year</p>
+      <div class="ry-spot"><img class="ry-poster" src="${POSTER(top.poster)}" alt=""></div>
+      <h3 class="ry-title">${esc(top.title)}</h3>
+      <p class="ry-meta">${ryPlural(top.eps, "episode")}, ${fmtHours(top.mins)}${share >= 10 ? ` — ${share}% of ${me ? "your" : "their"} TV time` : ""}</p>
+      ${rest.length ? `<ol class="ry-runners" start="2">${rest.map(s =>
+        `<li><img src="${POSTER(s.poster)}" alt=""><span>${esc(s.title)}</span></li>`).join("")}</ol>` : ""}
+    </div>`]);
   }
-  if ((d.genres || []).length) S.push(`<div class="rs"><div class="rs-cap">Your top genres</div>
-    <div class="rs-rank">${rankBars(d.genres.map(g => ({ name: g.name, v: g.count })))}</div></div>`);
-  if ((d.top_movies || []).length) S.push(`<div class="rs"><div class="rs-cap">Films you loved</div>
-    <div class="rs-films">${d.top_movies.slice(0, 5).map(m =>
-      `<div class="rs-film"><img src="${POSTER(m.poster)}" alt=""><span>${esc(m.title)}</span>${m.rating ? `<b>${num(m.rating)}/10</b>` : ""}</div>`).join("")}</div></div>`);
+
+  // 5 · the persona
+  if (d.persona) S.push(["violet", `<div class="ry-persona">
+    <p class="ry-say">${me ? "This year, you were" : "This year, they were"}</p>
+    <div class="ry-stamp" aria-hidden="true"><svg viewBox="0 0 200 200"><defs><path id="ry-ring" d="M100,100 m-78,0 a78,78 0 1,1 156,0 a78,78 0 1,1 -156,0"/></defs>
+      <text><textPath href="#ry-ring" textLength="486">MARQUEE · CERTIFIED · ${d.year} · MARQUEE · CERTIFIED · ${d.year} ·</textPath></text></svg>
+      <span>${RY_GLYPH[d.persona.key] || "🎟️"}</span></div>
+    <h3 class="ry-title">${esc(d.persona.title)}</h3>
+    <p class="ry-meta">${esc(d.persona.line)}</p></div>`]);
+
+  // 6 · prime time (hour of day, the week, the streak)
+  const hrs = d.hours || [];
+  if (d.peak_hour != null && hrs.some(v => v)) {
+    const mx = Math.max(...hrs, 1);
+    const wk = d.weekdays || [];
+    S.push(["blue", `<div class="ry-clock">
+      <p class="ry-say">${first} prime time</p>
+      <p class="ry-num ry-num-word">${ryHourLabel(d.peak_hour)}</p>
+      <div class="ry-hours" aria-hidden="true">${hrs.map((v, h) =>
+        `<i class="${h === d.peak_hour ? "hi" : ""}" style="--h:${Math.max(4, Math.round(100 * v / mx))}%"></i>`).join("")}</div>
+      <div class="ry-hlabels" aria-hidden="true"><span>midnight</span><span>6am</span><span>noon</span><span>6pm</span></div>
+      <ul class="ry-facts">
+        ${d.peak_weekday && wk.some(v => v) ? `<li><b>${d.peak_weekday}s</b> were ${me ? "your" : "their"} night</li>` : ""}
+        ${d.streak && d.streak.days >= 3 ? `<li><b>${d.streak.days} days</b> in a row, ${ryDay(d.streak.start)} to ${ryDay(d.streak.end)}</li>` : ""}
+      </ul></div>`]);
+  }
+
+  // 7 · the shape of the year
+  if ((d.months || []).some(v => v)) {
+    const mx = Math.max(...d.months, 1), bi = d.months.indexOf(Math.max(...d.months));
+    S.push(["amber", `<div class="ry-shape">
+      <p class="ry-say">The big month was</p>
+      <p class="ry-num ry-num-word">${MONTHS[bi]}</p>
+      <p class="ry-unit">${ryPlural(d.months[bi], "episode")}</p>
+      <div class="ry-months">${d.months.map((v, i) =>
+        `<div class="${i === bi ? "hi" : ""}"><i style="--h:${Math.max(3, Math.round(100 * v / mx))}%"></i><span>${mS[i]}</span></div>`).join("")}</div>
+    </div>`]);
+  }
+
+  // 8 · genres
+  if ((d.genres || []).length >= 2) {
+    const mx = Math.max(...d.genres.map(g => g.count), 1);
+    S.push(["teal", `<div class="ry-genres">
+      <p class="ry-say">${me ? "You kept coming back to" : "They kept coming back to"}</p>
+      <p class="ry-num ry-num-word">${esc(d.genres[0].name)}</p>
+      <ol class="ry-bars">${d.genres.map(g => `<li><span>${esc(g.name)}</span><i style="--w:${Math.max(4, Math.round(100 * g.count / mx))}%"></i></li>`).join("")}</ol>
+    </div>`]);
+  }
+
+  // 9 · films
+  const films = (d.top_movies || []).slice(0, 5);
+  if (films.length) S.push(["velvet", `<div class="ry-films">
+    <p class="ry-say">${films.some(f => f.rating) ? (me ? "Films you loved" : "Films they loved") : "On the big screen"}</p>
+    <div class="ry-filmrow n${films.length}">${films.map((f, i) => `<figure style="--i:${i}">
+      <img src="${POSTER(f.poster)}" alt="">${f.rating ? `<b>${num(f.rating)}</b>` : ""}
+      <figcaption>${esc(f.title)}</figcaption></figure>`).join("")}</div>
+  </div>`]);
+
+  // 10 · reading
   if (R) S.push(...recapReadingSlides(R, me));
+
+  // 11 · the household
+  if (d.household && d.household.of > 1) {
+    const { rank, of } = d.household;
+    S.push(["violet", `<div class="ry-house">
+      <p class="ry-say">In a household of ${of}</p>
+      <p class="ry-num ry-num-word">${rank === 1 ? "No. 1" : rank === of ? "Last" : `No. ${rank}`}</p>
+      <p class="ry-meta">${rank === 1 ? "Nobody in the house watched more. Someone has to hold the remote."
+        : rank === of ? "Everyone else watched more. Maybe you were out living a life."
+        : `${rank - 1} ${rank - 1 === 1 ? "person" : "people"} watched more, ${of - rank} watched less.`}</p></div>`]);
+  }
+
+  // 12 · for the record
   const rec = [];
-  if (d.binge) rec.push(`<div class="rs-rec"><span>Biggest binge</span><b>${d.binge.count} eps</b><i>${fmtDate(d.binge.date)}${d.binge.top ? " · mostly " + esc(d.binge.top) : ""}</i></div>`);
-  if (d.first_watch) rec.push(`<div class="rs-rec"><span>Kicked off with</span><b>${esc(d.first_watch.title)}</b><i>${fmtDate(d.first_watch.watched_at)}</i></div>`);
-  if (d.last_watch) rec.push(`<div class="rs-rec"><span>Most recently</span><b>${esc(d.last_watch.title)}</b><i>${fmtDate(d.last_watch.watched_at)}</i></div>`);
-  if (rec.length) S.push(`<div class="rs"><div class="rs-cap">For the record</div><div class="rs-recs">${rec.join("")}</div></div>`);
-  const outro = [];
-  if (watched) outro.push(fmtHours(d.minutes), `${(d.episodes || 0).toLocaleString()} episodes`, `${d.movies || 0} films`);
-  if (R && R.books) outro.push(`${R.books} book${R.books === 1 ? "" : "s"}`);
-  if (R && R.manga) outro.push(`${R.manga} manga`);
-  S.push(`<div class="rs outro"><div class="rs-year sm">${d.year}</div>
-    <div class="rs-otitle">That's a wrap.</div>
-    <div class="rs-osub">${outro.join(" · ")}</div>
-    <button class="btn pri rc-share" id="rcshare">${I.share} Share your ${d.year}</button></div>`);
+  if (d.binge) rec.push(["Biggest binge", `${d.binge.count} episodes`, `${ryDay(d.binge.date)}${d.binge.top ? ", mostly " + esc(d.binge.top) : ""}`]);
+  if (d.first_watch) rec.push(["Opened with", esc(d.first_watch.title), ryDay(d.first_watch.watched_at)]);
+  if (d.last_watch && (!d.first_watch || d.last_watch.title !== d.first_watch.title || d.last_watch.watched_at !== d.first_watch.watched_at))
+    rec.push([d.final ? "Closed with" : "Most recently", esc(d.last_watch.title), ryDay(d.last_watch.watched_at)]);
+  if (rec.length) S.push(["blue", `<div class="ry-record">
+    <p class="ry-say">For the record</p>
+    <dl>${rec.map(([k, v, s]) => `<div><dt>${k}</dt><dd><b>${v}</b><span>${s}</span></dd></div>`).join("")}</dl></div>`]);
+
+  // 13 · the credits, and the ticket
+  S.push(["amber", `<div class="ry-outro">
+    <p class="ry-say">That's a wrap on ${d.year}.</p>
+    ${ryTicket(d, me, username)}
+    <div class="ry-outro-acts">
+      <button class="btn pri" id="rcshare">${I.share}<span>Share</span></button>
+      <button class="btn" id="rcagain">Watch again</button>
+    </div></div>`]);
   return S;
 }
 
-// reading in a recap — the numbers that lead the landing and the reading slide
-function rcReadNums(R) {
-  const n = [];
-  if (R.books || (R.books === 0 && !R.manga)) n.push([R.books, R.books === 1 ? "book" : "books"]);
-  if (R.manga) n.push([R.manga, "manga"]);
-  if (R.pages) n.push([R.pages.toLocaleString(), "pages"]);
-  else if (R.chapters) n.push([R.chapters.toLocaleString(), "chapters"]);
-  if (R.minutes >= 60) n.push([Math.round(R.minutes / 60).toLocaleString(), "hrs reading"]);
-  return n;
-}
-// two slides: the year's shelf (count, a fanned stack of covers, the month curve), then
-// the record book (favourite, author, longest, fastest, busiest month). Server only
-// sends `reading` when the recap's owner has it switched on.
+// reading in a recap: the year's shelf, then the record book
 function recapReadingSlides(R, me) {
-  const S = [], mS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
+  const S = [];
   const total = (R.books || 0) + (R.manga || 0);
   const covers = (R.covers || []).slice(0, 7);
   const mid = (covers.length - 1) / 2;
-  const fan = covers.map((c, i) => {
-    const o = i - mid;
-    return `<img src="${esc(POSTER(c.cover))}" alt="" style="--o:${o};--a:${Math.abs(o)};z-index:${20 - Math.round(Math.abs(o) * 2)}">`;
-  }).join("");
-  const mx = Math.max(...(R.months || [0]), 1);
   const b = R.books || 0, m = R.manga || 0;
-  const lead = b && m ? `${b} book${b === 1 ? "" : "s"} and ${m} manga series, start to finish`
-    : b ? `book${b === 1 ? "" : "s"} read cover to cover` : `manga series, start to finish`;
-  S.push(`<div class="rs rs-read"><div class="rs-cap">Between the covers</div>
-    ${fan ? `<div class="rs-fan" style="--n:${covers.length}">${fan}</div>` : ""}
-    <div class="rs-bignum">${total || "—"}</div>
-    <div class="rs-lead">${total ? lead : "Pages turned, nothing finished — the best kind of unfinished business"}</div>
-    <div class="rs-nums rs-nums-3">${rcReadNums(R).filter(([, l]) => !/^(books?|manga)$/.test(l)).map(([v, l]) =>
-      `<div><b>${v}</b><span>${l}</span></div>`).join("")}</div>
-    ${(R.months || []).some(v => v) ? `<div class="rs-spark">${R.months.map((v, i) =>
-      `<div class="rs-bcol ${R.busiest_month && MONTHS[i] === R.busiest_month ? "hi" : ""}"><i style="height:${Math.max(4, Math.round(100 * v / mx))}%"></i><span>${mS[i]}</span></div>`).join("")}</div>
-      <div class="rs-foot">Most ${esc(R.unit)} in <b>${esc(R.busiest_month)}</b> · ${R.busiest_month_units.toLocaleString()}</div>` : ""}
-    ${R.goal ? `<div class="rs-goal ${R.goal.done >= R.goal.target ? "met" : ""}">${R.goal.done >= R.goal.target
-      ? `${I.check}<span>Goal of ${R.goal.target} books — reached</span>`
-      : `<span>${R.goal.done} of a ${R.goal.target}-book goal</span>`}</div>` : ""}</div>`);
-  const fav = R.favourite;
-  const rec = [];
-  if (R.top_author) rec.push(`<div class="rs-rec"><span>Most-read author</span><b>${esc(R.top_author.name)}</b>
-    <i>${R.top_author.count} books · ${R.top_author.pages.toLocaleString()} pages</i></div>`);
-  if (R.longest) rec.push(`<div class="rs-rec"><span>Longest book</span><b>${esc(R.longest.title)}</b>
-    <i>${R.longest.pages.toLocaleString()} pages${R.longest.author ? " · " + esc(R.longest.author) : ""}</i></div>`);
-  if (R.fastest) rec.push(`<div class="rs-rec"><span>Fastest finish</span><b>${esc(R.fastest.title)}</b>
-    <i>${R.fastest.days <= 1 ? "in a single day" : `in ${R.fastest.days} days`}${R.fastest.units ? ` · ${R.fastest.units.toLocaleString()} ${R.fastest.kind === "book" ? "pages" : "chapters"}` : ""}</i></div>`);
-  if (fav || rec.length) S.push(`<div class="rs rs-read"><div class="rs-cap">${me ? "Your" : "The"} reading, on the record</div>
-    ${fav ? `<div class="rs-fav"><img src="${esc(POSTER(fav.cover))}" alt="">
-      <div class="rs-fav-t"><span>Favourite read</span><b>${esc(fav.title)}</b>
-        ${fav.author ? `<i>${esc(fav.author)}</i>` : ""}<em>${fav.rating}<small>/10</small></em></div></div>` : ""}
-    ${rec.length ? `<div class="rs-recs">${rec.join("")}</div>` : ""}</div>`);
+  const what = b && m ? `${ryPlural(b, "book")} and ${m} manga` : b ? (b === 1 ? "book, cover to cover" : "books, cover to cover") : "manga, start to finish";
+  const facts = [];
+  if (R.pages) facts.push(`<li><b>${R.pages.toLocaleString()}</b> pages</li>`);
+  else if (R.chapters) facts.push(`<li><b>${R.chapters.toLocaleString()}</b> chapters</li>`);
+  if (R.minutes >= 60) facts.push(`<li><b>${ryHours(R.minutes).toLocaleString()} hours</b> reading</li>`);
+  if (R.busiest_month && R.busiest_month_units) facts.push(`<li>most in <b>${esc(R.busiest_month)}</b></li>`);
+  S.push(["teal", `<div class="ry-read">
+    <p class="ry-say">Between the covers</p>
+    ${covers.length ? `<div class="ry-fan" aria-hidden="true">${covers.map((c, i) => {
+      const o = i - mid;
+      return `<img src="${POSTER(c.cover)}" alt="" style="--o:${o};--a:${Math.abs(o)};z-index:${20 - Math.round(Math.abs(o) * 2)}">`;
+    }).join("")}</div>` : ""}
+    ${total ? `<p class="ry-num" data-count="${total}">${total}</p><p class="ry-unit">${what}</p>`
+      : `<p class="ry-meta">Pages turned, nothing finished yet. The best kind of unfinished business.</p>`}
+    ${facts.length ? `<ul class="ry-facts">${facts.join("")}</ul>` : ""}
+    ${R.goal ? `<p class="ry-goal ${R.goal.done >= R.goal.target ? "met" : ""}">${R.goal.done >= R.goal.target
+      ? `${I.check}<span>Goal of ${R.goal.target} books, reached</span>` : `<span>${R.goal.done} of a ${R.goal.target}-book goal</span>`}</p>` : ""}
+  </div>`]);
+  const fav = R.favourite, rec = [];
+  if (R.top_author) rec.push(["Most-read author", esc(R.top_author.name), `${R.top_author.count} books, ${R.top_author.pages.toLocaleString()} pages`]);
+  if (R.longest) rec.push(["Longest book", esc(R.longest.title), `${R.longest.pages.toLocaleString()} pages`]);
+  if (R.fastest) rec.push(["Fastest finish", esc(R.fastest.title), R.fastest.days <= 1 ? "in a single day" : `in ${R.fastest.days} days`]);
+  if (fav || rec.length) S.push(["velvet", `<div class="ry-record">
+    <p class="ry-say">${me ? "Your" : "Their"} reading, on the record</p>
+    ${fav ? `<div class="ry-fav"><img src="${POSTER(fav.cover)}" alt="">
+      <div><small>Favourite read</small><b>${esc(fav.title)}</b>${fav.author ? `<span>${esc(fav.author)}</span>` : ""}<em>${fav.rating}<small>/10</small></em></div></div>` : ""}
+    ${rec.length ? `<dl>${rec.map(([k, v, s]) => `<div><dt>${k}</dt><dd><b>${v}</b><span>${s}</span></dd></div>`).join("")}</dl>` : ""}
+  </div>`]);
   return S;
 }
 
 async function shareRecap(d, me, username) {
   const R = d.reading, bits = [];
-  if ((d.episodes || 0) + (d.movies || 0)) bits.push(`${fmtHours(d.minutes)} watched, ${d.episodes} episodes, ${d.movies} movies`);
-  if (R && R.books) bits.push(`${R.books} book${R.books === 1 ? "" : "s"} read`);
+  if ((d.episodes || 0) + (d.movies || 0)) bits.push(`${ryHours(d.minutes)} hours watched, ${ryPlural(d.episodes, "episode")}, ${ryPlural(d.movies, "film")}`);
+  if (R && R.books) bits.push(`${ryPlural(R.books, "book")} read`);
   if (R && R.manga) bits.push(`${R.manga} manga finished`);
-  const text = `${me ? "My" : (username || "").split(" ")[0] + "’s"} ${d.year} on Marquee — ${bits.join(", ")}.`;
-  const url = location.origin + "/#/recap/" + d.year;
+  const top = (d.top_shows || [])[0];
+  const text = `${me ? "My" : (username || "").split(" ")[0] + "’s"} ${d.year} on Marquee${d.persona ? ` (${d.persona.title})` : ""}: ${bits.join(", ")}.${top ? ` Show of the year: ${top.title}.` : ""}`;
   try {
-    if (navigator.share) await navigator.share({ title: `Marquee ${d.year}`, text, url });
-    else { await navigator.clipboard.writeText(text + " " + url); toast("Copied to clipboard"); }
+    if (navigator.share) await navigator.share({ title: `Marquee ${d.year}`, text });
+    else { await navigator.clipboard.writeText(text); toast("Copied to the clipboard"); }
   } catch { /* dismissed */ }
 }
 
-// full-screen story-style slideshow. Tap right/left, swipe, arrow keys; progress segments up top.
+// count a big number up from zero when its slide arrives
+function ryCountUp(el) {
+  const to = +el.dataset.count;
+  if (!to || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const t0 = performance.now(), dur = Math.min(1400, 500 + to * 4);
+  const step = t => {
+    const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = Math.round(to * e).toLocaleString();
+    if (k < 1 && el.isConnected) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// The show: a 9:16 card in the dark. Tap the right side (or →, space) to go on, the left
+// to go back; swipe; segments up top jump. The quiz holds the slide until it's answered.
 function openRecap(d, opts = {}) {
   const { me = true, username = "" } = opts;
   const slides = recapSlides(d, me, username);
   const n = slides.length;
+  const art = (d.top_shows || []).find(s => s.poster);
   const ov = document.createElement("div");
-  ov.className = "recap-show";
+  ov.className = "ry";
+  ov.setAttribute("role", "dialog");
+  ov.setAttribute("aria-modal", "true");
+  ov.setAttribute("aria-label", `Year in Review ${d.year}`);
+  ov.addEventListener("error", e => { if (e.target.tagName === "IMG") e.target.style.visibility = "hidden"; }, true);
   ov.innerHTML = `
-    <div class="rsx-top">
-      <div class="rsx-bars">${slides.map((_, i) => `<span class="rsx-seg" data-i="${i}"><i></i></span>`).join("")}</div>
-      <button class="rsx-close" aria-label="Close recap">${I.x}</button></div>
-    <div class="rsx-stage">${slides.map((s, i) => `<div class="rsx-slide" data-i="${i}">${s}</div>`).join("")}</div>`;
+    ${art ? `<div class="ry-backdrop" style="background-image:url('${POSTER(art.poster)}')"></div>` : ""}
+    <button class="ry-side prev" aria-label="Previous">${I.chevL || "‹"}</button>
+    <div class="ry-card" tabindex="-1">
+      <div class="ry-top">
+        <div class="ry-segs">${slides.map((_, i) => `<button class="ry-seg" data-i="${i}" aria-label="Slide ${i + 1}"><i></i></button>`).join("")}</div>
+        <button class="ry-close" aria-label="Close">${I.x}</button>
+      </div>
+      <div class="ry-stage">${slides.map(([gel, html], i) =>
+        `<section class="ry-slide gel-${gel}" data-i="${i}" aria-hidden="true">${html}</section>`).join("")}</div>
+    </div>
+    <button class="ry-side next" aria-label="Next">${I.chevR}</button>`;
   document.body.appendChild(ov);
   document.body.classList.add("recap-open");
+  const lastFocus = document.activeElement;
   requestAnimationFrame(() => ov.classList.add("in"));
   let idx = -1;
+  const cur = () => $$(".ry-slide", ov)[idx];
+  const locked = () => { const q = cur() && $(".ry-quiz", cur()); return q && !q.classList.contains("done"); };
   const show = i => {
     idx = Math.max(0, Math.min(n - 1, i));
-    $$(".rsx-slide", ov).forEach(s => s.classList.toggle("on", +s.dataset.i === idx));
-    $$(".rsx-seg", ov).forEach(s => {
+    $$(".ry-slide", ov).forEach(s => {
+      const on = +s.dataset.i === idx;
+      s.classList.toggle("on", on);
+      s.setAttribute("aria-hidden", on ? "false" : "true");
+    });
+    $$(".ry-seg", ov).forEach(s => {
       const j = +s.dataset.i; s.classList.toggle("done", j < idx); s.classList.toggle("cur", j === idx);
     });
-    const sb = $("#rcshare", ov);
-    if (sb) sb.onclick = () => shareRecap(d, me, username);
+    $$("[data-count]", cur()).forEach(el => { if (!el.closest(".ry-answer")) ryCountUp(el); });
+    $(".ry-side.prev", ov).disabled = idx === 0;
   };
   const onKey = e => {
-    if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); next(); }
+    if (e.key === "ArrowRight" || (e.key === " " && !e.target.closest("button"))) { e.preventDefault(); next(); }
     else if (e.key === "ArrowLeft") prev();
     else if (e.key === "Escape") close();
   };
   const close = () => {
     document.removeEventListener("keydown", onKey);
     ov.classList.remove("in");
-    setTimeout(() => ov.remove(), 220);
+    setTimeout(() => ov.remove(), 240);
     document.body.classList.remove("recap-open");
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
     opts.onClose && opts.onClose();
   };
-  const next = () => { if (idx >= n - 1) close(); else show(idx + 1); };
+  const next = () => { if (locked()) { cur().querySelector(".ry-quiz").classList.add("nudge"); setTimeout(() => cur().querySelector(".ry-quiz").classList.remove("nudge"), 400); return; }
+    if (idx >= n - 1) close(); else show(idx + 1); };
   const prev = () => show(idx - 1);
-  $(".rsx-close", ov).onclick = close;
-  $$(".rsx-seg", ov).forEach(s => s.onclick = () => show(+s.dataset.i));
-  const stage = $(".rsx-stage", ov);
-  let sx = 0, moved = false;
-  stage.addEventListener("touchstart", e => { sx = e.touches[0].clientX; moved = false; }, { passive: true });
+  $(".ry-close", ov).onclick = close;
+  $(".ry-side.prev", ov).onclick = prev;
+  $(".ry-side.next", ov).onclick = next;
+  $$(".ry-seg", ov).forEach(s => s.onclick = e => { e.stopPropagation(); show(+s.dataset.i); });
+  $$(".ry-quiz", ov).forEach(q => $$(".ry-opt", q).forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    if (q.classList.contains("done")) return;
+    const right = +b.dataset.v === +q.dataset.truth;
+    $$(".ry-opt", q).forEach(o => { o.disabled = true; if (+o.dataset.v === +q.dataset.truth) o.classList.add("right"); });
+    if (!right) b.classList.add("wrong");
+    q.classList.add("done", right ? "got" : "missed");
+    $(".ry-q", q).textContent = right ? "Spot on." : "Not quite.";
+    ryCountUp($(".ry-answer [data-count]", q));
+  }));
+  const sb = $("#rcshare", ov); if (sb) sb.onclick = e => { e.stopPropagation(); shareRecap(d, me, username); };
+  const ag = $("#rcagain", ov); if (ag) ag.onclick = e => { e.stopPropagation(); show(0); };
+  const stage = $(".ry-stage", ov);
+  let sx = 0, sy = 0, moved = false;
+  stage.addEventListener("touchstart", e => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; moved = false; }, { passive: true });
   stage.addEventListener("touchmove", e => { if (Math.abs(e.touches[0].clientX - sx) > 10) moved = true; }, { passive: true });
-  stage.addEventListener("touchend", e => { const dx = e.changedTouches[0].clientX - sx; if (Math.abs(dx) > 45) (dx < 0 ? next() : prev()); });
-  stage.addEventListener("click", e => {   // tap right → next, left third → prev; let buttons/links work
+  stage.addEventListener("touchend", e => {
+    const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
+    if (dy > 90 && Math.abs(dx) < 50) close();             // pull down to leave
+    else if (Math.abs(dx) > 45) (dx < 0 ? next() : prev());
+  });
+  stage.addEventListener("click", e => {
     if (moved) { moved = false; return; }
     if (e.target.closest("a,button")) return;
     const r = stage.getBoundingClientRect();
-    (e.clientX - r.left < r.width * 0.32) ? prev() : next();
+    (e.clientX - r.left < r.width * 0.3) ? prev() : next();
   });
   document.addEventListener("keydown", onKey);
   show(0);
+  $(".ry-card", ov).focus({ preventScroll: true });
   return { close };
 }
 
-// on boot: if the current year's recap just unlocked (December) and hasn't been seen,
-// auto-present it once, then mark it seen so it never pops again.
+// on boot: the newest released recap this member hasn't seen pops up once, then is
+// marked seen on the server, so it won't pop again here or on their phone.
 async function checkRecapPopup() {
   try {
+    if (document.querySelector(".ry")) return;
     const r = await api("/recap");
     if (!r || !r.autoshow) return;
     const d = await api("/recap/" + r.autoshow);
-    if (!d || !d.has_data) return;
+    if (!d || !d.has_data || document.querySelector(".ry")) return;
     openRecap(d, { me: true, username: ME.username });
     api("/recap/" + r.autoshow + "/seen", { method: "POST", body: {} }).catch(() => {});
   } catch { /* never block boot on the recap */ }
@@ -6172,6 +6369,8 @@ routes.settings = async () => {
   if (ME.is_admin) {
     const users = await api("/users");
     const reg = await api("/admin/registration").catch(() => ({ closed: false }));
+    const rcs = await api("/admin/recap").catch(() => ({ release_md: "12-26" }));
+    const [rcm, rcd] = (rcs.release_md || "12-26").split("-").map(Number);
     usersHtml = `<div class="panel"><h3>Household</h3>
       <div class="userlist">${users.map(u => `
         <div class="userrow">
@@ -6189,6 +6388,16 @@ routes.settings = async () => {
         <span class="hint">${reg.closed ? "closed — only accounts you create can log in (safe for a public link)" : "OPEN — anyone with the link can register"}</span></span>
         <button class="switch-btn ${reg.closed ? "" : "on"}" id="regtoggle" role="switch" aria-checked="${!reg.closed}"><span></span></button>
       </label>
+      <div class="toggle-row ry-admin"><span>Year in Review goes live
+        <span class="hint">Everyone's recap opens on this day and pops up once the next time they visit. It keeps counting until New Year.</span></span>
+        <span class="ry-admin-pick">
+          <select id="rcmonth" aria-label="Month">${[[10, "Oct"], [11, "Nov"], [12, "Dec"]].map(([v, l]) =>
+            `<option value="${v}" ${v === rcm ? "selected" : ""}>${l}</option>`).join("")}</select>
+          <select id="rcday" aria-label="Day">${Array.from({ length: 31 }, (_, i) => i + 1).map(v =>
+            `<option value="${v}" ${v === rcd ? "selected" : ""}>${v}</option>`).join("")}</select>
+        </span>
+      </div>
+      <p class="hint" style="margin-top:-4px"><a class="ry-preview-link" href="#/recap/${new Date().getFullYear()}?preview">Preview ${new Date().getFullYear()} now</a> — only admins can, and it doesn't count as seen.</p>
       <p class="hint">Everyone manages their own name, photo and password from their profile.
         Plex links itself when each person taps “Link with Plex”.</p>
     </div>`;
@@ -6414,6 +6623,15 @@ routes.settings = async () => {
     try { await api("/users", { body: { username: u, password: p } }); toast(`Created ${u}`); routes.settings(); }
     catch {}
   };
+  const saveRelease = async () => {
+    const m = +$("#rcmonth").value, d = Math.min(+$("#rcday").value, new Date(2000, m, 0).getDate());
+    try {
+      const r = await api("/admin/recap", { body: { release_md: `${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` } });
+      $("#rcday").value = String(d);
+      toast(`Year in Review goes live ${fmtDate(r.release)}`);
+    } catch {}
+  };
+  if ($("#rcmonth")) { $("#rcmonth").onchange = saveRelease; $("#rcday").onchange = saveRelease; }
   if ($("#regtoggle")) $("#regtoggle").onclick = async () => {
     const b = $("#regtoggle"), nowOn = b.classList.contains("on");   // on = sign-ups open
     await api("/admin/registration", { body: { closed: nowOn } });   // if currently open, close it
