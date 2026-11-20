@@ -1,5 +1,34 @@
 # iOS changelog
 
+## Unreleased — book requests, series and authors
+
+Needs web build `20261120e`.
+
+- **Book requests.** Ask for an ebook and the server finds a copy through Shelfmark,
+  downloads it and files it into Calibre, where the Palma's Calibre tab can Get it.
+  A book's page has a **Request** button; once asked, it follows the request live
+  (polled every 4 s while it moves): finding copies, downloading with a progress bar,
+  adding to Calibre, in Calibre. When no copy matched well enough, **Choose a copy**
+  lists what the indexers found, good matches first and the ones already tried
+  marked; a request that failed offers **Retry**. If the server can't place the book,
+  it says so and offers the search instead.
+- **You › Book requests** (also from Library › Reading): search the downloader, tap a
+  result to request it, and see every request in the house as a card — cover, who
+  asked, where it stands, Cancel on your own. On the Duo opened out the search is the
+  left page and the requests the right. Hidden entirely when the server has no book
+  downloader.
+- **Series and author pages.** On a book's page the series is a chip with the series
+  mark and the book's number, and each author's name is a link (several authors,
+  several links). Both open a page with your copies first, then the rest of the
+  series or bibliography from Hardcover to add from; a series runs in order with
+  "#N" badges (#1.5 novellas included). Two pages on the open Duo.
+- **Film and TV requests, redesigned** in the same language as book requests: a
+  status pill with an icon (Requested, Searching, Downloading, Partly on Plex, On
+  Plex), a proper progress bar with the time left in words ("1 h 22 min left", not
+  `01:22:05`), and a season sheet with a strip showing every season at a glance,
+  select-all, each season's own state, and a Request bar that says how many. A
+  request lands with a check and a haptic.
+
 ## Unreleased — Year in Review, and a tidier Duo
 
 Needs web build `20261120d`.

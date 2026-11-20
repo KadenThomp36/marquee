@@ -45,6 +45,10 @@ struct ReadingShelfScreen: View {
 
                 if !addQuery.isEmpty { searchResults }
 
+                if kind == .book, addQuery.isEmpty, session.bookRequestConfig?.isEnabled == true {
+                    requestsDoor
+                }
+
                 if let sections {
                     ForEach(ReadingState.shelfOrder, id: \.self) { state in
                         shelf(title(for: state), sections.items(in: state), section: state)
@@ -70,6 +74,7 @@ struct ReadingShelfScreen: View {
         }
         .task { await load() }
         .task { await loadActive() }
+        .task { await session.loadBookRequestConfig() }
         .onChange(of: addQuery) { _, new in scheduleSearch(new) }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -164,6 +169,29 @@ struct ReadingShelfScreen: View {
         .padding(.horizontal, 13)
         .padding(.vertical, 11)
         .mqPanel()
+        .padding(.horizontal, MQ.gutter)
+    }
+
+    /// Books you don't own yet can be asked for — the door to Book requests.
+    private var requestsDoor: some View {
+        NavigationLink(value: Navigator.Route.bookRequests(query: nil)) {
+            HStack(spacing: 10) {
+                Image(systemName: "tray.and.arrow.down")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.mqBrass)
+                Text("Request a book for Calibre")
+                    .font(.mqSub)
+                    .foregroundStyle(Color.mqInkSoft)
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.mqInkMuted)
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 10)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
         .padding(.horizontal, MQ.gutter)
     }
 

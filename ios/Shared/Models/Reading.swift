@@ -160,7 +160,7 @@ public struct ReadingItem: Codable, Sendable, Identifiable, Hashable {
     /// Comma-separated, as the shelf query returns it.
     public var genres: String?
     /// Set only on the series browse page.
-    public var seriesPos: Int?
+    public var seriesPos: Double?
 
     public var displayTitle: String { title ?? "Untitled" }
     public var readingState: ReadingState? { state.flatMap(ReadingState.init(rawValue:)) }
@@ -284,7 +284,7 @@ public struct ReadingDetailItem: Codable, Sendable, Equatable {
     public var status: String?
     public var origin: String?
     public var series: String?
-    public var seriesPos: Int?
+    public var seriesPos: Double?
     public var communityRating: Double?
     /// AniList's 0–10 score for manga.
     public var score: Double?
@@ -586,7 +586,7 @@ public struct BookSearchResult: Codable, Sendable, Hashable, Identifiable {
     public var pages: Int?
     public var cover: String?
     public var series: String?
-    public var seriesPos: Int?
+    public var seriesPos: Double?
     public var communityRating: Double?
     public var ratingsCount: Int?
     public var genres: String?
@@ -831,5 +831,17 @@ public struct MonthlyUnits: Codable, Sendable, Hashable, Identifiable {
         var container = encoder.unkeyedContainer()
         try container.encode(key)
         try container.encode(units)
+    }
+}
+
+// MARK: - Series positions
+
+/// Hardcover numbers a series with floats — novellas sit at 1.5 — so a position is a
+/// Double on the wire and "#2" or "#1.5" on screen.
+public enum SeriesPosition {
+    public static func label(_ position: Double?) -> String? {
+        guard let position, position > 0 else { return nil }
+        if position == position.rounded() { return "#\(Int(position))" }
+        return "#\(String(format: "%g", position))"
     }
 }

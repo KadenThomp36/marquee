@@ -1,0 +1,812 @@
+import SwiftUI
+
+// MARK: - Book requests
+//
+// Ask for an ebook and the server finds a copy through Shelfmark, downloads it and
+// files it into the household's Calibre library, where the Palma's Calibre tab can
+// fetch it. It speaks the same request language as films and shows — the pill, the
+// track, the confirmation in RequestControls.swift — so it reads as one feature.
+
+extension BookRequestPhase {
+    var tone: RequestTone {
+        switch self {
+        case .finding: .waiting
+        case .downloading, .importing: .working
+        case .done: .ready
+        case .pick: .attention
+        case .failed: .failed
+        case .cancelled, .unknown: .muted
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .finding: "magnifyingglass"
+        case .downloading: "arrow.down.circle.fill"
+        case .importing: "tray.and.arrow.down.fill"
+        case .done: "checkmark.circle.fill"
+        case .pick: "hand.point.up.left.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        case .cancelled: "xmark.circle"
+        case .unknown: "questionmark.circle"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .finding: "Finding copies"
+        case .downloading: "Downloading"
+        case .importing: "Adding to Calibre"
+        case .done: "In Calibre"
+        case .pick: "Waiting on you"
+        case .failed: "Didn\u{2019}t work"
+        case .cancelled: "Cancelled"
+        case .unknown: "Unknown"
+        }
+    }
+
+    var pill: RequestStatusPill { RequestStatusPill(label: label, symbol: symbol, tone: tone) }
+}
+
+// MARK: - Card
+
+/// One request: what it is, who asked, where it stands, and what you can do about it.
+///
+/// `compact` drops the cover and the title, for the book's own page where both are
+/// already the hero.
+struct BookRequestCard: View {
+    let request: BookRequest
+    var compact = false
+    /// Replace the card's request with what the server sent back.
+    let onUpdate: (BookRequest) -> Void
+
+    @Environment(Session.self) private var session
+    @State private var choosing = false
+    @State private var confirmingCancel = false
+    @State private var busy = false
+    @State private var failure: String?
+
+    private var phase: BookRequestPhase { request.phase }
+    /// The server lets the requester or an admin change a request.
+    private var canManage: Bool { request.isMine || session.me?.isAdmin == true }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 13) {
+                if !compact {
+                    CoverArt(url: request.cover, radius: 8)
+                        .frame(width: 58)
+                        .saturation(phase == .cancelled ? 0 : 1)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    if compact {
+                        Text(request.isMine ? "You asked for a copy" : "\(request.requestedBy ?? "Someone") asked for a copy")
+                            .font(MarqueeFont.body(15, .bold, relativeTo: .headline))
+                            .foregroundStyle(Color.mqInk)
+                    } else {
+                        Text(request.displayTitle)
+                            .font(MarqueeFont.body(15, .bold, relativeTo: .headline))
+                            .foregroundStyle(Color.mqInk)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        if let byline {
+                            Text(byline)
+                                .font(.mqCaption)
+                                .foregroundStyle(Color.mqInkSoft)
+                                .lineLimit(1)
+                        }
+                    }
+                    phase.pill
+                        .padding(.top, 2)
+                    Text(askedLine)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .mqSecondaryLine()
+                }
+                Spacer(minLength: 0)
+            }
+
+            detail
+
+            if let failure {
+                Label(failure, systemImage: "exclamationmark.triangle")
+                    .font(.mqCaption)
+                    .foregroundStyle(Color.mqVelvet)
+            }
+
+            actions
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .mqPanel(radius: MQ.radius)
+        .opacity(phase == .cancelled ? 0.72 : 1)
+        .animation(.snappy, value: request.state)
+        .sensoryFeedback(.success, trigger: phase == .done) { old, new in !old && new }
+        .sheet(isPresented: $choosing) {
+            CopyPickerSheet(request: request) { onUpdate($0) }
+        }
+        .confirmationDialog("Cancel the request for \(request.displayTitle)?",
+                            isPresented: $confirmingCancel, titleVisibility: .visible) {
+            Button("Cancel request", role: .destructive) { Task { await act("cancel") } }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text(phase == .downloading ? "The download stops and nothing goes into Calibre." : "Nothing goes into Calibre.")
+        }
+    }
+
+    private var byline: String? {
+        let parts = [request.author, request.year?.text].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    private var askedLine: String {
+        let when = MQTime.relative(request.createdAt)
+        if compact { return when.isEmpty ? "" : "Asked \(when)" }
+        let who = request.isMine ? "You asked" : "\(request.requestedBy ?? "Someone") asked"
+        return when.isEmpty ? who : "\(who) \(when)"
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch phase {
+        case .finding:
+            RequestProgressTrack(note: "Looking for copies\u{2026} this takes a minute or two",
+                                 tone: .working, indeterminate: true)
+        case .downloading:
+            VStack(alignment: .leading, spacing: 6) {
+                RequestProgressTrack(fraction: request.fraction, percent: request.percent,
+                                     note: request.message)
+                if let copy = request.copy, !copy.summary.isEmpty {
+                    Text(copy.summary)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .monospacedDigit()
+                }
+            }
+        case .importing:
+            RequestProgressTrack(fraction: max(request.fraction, 0.99), percent: nil,
+                                 note: "Adding to Calibre")
+        case .done:
+            Label {
+                Text("In Calibre. The Palma\u{2019}s Calibre tab can Get it now.")
+            } icon: {
+                Image(systemName: "books.vertical.fill").foregroundStyle(RequestTone.ready.color)
+            }
+            .font(.mqSub)
+            .foregroundStyle(Color.mqInkSoft)
+        case .pick, .failed:
+            if let message = request.message, !message.isEmpty {
+                Text(message)
+                    .font(.mqSub)
+                    .foregroundStyle(Color.mqInkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        case .cancelled, .unknown:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        let showChoose = phase == .pick && canManage
+        let showRetry = (phase == .failed || phase == .pick) && canManage
+        let showCancel = phase.isCancellable && request.isMine
+        let showOpen = !compact && request.bookID != nil
+        if showChoose || showRetry || showCancel || showOpen {
+            ChipRow {
+                if showChoose {
+                    Button { choosing = true } label: {
+                        Label("Choose a copy", systemImage: "list.bullet.rectangle")
+                    }
+                    .buttonStyle(.mqChip(on: true))
+                }
+                if showRetry {
+                    Button { Task { await act("retry") } } label: {
+                        Label(phase == .pick ? "Search again" : "Retry", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.mqChip(on: phase == .failed))
+                }
+                if showOpen, let bookID = request.bookID {
+                    NavigationLink(value: Navigator.Route.book(bookID)) {
+                        Label("Open book", systemImage: "book")
+                    }
+                    .buttonStyle(.mqChip)
+                }
+                if showCancel {
+                    Button { confirmingCancel = true } label: {
+                        Label("Cancel", systemImage: "xmark")
+                    }
+                    .buttonStyle(.mqChip(on: false, destructive: true))
+                }
+            }
+            .disabled(busy)
+        }
+    }
+
+    private func act(_ verb: String) async {
+        guard let client = session.client else { return }
+        busy = true
+        failure = nil
+        defer { busy = false }
+        do {
+            let updated = try await client.post("book-requests/\(request.id)/\(verb)", as: BookRequest.self)
+            onUpdate(updated)
+        } catch {
+            failure = (error as? APIError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+}
+
+// MARK: - On a book's page
+
+/// The Request control on a book's page. Its state comes from the server's own
+/// lookup for this book, and it polls every four seconds while the request moves.
+struct BookRequestControl: View {
+    let bookID: Int
+    let title: String
+
+    @Environment(Session.self) private var session
+    @State private var request: BookRequest?
+    @State private var loaded = false
+    @State private var confirming = false
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var notFound = false
+    @State private var notice: String?
+
+    private var enabled: Bool { session.bookRequestConfig?.isEnabled == true }
+    private var isActive: Bool { request?.phase.isActive == true }
+
+    var body: some View {
+        Group {
+            if enabled, loaded {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let request, request.phase != .cancelled {
+                        BookRequestCard(request: request, compact: true) { self.request = $0 }
+                            .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    } else {
+                        offer
+                    }
+                    if let notice {
+                        Text(notice)
+                            .font(.mqCaption)
+                            .foregroundStyle(Color.mqInkMuted)
+                    }
+                }
+                .animation(.spring(response: 0.4, dampingFraction: 0.82), value: request?.id)
+            } else {
+                // An empty Group is no view at all, and its tasks would never run.
+                Color.clear.frame(height: 0)
+            }
+        }
+        .task {
+            await session.loadBookRequestConfig()
+            await load()
+        }
+        .task(id: isActive) {
+            guard isActive else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                await load()
+                if !isActive { return }
+            }
+        }
+        .confirmationDialog("Request \(title)?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Request a copy") { Task { await create() } }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Marquee finds an ebook copy and adds it to Calibre. Everyone in the house can see the request.")
+        }
+    }
+
+    private var offer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "tray.and.arrow.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.mqBrass)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Get a copy for Calibre")
+                        .font(MarqueeFont.body(14, .bold, relativeTo: .subheadline))
+                        .foregroundStyle(Color.mqInk)
+                    Text("Request the ebook and it\u{2019}s downloaded into the library.")
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 6)
+                Button {
+                    confirming = true
+                } label: {
+                    if busy { ProgressView().controlSize(.small).tint(Color.mqBrass) } else { Text("Request") }
+                }
+                .buttonStyle(.mqChip(on: true))
+                .disabled(busy)
+            }
+
+            if let failure {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(failure)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkSoft)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if notFound {
+                        NavigationLink(value: Navigator.Route.bookRequests(query: title)) {
+                            Label("Search for it", systemImage: "magnifyingglass")
+                        }
+                        .buttonStyle(.mqChip)
+                    }
+                }
+                .padding(.leading, 36)
+            }
+        }
+        .padding(14)
+        .mqPanel(radius: MQ.radius)
+    }
+
+    private func load() async {
+        guard enabled, let client = session.client else { loaded = true; return }
+        if let list = try? await client.get("book-requests", query: ["book_id": String(bookID)],
+                                            as: BookRequestList.self) {
+            request = list.requests?.first
+        }
+        loaded = true
+    }
+
+    private func create() async {
+        guard let client = session.client else { return }
+        busy = true
+        failure = nil
+        notFound = false
+        defer { busy = false }
+        do {
+            let created = try await client.post("book-requests", body: CreateBookRequest(bookID: bookID),
+                                                as: BookRequest.self)
+            request = created
+            if created.already == true {
+                notice = created.isMine ? "You'd already asked for this one."
+                    : "\(created.requestedBy ?? "Someone") had already asked for this one."
+            }
+        } catch let error as APIError {
+            if case .http(404, let detail) = error {
+                failure = detail
+                notFound = true
+            } else {
+                failure = error.errorDescription
+            }
+        } catch {
+            failure = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - The screen
+
+/// Search the downloader, ask for a book, and follow every request in the house.
+/// On the open Duo the search is the left page and the requests the right.
+struct BookRequestsScreen: View {
+    var initialQuery: String?
+
+    @Environment(Session.self) private var session
+    @State private var query = ""
+    @State private var results: [ShelfmarkBook] = []
+    @State private var searching = false
+    @State private var unavailable = false
+    @State private var searched = ""
+    @State private var searchTask: Task<Void, Never>?
+    @State private var requests: [BookRequest]?
+    @State private var loadError: String?
+    @State private var pending: ShelfmarkBook?
+    @State private var creating: String?
+    @State private var notice: String?
+    @State private var createdTick = 0
+    @FocusState private var searchFocused: Bool
+
+    private var enabled: Bool? { session.bookRequestConfig?.enabled }
+    private var anyActive: Bool { (requests ?? []).contains { $0.phase.isActive } }
+
+    var body: some View {
+        MarqueeScreen {
+            if enabled == false {
+                VStack(spacing: 10) {
+                    Image(systemName: "books.vertical")
+                        .font(.system(size: 28))
+                        .foregroundStyle(Color.mqInkMuted)
+                    Text("Book requests aren\u{2019}t set up on this server. An admin can add the book downloader in the web app\u{2019}s settings.")
+                        .font(.mqSub)
+                        .foregroundStyle(Color.mqInkSoft)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(MQ.gutter)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                FoldSpread(spacing: 18, refresh: { await loadRequests() }) {
+                    searchPage
+                } trailing: {
+                    requestsPage
+                }
+            }
+        }
+        .navigationTitle("Book requests")
+        .navigationBarTitleDisplayMode(.inline)
+        .sensoryFeedback(.success, trigger: createdTick)
+        .task {
+            await session.loadBookRequestConfig(force: true)
+            if let initialQuery, query.isEmpty { query = initialQuery }
+            await loadRequests()
+        }
+        .task(id: anyActive) {
+            guard anyActive else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled else { return }
+                await loadRequests()
+                if !anyActive { return }
+            }
+        }
+        .onChange(of: query) { _, new in scheduleSearch(new) }
+        .confirmationDialog("Request \(pending?.displayTitle ?? "this book")?",
+                            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+                            titleVisibility: .visible, presenting: pending) { book in
+            Button("Request a copy") { Task { await create(book) } }
+            Button("Not now", role: .cancel) {}
+        } message: { book in
+            Text("\(book.authorLine.isEmpty ? "" : "By \(book.authorLine). ")Marquee finds an ebook copy and adds it to Calibre. Everyone in the house can see the request.")
+        }
+    }
+
+    // MARK: Search
+
+    @ViewBuilder
+    private var searchPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Color.mqInkMuted)
+                TextField("Find a book to request", text: $query)
+                    .font(.mqBody)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .focused($searchFocused)
+                    .onSubmit { scheduleSearch(query, immediately: true) }
+                if searching {
+                    ProgressView().controlSize(.small).tint(Color.mqBrass)
+                } else if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(Color.mqInkMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear search")
+                }
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            .mqPanel()
+
+            if let notice {
+                Label(notice, systemImage: "checkmark.circle.fill")
+                    .font(.mqSub)
+                    .foregroundStyle(Color.mqInkSoft)
+                    .symbolRenderingMode(.hierarchical)
+                    .transition(.opacity)
+            }
+
+            searchBody
+        }
+        .padding(.horizontal, MQ.gutter)
+        .padding(.top, 10)
+        .animation(.easeOut(duration: 0.2), value: notice)
+    }
+
+    @ViewBuilder
+    private var searchBody: some View {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if trimmed.count < 2 {
+            Text("Search by title or author. A request finds an ebook and files it into Calibre, usually within a few minutes.")
+                .font(.mqCaption)
+                .foregroundStyle(Color.mqInkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if unavailable {
+            Label("The book downloader isn\u{2019}t answering. Try again in a bit.", systemImage: "wifi.exclamationmark")
+                .font(.mqSub)
+                .foregroundStyle(Color.mqInkSoft)
+        } else if results.isEmpty, !searching, searched == trimmed {
+            Text("Nothing found for \u{201C}\(trimmed)\u{201D}. Try the author\u{2019}s surname, or fewer words.")
+                .font(.mqSub)
+                .foregroundStyle(Color.mqInkSoft)
+        } else if !results.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(results) { book in
+                    resultRow(book)
+                    if book.id != results.last?.id {
+                        Divider().overlay(Color.mqHairline).padding(.leading, 66)
+                    }
+                }
+            }
+            .mqPanel(radius: MQ.radius)
+        }
+    }
+
+    private func resultRow(_ book: ShelfmarkBook) -> some View {
+        let existing = book.request
+        return Button {
+            if existing == nil { pending = book }
+        } label: {
+            HStack(spacing: 12) {
+                CoverArt(url: book.cover, radius: 6).frame(width: 42)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(book.displayTitle)
+                        .font(MarqueeFont.body(14, .semibold, relativeTo: .subheadline))
+                        .foregroundStyle(Color.mqInk)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text([book.authorLine, book.year?.text ?? ""].filter { !$0.isEmpty }.joined(separator: ", "))
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                if let existing {
+                    RequestStatusPill(label: existing.phase.label, symbol: existing.phase.symbol,
+                                      tone: existing.phase.tone, compact: true)
+                } else if creating == book.id {
+                    ProgressView().controlSize(.small).tint(Color.mqBrass)
+                } else {
+                    Text("Request")
+                        .font(MarqueeFont.body(12.5, .bold, relativeTo: .caption))
+                        .foregroundStyle(Color.mqBrass)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background(Color.mqBrassSoft, in: .capsule)
+                        .overlay(Capsule().strokeBorder(Color.mqBrassDim, lineWidth: 1))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .disabled(creating != nil)
+        .accessibilityLabel("\(book.displayTitle)\(book.authorLine.isEmpty ? "" : ", \(book.authorLine)")")
+        .accessibilityValue(existing.map { $0.phase.label } ?? "")
+        .accessibilityHint(existing == nil ? "Requests a copy" : "")
+    }
+
+    // MARK: Requests
+
+    @ViewBuilder
+    private var requestsPage: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader("Requests in the house", count: requests.map { "\($0.count)" })
+            if let requests {
+                if requests.isEmpty {
+                    Text("Nobody has asked for a book yet. Search to request one.")
+                        .font(.mqSub)
+                        .foregroundStyle(Color.mqInkMuted)
+                        .padding(.vertical, 18)
+                } else {
+                    LazyVStack(spacing: 12) {
+                        ForEach(requests) { request in
+                            BookRequestCard(request: request) { replace($0) }
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                    }
+                }
+            } else if let loadError {
+                LoadFailure(message: loadError) { await loadRequests() }
+            } else {
+                ForEach(0..<3, id: \.self) { _ in SkeletonBlock(height: 120, radius: MQ.radius) }
+            }
+        }
+        .padding(.horizontal, MQ.gutter)
+        .padding(.top, 10)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: requests)
+    }
+
+    // MARK: Data
+
+    private func loadRequests() async {
+        guard let client = session.client else { return }
+        do {
+            let list = try await client.get("book-requests", as: BookRequestList.self)
+            requests = list.requests ?? []
+            loadError = nil
+        } catch {
+            if requests == nil { loadError = (error as? APIError)?.errorDescription ?? error.localizedDescription }
+        }
+    }
+
+    private func replace(_ updated: BookRequest) {
+        guard var list = requests else { return }
+        if let index = list.firstIndex(where: { $0.id == updated.id }) {
+            list[index] = updated
+        } else {
+            list.insert(updated, at: 0)
+        }
+        requests = list
+        // keep the search result's pill in step
+        if let at = results.firstIndex(where: { $0.providerID == updated.providerID }) {
+            results[at].request = updated.phase == .cancelled || updated.phase == .failed
+                ? nil : BookRequestRef(id: updated.id, state: updated.state)
+        }
+    }
+
+    private func scheduleSearch(_ text: String, immediately: Bool = false) {
+        searchTask?.cancel()
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 2 else {
+            results = []
+            unavailable = false
+            searching = false
+            return
+        }
+        searchTask = Task {
+            if !immediately { try? await Task.sleep(for: .milliseconds(500)) }
+            guard !Task.isCancelled, let client = session.client else { return }
+            searching = true
+            let response = try? await client.get("book-requests/search", query: ["q": trimmed],
+                                                 as: ShelfmarkSearchResponse.self)
+            guard !Task.isCancelled else { return }
+            searching = false
+            searched = trimmed
+            results = response?.results ?? []
+            unavailable = response == nil || response?.unavailable == true
+        }
+    }
+
+    private func create(_ book: ShelfmarkBook) async {
+        guard let client = session.client else { return }
+        creating = book.id
+        defer { creating = nil }
+        do {
+            let created = try await client.post("book-requests", body: CreateBookRequest(book),
+                                                as: BookRequest.self)
+            replace(created)
+            if created.already == true {
+                notice = created.isMine ? "You'd already asked for \(created.displayTitle)."
+                    : "\(created.requestedBy ?? "Someone") had already asked for \(created.displayTitle)."
+            } else {
+                notice = "Requested \(created.displayTitle). Finding a copy takes a minute or two."
+                createdTick += 1
+            }
+        } catch {
+            notice = (error as? APIError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Choose a copy
+
+/// Every copy the indexers found, best matches first, the ones already tried marked —
+/// for when no copy matched well enough, or the good ones failed.
+struct CopyPickerSheet: View {
+    let request: BookRequest
+    let onPicked: (BookRequest) -> Void
+
+    @Environment(Session.self) private var session
+    @Environment(\.dismiss) private var dismiss
+    @State private var detail: BookRequest?
+    @State private var error: String?
+    @State private var confirming: BookRequestChoice?
+    @State private var busy = false
+
+    /// Recommended copies first; the server's order otherwise.
+    private var choices: [BookRequestChoice] {
+        let all = detail?.choices ?? []
+        return all.filter(\.isRecommended) + all.filter { !$0.isRecommended }
+    }
+
+    var body: some View {
+        NavigationStack {
+            MarqueeScreen {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if let message = (detail ?? request).message, !message.isEmpty {
+                            Text(message)
+                                .font(.mqSub)
+                                .foregroundStyle(Color.mqInkSoft)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if detail == nil, error == nil {
+                            ProgressView().tint(Color.mqBrass)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 30)
+                        } else if let error {
+                            LoadFailure(message: error) { await load() }
+                        } else if choices.isEmpty {
+                            EmptyLine("No copies to choose from. Search again from the request.")
+                        } else {
+                            VStack(spacing: 0) {
+                                ForEach(choices) { choice in
+                                    row(choice)
+                                    if choice.id != choices.last?.id {
+                                        Divider().overlay(Color.mqHairline)
+                                    }
+                                }
+                            }
+                            .mqPanel(radius: MQ.radius)
+                        }
+                    }
+                    .padding(MQ.gutter)
+                }
+            }
+            .navigationTitle("Choose a copy")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+            }
+            .confirmationDialog("Download this copy?", isPresented: Binding(
+                get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+                                titleVisibility: .visible, presenting: confirming) { choice in
+                Button("Download it") { Task { await pick(choice) } }
+                Button("Cancel", role: .cancel) {}
+            } message: { choice in
+                Text(choice.title ?? "")
+            }
+        }
+        .presentationBackground(Color.mqGround)
+        .task { await load() }
+    }
+
+    private func row(_ choice: BookRequestChoice) -> some View {
+        Button {
+            confirming = choice
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                if choice.isRecommended || choice.wasTried {
+                    HStack(spacing: 6) {
+                        if choice.isRecommended {
+                            RequestStatusPill(label: "Good match", symbol: "star.fill", tone: .working, compact: true)
+                        }
+                        if choice.wasTried {
+                            RequestStatusPill(label: "Tried, didn\u{2019}t work", symbol: "arrow.uturn.backward",
+                                              tone: .muted, compact: true)
+                        }
+                    }
+                }
+                Text(choice.title ?? "Untitled copy")
+                    .font(MarqueeFont.body(13.5, .semibold, relativeTo: .subheadline))
+                    .foregroundStyle(Color.mqInk)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                Text([choice.summary, choice.indexer ?? ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.mqCaption)
+                    .foregroundStyle(Color.mqInkMuted)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .contentShape(.rect)
+            .opacity(choice.wasTried ? 0.6 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+    }
+
+    private func load() async {
+        guard let client = session.client else { return }
+        do {
+            detail = try await client.get("book-requests/\(request.id)", as: BookRequest.self)
+            error = nil
+        } catch {
+            self.error = (error as? APIError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func pick(_ choice: BookRequestChoice) async {
+        guard let client = session.client else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            let updated = try await client.post("book-requests/\(request.id)/pick",
+                                                body: PickBookCopy(sourceID: choice.sourceID.value),
+                                                as: BookRequest.self)
+            onPicked(updated)
+            dismiss()
+        } catch {
+            self.error = (error as? APIError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+}

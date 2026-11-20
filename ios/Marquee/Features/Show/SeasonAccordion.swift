@@ -251,35 +251,23 @@ struct TickButton: View {
     }
 }
 
-/// Per-season Overseerr state, shown on the progress row.
+/// Per-season Overseerr state, shown on the progress row — the same pill the
+/// request sheet uses, so a season reads the same in both places.
 struct SeasonStateBadge: View {
     let state: SeasonRequestState
 
     var body: some View {
-        switch state.state {
-        case .downloading:
+        if state.state == .downloading {
             HStack(spacing: 6) {
-                Capsule().fill(Color.mqPanelRaised)
-                    .frame(width: 34, height: 5)
-                    .overlay(alignment: .leading) {
-                        Capsule().fill(Color.mqBrassFill)
-                            .frame(width: 34 * Double(state.progress ?? 0) / 100)
-                    }
-                Text("\(state.progress ?? 0)%")
-                    .monospacedDigit()
-                if let eta = state.eta { Text("· \(eta)") }
+                RequestProgressTrack(fraction: Double(state.progress ?? 0) / 100, height: 5)
+                    .frame(width: 38)
+                state.pill
             }
-            .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
-            .foregroundStyle(Color.mqBrass)
-            .accessibilityLabel("Downloading, \(state.progress ?? 0) percent")
-        case .available:
-            Label("On Plex", systemImage: "checkmark")
-                .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
-                .foregroundStyle(Color.mqBrassBright)
-        default:
-            Label(state.state.label, systemImage: "arrow.down.circle")
-                .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
-                .foregroundStyle(Color.mqInkSoft)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Downloading, \(state.progress ?? 0) percent"
+                + (RequestETA.readable(state.eta).map { ", \($0)" } ?? ""))
+        } else {
+            state.pill
         }
     }
 }

@@ -24,6 +24,10 @@ public final class Navigator {
         case bookPreview(Int)
         /// One book's reading in depth: time, pace, a forecast, every sitting.
         case bookStats(Int)
+        /// Everything by one author (`by` "author") or in one series (`by` "series").
+        case bookBrowse(by: String, name: String)
+        /// The household's book requests, optionally opening on a search.
+        case bookRequests(query: String?)
         case manga(Int)
         case profile(String)
         /// Year in Review. `username` nil means "me".
@@ -34,6 +38,13 @@ public final class Navigator {
         case notifications
         case settings
         case search(String)
+        #if DEBUG
+        /// Every request state side by side, from sample data — for checking the
+        /// design without a request server. Debug builds only.
+        case debugRequestStates
+        /// A series page from sample data, positions and Hardcover rows included.
+        case debugSeriesBrowse
+        #endif
     }
 
     /// Which tab a route belongs to.
@@ -59,7 +70,12 @@ public final class Navigator {
     private func tab(for route: Route) -> Destination {
         switch route {
         case .show, .episode: .next
-        case .movie, .book, .bookPreview, .bookStats, .manga: .library
+        case .movie, .book, .bookPreview, .bookStats, .bookBrowse, .manga: .library
+        case .bookRequests: .you
+        #if DEBUG
+        case .debugRequestStates: .you
+        case .debugSeriesBrowse: .library
+        #endif
         case .search: .search
         case .person: .search
         case .list, .profile, .history, .notifications, .settings, .recap, .watched: .you
@@ -91,6 +107,17 @@ public final class Navigator {
             return Int(parts[1]).map(Route.bookStats)
         case "book":
             return Int(parts.count > 1 ? parts[1] : "").map(Route.book)
+        case "books" where parts.count >= 3 && (parts[1] == "author" || parts[1] == "series"):
+            let name = parts[2...].joined(separator: "/").removingPercentEncoding ?? parts[2]
+            return .bookBrowse(by: parts[1], name: name)
+        case "requests" where parts.count >= 2 && parts[1] == "books", "book-requests":
+            return .bookRequests(query: nil)
+        #if DEBUG
+        case "debug" where parts.count >= 2 && parts[1] == "requests":
+            return .debugRequestStates
+        case "debug" where parts.count >= 2 && parts[1] == "browse":
+            return .debugSeriesBrowse
+        #endif
         case "manga":
             return Int(parts.count > 1 ? parts[1] : "").map(Route.manga)
         case "u":

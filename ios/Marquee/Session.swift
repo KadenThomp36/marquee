@@ -31,6 +31,8 @@ public final class Session {
     public private(set) var listMembership: [String: Int] = [:]
     /// Overseerr availability, fetched once per launch.
     public private(set) var requestConfig: RequestConfig?
+    /// Whether the server has a book downloader (Shelfmark) wired up.
+    public private(set) var bookRequestConfig: BookRequestConfig?
     /// Bumped whenever an episode is marked somewhere Watch Next can't see — the
     /// screening room — so Home refetches instead of showing the old card.
     public private(set) var watchRevision = 0
@@ -142,6 +144,17 @@ public final class Session {
     public func loadRequestConfig() async {
         guard requestConfig == nil, let client else { return }
         requestConfig = try? await client.get("request/config", as: RequestConfig.self)
+    }
+
+    /// Asked again on `force` — an admin can switch the downloader on mid-session.
+    public func loadBookRequestConfig(force: Bool = false) async {
+        guard force || bookRequestConfig == nil, let client else { return }
+        if let fresh = try? await client.get("book-requests/config", as: BookRequestConfig.self) {
+            bookRequestConfig = fresh
+        } else if bookRequestConfig == nil {
+            // An older server has no such endpoint: treat it as off.
+            bookRequestConfig = BookRequestConfig(enabled: false)
+        }
     }
 
     // MARK: - Celebrations

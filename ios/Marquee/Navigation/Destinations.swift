@@ -23,6 +23,10 @@ extension View {
                 ReadingDetailScreen(kind: .book, itemID: hardcoverID, isHardcoverPreview: true)
             case .bookStats(let id):
                 BookStatsScreen(bookID: id)
+            case .bookBrowse(let by, let name):
+                BookBrowseScreen(by: by, name: name)
+            case .bookRequests(let query):
+                BookRequestsScreen(initialQuery: query)
             case .manga(let id):
                 ReadingDetailScreen(kind: .manga, itemID: id)
             case .profile(let username):
@@ -39,6 +43,12 @@ extension View {
                 SettingsScreen()
             case .search(let query):
                 SearchScreen(initialQuery: query)
+            #if DEBUG
+            case .debugRequestStates:
+                RequestStatesGallery()
+            case .debugSeriesBrowse:
+                BookBrowseScreen(by: "series", name: "The Expanse", sample: BrowseSamples.series)
+            #endif
             }
         }
     }

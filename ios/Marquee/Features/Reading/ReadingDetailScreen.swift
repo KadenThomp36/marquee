@@ -44,6 +44,10 @@ struct ReadingDetailScreen: View {
                 FoldSpread(spacing: 20, refresh: { await load() }) {
                     hero(item)
                     if detail.tracked { tracked(detail) } else { untracked() }
+                    if kind == .book, let id = item.id, !isHardcoverPreview {
+                        BookRequestControl(bookID: id, title: item.displayTitle)
+                            .padding(.horizontal, MQ.gutter)
+                    }
                 } trailing: {
                     extras(detail, item)
                 }
@@ -121,19 +125,14 @@ struct ReadingDetailScreen: View {
 
                 VStack(alignment: .leading, spacing: 7) {
                     if kind == .book, let author = item.author, !author.isEmpty {
-                        Text(author)
-                            .font(.mqSub)
-                            .foregroundStyle(Color.mqBrass)
+                        AuthorLinks(author: author)
                     } else if let origin = item.origin {
                         Text([origin, item.status].compactMap { $0 }.joined(separator: " · "))
                             .font(.mqSub)
                             .foregroundStyle(Color.mqBrass)
                     }
-                    if let series = item.series, !series.isEmpty {
-                        Label(series + (item.seriesPos.map { " #\($0)" } ?? ""),
-                              systemImage: "books.vertical")
-                            .font(.mqCaption)
-                            .foregroundStyle(Color.mqInkSoft)
+                    if kind == .book, let series = item.series, !series.isEmpty {
+                        SeriesChip(series: series, position: SeriesPosition.label(item.seriesPos))
                     }
                     ChipRow {
                         if let total { MetaChip(text: "\(total) \(kind.unit)") }
@@ -728,6 +727,70 @@ struct ReadingDetailScreen: View {
                                    body: ReadingStateRequest.remove, as: Empty.self)
         live = nil
         dismiss()
+    }
+}
+
+/// A book's authors as links — each name opens everything by that author. A
+/// comma-separated byline is several people, so each gets its own link.
+private struct AuthorLinks: View {
+    let author: String
+
+    private var names: [String] {
+        author.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        FlowLayout(spacing: 0, lineSpacing: 3) {
+            ForEach(Array(names.enumerated()), id: \.offset) { index, name in
+                NavigationLink(value: Navigator.Route.bookBrowse(by: "author", name: name)) {
+                    Text(name + (index < names.count - 1 ? ",\u{00A0}" : ""))
+                        .font(.mqSub)
+                        .foregroundStyle(Color.mqBrass)
+                        .underline(color: Color.mqBrassDim)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(name)
+                .accessibilityHint("Shows everything by \(name)")
+            }
+        }
+    }
+}
+
+/// The book's series as a door: the series mark, the name, and where this book
+/// falls in it.
+private struct SeriesChip: View {
+    let series: String
+    let position: String?
+
+    var body: some View {
+        NavigationLink(value: Navigator.Route.bookBrowse(by: "series", name: series)) {
+            HStack(spacing: 6) {
+                SeriesGlyph()
+                    .stroke(Color.mqBrass, style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
+                    .frame(width: 14, height: 14)
+                Text(series)
+                    .font(MarqueeFont.body(12, .semibold, relativeTo: .caption))
+                    .foregroundStyle(Color.mqInk)
+                    .lineLimit(1)
+                if let position {
+                    Text(position)
+                        .font(MarqueeFont.body(11, .bold, relativeTo: .caption2))
+                        .foregroundStyle(Color.mqBrass)
+                        .monospacedDigit()
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.mqInkMuted)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.mqPanel, in: .capsule)
+            .overlay(Capsule().strokeBorder(Color.mqHairlineBold, lineWidth: 1))
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Series: \(series)\(position.map { ", book \($0.dropFirst())" } ?? "")")
+        .accessibilityHint("Shows the whole series")
     }
 }
 

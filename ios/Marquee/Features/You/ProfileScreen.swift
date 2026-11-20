@@ -420,9 +420,15 @@ struct ProfileScreen: View {
             hubLink("My Lists", "bookmark", destination: .list(0), custom: AnyView(ListsScreen()))
             Divider().overlay(Color.mqHairline).padding(.leading, 46)
             hubLink("History", "clock.arrow.circlepath", destination: .history, custom: nil)
+            if session.bookRequestConfig?.isEnabled == true {
+                Divider().overlay(Color.mqHairline).padding(.leading, 46)
+                hubLink("Book requests", "tray.and.arrow.down", destination: .bookRequests(query: nil),
+                        custom: nil)
+            }
         }
         .mqPanel()
         .padding(.horizontal, MQ.gutter)
+        .task { await session.loadBookRequestConfig(force: true) }
     }
 
     @ViewBuilder
