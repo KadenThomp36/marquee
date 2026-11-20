@@ -1986,8 +1986,11 @@ body.recap-open,html:has(body.recap-open){overflow:hidden}
 @keyframes ryTicket{from{opacity:0;transform:translateY(calc(var(--u)*30)) rotate(8deg)}}
 
 /* admin: the release day */
-.ry-admin-pick{display:flex;gap:6px;flex:none}
-.ry-admin-pick select{width:auto}
+.ry-admin{align-items:center}
+.toggle-row .ry-admin-pick{display:flex;flex-direction:row;align-items:center;gap:6px;flex:none}
+.ry-admin-pick select{width:auto!important;margin:0}
+.ry-preview-link{color:var(--amber);font-weight:700}
+.ry-preview-link:hover{color:var(--amber-2)}
 
 
 /* ── list items styled like the Watch-Next card (poster + info overlay + progress) ── */
