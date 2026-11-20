@@ -42,7 +42,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120h"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120i"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -8034,6 +8034,133 @@ async def make_request(request: Request, user=Depends(current_user)):
     return {"ok": True, "status": "requested"}
 
 
+REQ_STATUS_LABEL = {1: "Waiting for approval", 2: "Approved", 3: "Declined", 4: "Failed", 5: "Completed"}
+
+
+def _fmt_bytes(n):
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit in ("GB", "TB") else f"{n:.0f} {unit}"
+        n /= 1024
+
+
+def _res_label(r):
+    r = str(r or "").lower()
+    return {"4k": "4K", "2160": "4K", "1080": "1080p", "720": "720p", "576": "576p", "480": "480p",
+            "sd": "SD"}.get(r, r.upper() if r else None)
+
+
+def plex_file_details(rating_key, kind):
+    """What's actually on Plex, at a glance: resolution, codecs, HDR, size. For a show,
+    the most common resolution across its episodes and the total size."""
+    with db() as con:
+        token = plex_owner_token(con)
+    if not token or not rating_key:
+        return None
+    try:
+        if kind == "movie":
+            md = (plex_get(f"/library/metadata/{rating_key}", token).get("MediaContainer") or {}).get("Metadata") or []
+            medias = (md[0].get("Media") or []) if md else []
+            if not medias:
+                return None
+            m = max(medias, key=lambda x: int(x.get("bitrate") or 0))
+            parts = m.get("Part") or [{}]
+            streams = parts[0].get("Stream") or []
+            hdr = any(s.get("streamType") == 1 and (s.get("DOVIPresent") or "hdr" in str(s.get("displayTitle", "")).lower()
+                                                     or s.get("colorTrc") in ("smpte2084", "arib-std-b67"))
+                      for s in streams)
+            return {"resolution": _res_label(m.get("videoResolution")),
+                    "video": (m.get("videoCodec") or "").upper() or None,
+                    "audio": " ".join(x for x in [(m.get("audioCodec") or "").upper(),
+                                                  {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}.get(int(m.get("audioChannels") or 0))] if x) or None,
+                    "hdr": "Dolby Vision" if any(s.get("DOVIPresent") for s in streams) else ("HDR" if hdr else None),
+                    "container": (m.get("container") or "").upper() or None,
+                    "size": _fmt_bytes(sum(int(p.get("size") or 0) for p in parts)),
+                    "bitrate": f"{round(int(m.get('bitrate') or 0) / 1000, 1)} Mbps" if m.get("bitrate") else None,
+                    "copies": len(medias)}
+        leaves = (plex_get(f"/library/metadata/{rating_key}/allLeaves", token).get("MediaContainer") or {}).get("Metadata") or []
+        if not leaves:
+            return None
+        res, size = {}, 0
+        for ep in leaves:
+            for m in (ep.get("Media") or [])[:1]:
+                lbl = _res_label(m.get("videoResolution"))
+                if lbl:
+                    res[lbl] = res.get(lbl, 0) + 1
+                size += sum(int(p.get("size") or 0) for p in (m.get("Part") or []))
+        top = max(res, key=res.get) if res else None
+        return {"resolution": top, "mixed": len(res) > 1, "episodes": len(leaves), "size": _fmt_bytes(size)}
+    except Exception as e:  # noqa: BLE001
+        log.info("plex file details failed: %s", e)
+        return None
+
+
+@app.get("/api/request/detail/{item_type}/{tmdb_id}")
+def request_detail(item_type: str, tmdb_id: int, user=Depends(current_user)):
+    """Everything behind a film's or show's request pill: who asked and when, what's
+    downloading (the release name says the quality), and what's on Plex now."""
+    with db() as con:
+        url, key = overseerr_cfg(con)
+        me = con.execute("SELECT plex_username FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not url or not key:
+        return {"enabled": False}
+    kind = "movie" if item_type == "movie" else "tv"
+    try:
+        r = httpx.get(f"{url}/api/v1/{kind}/{tmdb_id}", headers={"X-Api-Key": key}, timeout=15)
+        r.raise_for_status()
+        d = r.json()
+    except httpx.HTTPError:
+        return {"enabled": True, "unavailable": True}
+    info = d.get("mediaInfo") or {}
+    mine = ((me["plex_username"] if me else "") or "").lower()
+    reqs = []
+    for rq in info.get("requests") or []:
+        by = rq.get("requestedBy") or {}
+        reqs.append({"id": rq.get("id"), "status": REQ_STATUS_LABEL.get(rq.get("status"), "Requested"),
+                     "requested_by": by.get("displayName") or by.get("plexUsername") or by.get("username"),
+                     "created_at": rq.get("createdAt"), "is4k": bool(rq.get("is4k")),
+                     "seasons": sorted(s.get("seasonNumber") for s in (rq.get("seasons") or []) if s.get("seasonNumber")),
+                     "mine": bool(mine) and (by.get("plexUsername") or "").lower() == mine,
+                     "can_delete": bool(user["is_admin"]) or (bool(mine) and (by.get("plexUsername") or "").lower() == mine)})
+    downloads = []
+    for x in info.get("downloadStatus") or []:
+        sz, left = x.get("size") or 0, x.get("sizeLeft") or 0
+        ep = x.get("episode") or {}
+        downloads.append({"title": x.get("title"), "status": x.get("status"), "size": _fmt_bytes(sz),
+                          "progress": round(100 * (sz - left) / sz) if sz else None, "eta": x.get("timeLeft"),
+                          "season": ep.get("seasonNumber"), "episode": ep.get("episodeNumber")})
+    status = OVERSEERR_STATUS.get(info.get("status", 1), "none")
+    file = plex_file_details(info.get("ratingKey"), item_type) if status in ("available", "partial") else None
+    return {"enabled": True, "status": status, "requests": reqs, "downloads": downloads, "file": file}
+
+
+@app.post("/api/request/{request_id}/delete")
+def request_delete(request_id: int, user=Depends(current_user)):
+    """Withdraw a film or show request in Overseerr (what's already on Plex stays)."""
+    with db() as con:
+        url, key = overseerr_cfg(con)
+        me = con.execute("SELECT plex_username FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not url or not key:
+        raise HTTPException(400, "Overseerr isn't configured")
+    try:
+        r = httpx.get(f"{url}/api/v1/request/{request_id}", headers={"X-Api-Key": key}, timeout=15)
+        r.raise_for_status()
+        by = (r.json().get("requestedBy") or {}).get("plexUsername") or ""
+        if not user["is_admin"] and (not me or not me["plex_username"] or by.lower() != me["plex_username"].lower()):
+            raise HTTPException(403, "only the person who asked for it (or an admin) can delete it")
+        r = httpx.delete(f"{url}/api/v1/request/{request_id}", headers={"X-Api-Key": key}, timeout=15)
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Overseerr didn't delete it: {e}")
+    return {"ok": True}
+
+
 @app.get("/api/request/config")
 def request_config(user=Depends(current_user)):
     with db() as con:
@@ -8299,13 +8426,19 @@ def _calibre_search(query, cfg):
     for e in ET.fromstring(r.content).iter(_ATOM + "entry"):
         title = (e.findtext(_ATOM + "title") or "").strip()
         authors = [(a.findtext(_ATOM + "name") or "").strip() for a in e.findall(_ATOM + "author")]
-        cid = None
+        cid, formats, size = None, [], 0
         for ln in e.findall(_ATOM + "link"):
-            m = re.search(r"/opds/(?:download|cover|thumb)/(\d+)", ln.get("href") or "")
-            if m:
+            href = ln.get("href") or ""
+            m = re.search(r"/opds/(?:download|cover|thumb)/(\d+)", href)
+            if m and cid is None:
                 cid = int(m.group(1))
-                break
-        out.append({"id": cid, "title": title, "authors": [a for a in authors if a]})
+            if "acquisition" in (ln.get("rel") or ""):
+                fm = re.search(r"/opds/download/\d+/([a-z0-9]+)", href)
+                if fm:
+                    formats.append(fm.group(1).upper())
+                size += int(ln.get("length") or 0)
+        out.append({"id": cid, "title": title, "authors": [a for a in authors if a],
+                    "formats": formats, "size": _fmt_bytes(size)})
     _cal_cache[key] = (time.time(), out)
     return out
 
@@ -8348,7 +8481,8 @@ def _calibre_pick(entries, want, surname, first, sub=()):
             extra = set(_sm_words(sm_main_title(en["title"]))) - set(want) - _SM_STOP \
                 - set(_sm_words(first)) - _SM_JARGON
             if len([w for w in extra if len(w) > 2 and not w.isdigit()]) <= 1:
-                return {"id": en["id"], "title": en["title"], "authors": en["authors"]}
+                return {"id": en["id"], "title": en["title"], "authors": en["authors"],
+                        "formats": en.get("formats") or [], "size": en.get("size")}
     return None
 
 
@@ -8659,6 +8793,21 @@ def book_request_retry(rid: int, user=Depends(current_user)):
         _sm_set(con, rid, state="finding", message="Looking for copies", candidates=None, tried="[]",
                 attempts=0, progress=0, task_id=None, release=None, manual=0, finished_at=None)
         return _sm_row(_sm_list(con, "r.id=?", (rid,))[0], user["id"])
+
+
+@app.post("/api/book-requests/{rid}/delete")
+def book_request_delete(rid: int, user=Depends(current_user)):
+    """Remove a request altogether (cancelling its download first if one's running).
+    A book that already reached Calibre stays there."""
+    with db() as con:
+        r = _sm_owned(con, rid, user)
+        if r["task_id"] and r["state"] in ("downloading", "importing"):
+            try:
+                sm_call("DELETE", f"/api/download/{r['task_id']}/cancel", timeout=15)
+            except Exception:  # noqa: BLE001
+                pass
+        con.execute("DELETE FROM book_requests WHERE id=?", (rid,))
+    return {"ok": True}
 
 
 @app.post("/api/book-requests/{rid}/pick")

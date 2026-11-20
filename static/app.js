@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120h";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120i";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -404,9 +404,9 @@ const rqWaiting = (what, rest) => `<span class="rq-live req"><span class="rq-liv
 function paintReq(slot, itemType, tmdbId, st) {
   const status = st.status;
   if (itemType === "movie") {
-    if (status === "available") slot.innerHTML = `<span class="btn onplex">${I.check} On Plex</span>`;
+    if (status === "available") slot.innerHTML = `<button class="btn onplex" data-rqd>${I.check} On Plex</button>`;
     else if (["pending", "processing", "partial"].includes(status))
-      slot.innerHTML = `<span class="btn requested">${OV_ICON} Requested</span>${st.download ? dlPill(st.download)
+      slot.innerHTML = `<button class="btn requested" data-rqd>${OV_ICON} Requested</button>${st.download ? dlPill(st.download)
         : status === "processing" ? rqWaiting("Approved", "waiting for a download")
         : status === "partial" ? rqWaiting("Partly on Plex", "the rest is on its way") : rqWaiting("Waiting", "for approval")}`;
     else {
@@ -421,6 +421,9 @@ function paintReq(slot, itemType, tmdbId, st) {
         } catch { b.disabled = false; b.innerHTML = `${OV_ICON} Request`; }
       };
     }
+    // the On Plex / Requested pill opens what's behind it
+    const db = slot.querySelector("[data-rqd]");
+    if (db) db.onclick = () => reqDetailSheet("movie", tmdbId, $("h1")?.textContent || "", () => mountRequest(slot, itemType, tmdbId));
     return;
   }
   // show: open a season picker
@@ -466,10 +469,15 @@ function seasonRequestSheet(tmdbId, st, done) {
       ${reqStateBadge(s)}</label>`;
   const sh = sheet(`<div class="sh-t">Request${anyOpen ? " seasons" : ""}</div>
     <div class="rq-overall ${hcls}"><span class="rq-ohead">${head}</span>${oBar}</div>
+    <div class="rqd" id="rqdshow"></div>
     <div class="rq-list">${seasons.map(row).join("") || '<div class="hint">No seasons found.</div>'}</div>
     ${anyOpen ? `<label class="rq-all"><input type="checkbox" id="seasall"><span class="rq-check">${I.check}</span> Select all not on Plex</label>
     <button class="btn pri" data-a="req" disabled>Request selected</button>` : ""}
     <button class="btn ghost" data-a="cancel">${anyOpen ? "Cancel" : "Close"}</button>`, { cls: "editor rqsheet" });
+  reqDetailHTML("show", tmdbId).then(html => {
+    const host = $("#rqdshow", sh.el); if (!host || !html) return;
+    host.innerHTML = html; wireReqDeletes(host, () => { sh.close(); done(); });
+  });
   const updateBtn = () => {
     const n = $$(".rq-row input:checked", sh.el).length, b = $('[data-a="req"]', sh.el);
     if (b) { b.disabled = !n; b.textContent = n ? `Request ${n} season${n > 1 ? "s" : ""}` : "Request selected"; }
@@ -6353,7 +6361,7 @@ function brqCard(r, { compact = false, showBook = true } = {}) {
   return `<div class="brq ${tone}${compact ? " compact" : ""}" data-rid="${r.id}">
     ${showBook ? `<img class="brq-cover" src="${POSTER(r.cover)}" alt="">` : ""}
     <div class="brq-main">
-      ${showBook ? `<div class="brq-title">${esc(r.title)}</div>
+      ${showBook ? `<button class="brq-title" data-brq="details">${esc(r.title)}</button>
         <div class="brq-by">${esc(r.author || "")}${r.requested_by ? `<span>asked for by ${r.mine ? "you" : esc(r.requested_by)}</span>` : ""}</div>` : ""}
       <div class="brq-state"><span class="brq-dot"></span><b>${label}</b>${r.state === "downloading" ? `<em>${Math.round(pct)}%</em>` : ""}</div>
       ${bar}
@@ -6364,6 +6372,7 @@ function brqCard(r, { compact = false, showBook = true } = {}) {
 }
 async function brqAct(rid, act, after) {
   if (act === "pick") return brqPickSheet(rid, after);
+  if (act === "details") return brqDetailSheet(rid, after);
   try {
     await api(`/book-requests/${rid}/${act}`, { method: "POST", body: {} });
     toast(act === "cancel" ? "Request cancelled" : "Looking for copies again");
@@ -6411,7 +6420,9 @@ async function brqPickSheet(rid, after) {
 // tapping the green "In Calibre" pill: what Calibre has, and a way to ask for another copy
 function brqInCalibreSheet(copy, onAnother) {
   const sh = sheet(`<div class="sh-t">In Calibre</div>
-    <p class="hint">${esc(copy.title || "This book")}${copy.authors && copy.authors.length ? ` by ${esc(copy.authors.join(", "))}` : ""} is already in the library.</p>
+    <div class="rqd"><div class="rqd-block ok"><div class="rqd-h"><span class="brq-dot"></span><b>Already in the library</b></div>
+      <div class="rqd-rel">${esc(copy.title || "This book")}${copy.authors && copy.authors.length ? ` by ${esc(copy.authors.join(", "))}` : ""}</div>
+      ${(copy.formats && copy.formats.length) || copy.size ? `<div class="rqd-meta">${[(copy.formats || []).join(", "), copy.size].filter(Boolean).map(esc).join(" · ")}</div>` : ""}</div></div>
     <button class="btn" data-a="another">${BRQ_ICO} Request another copy</button>
     <button class="btn ghost" data-a="close">Close</button>`, { cls: "editor" });
   sh.el.addEventListener("click", e => {
@@ -6473,7 +6484,7 @@ async function mountBookRequest(slot, bookId) {
   const chip = r.state === "pick"
     ? `<button class="chip-btn brq-btn on ${tone}" data-brq="pick">${chipIco}<span>Choose a copy</span></button>`
     : r.state === "done" ? `<button class="chip-btn brq-btn on ok" id="brqcal">${chipIco}<span>In Calibre</span></button>`
-    : `<span class="chip-btn brq-btn on ${tone}">${chipIco}<span>${BRQ_SHORT[r.state] || "Requested"}</span></span>`;
+    : `<button class="chip-btn brq-btn on ${tone}" id="brqcal">${chipIco}<span>${BRQ_SHORT[r.state] || "Requested"}</span></button>`;
   const quiet = !line && !acts.length && !["finding", "downloading", "importing"].includes(r.state) && (r.mine || !r.requested_by);
   slot.innerHTML = `${chip}${quiet ? "" : `
     <span class="rq-live ${tone}" data-rid="${r.id}">
@@ -6481,9 +6492,7 @@ async function mountBookRequest(slot, bookId) {
       ${r.state === "finding" ? `<span class="brq-bar find"><i></i></span>` : ["downloading", "importing"].includes(r.state) ? `<span class="rq-live-bar"><i style="width:${Math.max(3, pct)}%"></i></span>` : ""}
       ${acts.length || (!r.mine && r.requested_by) ? `<span class="rq-live-acts">${acts.join("")}${!r.mine && r.requested_by ? `<small>asked for by ${esc(r.requested_by)}</small>` : ""}</span>` : ""}
     </span>`}`;
-  if ($("#brqcal", slot)) $("#brqcal", slot).onclick = () =>
-    brqInCalibreSheet({ title: r.title, authors: r.author ? [r.author] : [] },
-      () => brqAct(r.id, "retry", () => mountBookRequest(slot, bookId)));
+  if ($("#brqcal", slot)) $("#brqcal", slot).onclick = () => brqDetailSheet(r.id, () => mountBookRequest(slot, bookId));
   // the chip is the pick button too
   slot.onclick = e => { const b = e.target.closest("[data-brq]"); if (b && b.dataset.brq === "pick" && !b.closest("[data-rid]")) brqPickSheet(r.id, () => mountBookRequest(slot, bookId)); };
   if ($(".rq-live", slot)) wireBrq($(".rq-live", slot), () => mountBookRequest(slot, bookId));
@@ -6547,6 +6556,90 @@ routes.requests = async () => {
   };
   paintList();
 };
+
+/* ---- what's behind a film's or show's request pill: what's on Plex, what's downloading,
+   who asked — and a way to withdraw a request ---- */
+const fmtReqDate = s => { try { return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); } catch { return ""; } };
+function reqFileLine(f, itemType) {
+  if (!f) return "";
+  const bits = itemType === "movie"
+    ? [f.resolution, f.hdr, f.video, f.audio, f.size, f.copies > 1 ? `${f.copies} copies` : null]
+    : [f.episodes ? `${f.episodes} episode${f.episodes === 1 ? "" : "s"}` : null, f.resolution && (f.mixed ? `mostly ${f.resolution}` : f.resolution), f.size];
+  return bits.filter(Boolean).map(esc).join(" · ");
+}
+async function reqDetailHTML(itemType, tmdbId) {
+  let d; try { d = await api(`/request/detail/${itemType}/${tmdbId}`, { quiet: true }); } catch { return ""; }
+  if (!d || !d.enabled || d.unavailable) return "";
+  const out = [];
+  if (d.file) out.push(`<div class="rqd-block ok"><div class="rqd-h"><span class="brq-dot"></span><b>On Plex</b></div>
+    <div class="rqd-file">${reqFileLine(d.file, itemType)}</div></div>`);
+  if ((d.downloads || []).length) out.push(`<div class="rqd-block dl"><div class="rqd-h"><span class="brq-dot"></span><b>Downloading</b></div>
+    ${d.downloads.map(x => `<div class="rqd-dl">
+      <div class="rqd-rel">${esc(x.title || "")}</div>
+      <div class="rqd-meta">${[x.season != null ? `S${x.season}${x.episode != null ? ` · E${x.episode}` : ""}` : null, x.size, x.progress != null ? `${x.progress}%` : null, x.eta ? `${esc(x.eta)} left` : null].filter(Boolean).join(" · ")}</div>
+      ${x.progress != null ? `<span class="rq-live-bar"><i style="width:${Math.max(3, x.progress)}%"></i></span>` : ""}</div>`).join("")}</div>`);
+  if ((d.requests || []).length) out.push(`<div class="rqd-block req"><div class="rqd-h"><span class="brq-dot"></span><b>Requests</b></div>
+    ${d.requests.map(rq => `<div class="rqd-req">
+      <div><b>${esc(rq.status)}</b>${rq.is4k ? " · 4K" : ""}${rq.seasons && rq.seasons.length ? ` · season${rq.seasons.length > 1 ? "s" : ""} ${rq.seasons.join(", ")}` : ""}
+        <span>${rq.mine ? "You" : esc(rq.requested_by || "Someone")} asked ${fmtReqDate(rq.created_at)}</span></div>
+      ${rq.can_delete ? `<button class="btn ghost sm rqd-del" data-rqdel="${rq.id}">Delete request</button>` : ""}</div>`).join("")}</div>`);
+  return out.join("");
+}
+function wireReqDeletes(host, after) {
+  host.addEventListener("click", async e => {
+    const b = e.target.closest("[data-rqdel]"); if (!b) return;
+    if (!confirm("Delete this request? Anything already on Plex stays.")) return;
+    b.disabled = true;
+    try { await api(`/request/${b.dataset.rqdel}/delete`, { method: "POST", body: {} }); toast("Request deleted"); after && after(); }
+    catch { b.disabled = false; }
+  });
+}
+async function reqDetailSheet(itemType, tmdbId, title, after) {
+  const sh = sheet(`<div class="sh-t">${esc(title || "Request")}</div><div class="rqd">${skRows(2)}</div>
+    <button class="btn ghost" data-a="close">Close</button>`, { cls: "editor rqdsheet" });
+  sh.el.addEventListener("click", e => { if (e.target.closest('[data-a="close"]')) sh.close(); });
+  const html = await reqDetailHTML(itemType, tmdbId);
+  const host = $(".rqd", sh.el); if (!host) return;
+  host.innerHTML = html || `<div class="hint">Nothing more to show for this one yet.</div>`;
+  wireReqDeletes(host, () => { sh.close(); after && after(); });
+}
+
+/* ---- what's behind a book's pill: the copy, who asked, and the request's controls ---- */
+async function brqDetailSheet(rid, after) {
+  let r; try { r = await api(`/book-requests/${rid}`); } catch { return; }
+  const c = r.copy;
+  const acts = [];
+  if (r.state === "downloading" || r.state === "pick") acts.push(`<button class="btn" data-a="pick">Choose another copy</button>`);
+  if (r.state === "done" || r.state === "failed") acts.push(`<button class="btn" data-a="retry">${BRQ_ICO} Request another copy</button>`);
+  if (brqActive(r) && r.mine) acts.push(`<button class="btn" data-a="cancel">Cancel download</button>`);
+  if (r.mine || ME.is_admin) acts.push(`<button class="btn ghost danger" data-a="delete">Delete request</button>`);
+  const [tone, label] = BRQ_STATE[r.state] || ["off", r.state];
+  const sh = sheet(`<div class="sh-t">${esc(r.title)}</div>
+    <div class="rqd">
+      <div class="rqd-block ${tone}"><div class="rqd-h"><span class="brq-dot"></span><b>${esc(label)}</b>${r.state === "downloading" ? `<em>${Math.round(r.progress || 0)}%</em>` : ""}</div>
+        ${r.message && !["done"].includes(r.state) ? `<div class="rqd-meta">${esc(r.message)}</div>` : ""}</div>
+      ${c ? `<div class="rqd-block"><div class="rqd-h"><b>The copy</b></div>
+        <div class="rqd-rel">${esc(c.title || "")}</div>
+        <div class="rqd-meta">${[c.format && c.format.toUpperCase(), c.size, c.seeders != null ? `${c.seeders} seeder${c.seeders === 1 ? "" : "s"}` : null].filter(Boolean).map(esc).join(" · ")}</div></div>` : ""}
+      <div class="rqd-block req"><div class="rqd-req"><div><b>${r.author ? esc(r.author) : "Requested"}</b>
+        <span>${r.mine ? "You" : esc(r.requested_by || "Someone")} asked ${fmtReqDate(r.created_at)}${r.attempts > 1 ? ` · ${r.attempts} copies tried` : ""}</span></div></div></div>
+    </div>
+    ${acts.join("")}
+    <button class="btn ghost" data-a="close">Close</button>`, { cls: "editor rqdsheet" });
+  sh.el.addEventListener("click", async e => {
+    const a = e.target.closest("[data-a]"); if (!a) return;
+    const what = a.dataset.a;
+    if (what === "close") return sh.close();
+    if (what === "pick") { sh.close(); return brqPickSheet(rid, after); }
+    if (what === "delete" && !confirm("Delete this request? A book already in Calibre stays there.")) return;
+    a.disabled = true;
+    try {
+      await api(`/book-requests/${rid}/${what}`, { method: "POST", body: {} });
+      toast({ delete: "Request deleted", cancel: "Download cancelled", retry: "Looking for another copy" }[what]);
+      sh.close(); after && after();
+    } catch { a.disabled = false; }
+  });
+}
 
 /* ---------- settings ---------- */
 const PLEX_LOGO = `<svg class="plexlogo" viewBox="0 0 24 24" aria-hidden="true">

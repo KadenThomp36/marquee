@@ -2883,3 +2883,24 @@ body.recap-open,html:has(body.recap-open){overflow:hidden}
 .cal-admin input{flex:1 1 150px}
 .cal-admin #caluser,.cal-admin #calpw{flex:1 1 110px}
 .brq-btn.on.ok{border-color:rgba(95,191,127,.45);background:rgba(95,191,127,.08)}
+
+/* request details (films, shows, books): plain blocks, the same dot-and-state grammar */
+.rqd{display:flex;flex-direction:column;gap:10px;margin:2px 0 12px}
+.rqd:empty{display:none}
+.rqd-block{--tone:var(--ink-2);padding:12px 14px;border-radius:12px;background:var(--panel-2);border:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+.rqd-block.ok{--tone:#5fbf7f}.rqd-block.dl,.rqd-block.find{--tone:var(--amber)}.rqd-block.req{--tone:var(--seer)}
+.rqd-block.warn{--tone:#e3a04a}.rqd-block.bad{--tone:var(--c-red)}
+.rqd-h{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink)}
+.rqd-h em{font-style:normal;font-weight:800;color:var(--tone);margin-left:auto;font-variant-numeric:tabular-nums}
+.rqd-file{font-size:14px;font-weight:700;color:var(--ink)}
+.rqd-rel{font-size:12.5px;color:var(--ink);word-break:break-word}
+.rqd-meta{font-size:12px;color:var(--mut)}
+.rqd-dl{display:flex;flex-direction:column;gap:5px;padding-top:6px;border-top:1px solid var(--line)}
+.rqd-dl:first-of-type{border-top:0;padding-top:0}
+.rqd-req{display:flex;align-items:center;gap:10px;justify-content:space-between}
+.rqd-req>div{display:flex;flex-direction:column;gap:2px;font-size:13px;color:var(--ink)}
+.rqd-req span{font-size:12px;color:var(--mut)}
+.btn.danger{color:var(--c-red)}
+button.brq-title{text-align:left;padding:0}
+button.brq-title:hover{color:var(--amber-2)}
+.btn.onplex,.btn.requested{cursor:pointer}
