@@ -2649,3 +2649,40 @@ body.recap-open{overflow:hidden}
   .fo-dev{grid-template-columns:auto minmax(0,1fr) auto;row-gap:8px}
   .fo-dev .fo-unpair{grid-column:2 / -1;justify-self:start}
 }
+/* Folio · waiting for a book: sittings that arrived for a file Marquee can't place yet.
+   A dashed, coverless tile says "no book yet" without an alarm colour — nothing is
+   lost, it's just unfiled. */
+.fo-wait{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+.fo-wait-head{display:flex;align-items:center;gap:9px;margin-bottom:4px}
+.fo-wait-head h4{margin:0;font-size:14.5px;font-weight:750}
+.fo-wait-n{font-size:11.5px;font-weight:750;color:var(--amber-2);background:var(--amber-soft);
+  border-radius:99px;padding:1px 8px;font-variant-numeric:tabular-nums}
+.fo-wait>.hint{margin:0 0 6px;max-width:62ch;line-height:1.5}
+.fo-wrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:13px;align-items:start;
+  padding:13px 0;border-bottom:1px solid var(--line)}
+.fo-wrow:last-child{border-bottom:0;padding-bottom:2px}
+.fo-wcover{width:38px;aspect-ratio:2/3;border-radius:6px;display:grid;place-items:center;
+  border:1.5px dashed var(--line-2);color:var(--mut);font-weight:800;font-size:15px}
+.fo-wmid{display:flex;flex-direction:column;gap:2px;min-width:0}
+.fo-wmid b{font-size:14px;overflow-wrap:anywhere}
+.fo-wby{font-size:12.5px;color:var(--ink-2)}
+.fo-wmeta{font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums}
+.fo-wwhy{font-size:12px;color:var(--mut);margin-top:2px}
+.fo-wagain{color:var(--amber-2);font-weight:650;font-size:12px;margin-left:4px;border-bottom:1px solid rgba(240,181,68,.35)}
+.fo-wagain:disabled{opacity:.6}
+.fo-wact{display:flex;flex-direction:column;gap:6px}
+.fo-wact .btn{padding:6px 14px;font-size:12.5px;justify-content:center}
+.fo-wact .btn.ghost{border-color:var(--line-2)}
+@media(max-width:520px){
+  .fo-wrow{grid-template-columns:auto minmax(0,1fr)}
+  .fo-wact{grid-column:2;flex-direction:row}
+}
+.fo-msheet .fo-mfile{padding:0 10px 10px;line-height:1.5}
+.fo-msheet .fo-mfile b{color:var(--ink)}
+.fo-msearch{margin:0 6px 10px}
+.fo-msearch input{padding-left:16px}
+.fo-mgroup{font-size:11px;font-weight:750;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);
+  padding:12px 10px 6px}
+.fo-mhint{padding:4px 10px 12px;line-height:1.5}
+.bk-chs.capped .bk-ch[data-more]{display:none}
+.bk-chmore{margin-top:12px;font-size:12.5px;padding:7px 14px;border-color:var(--line-2)}

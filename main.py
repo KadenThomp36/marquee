@@ -39,7 +39,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120a"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120b"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -3893,7 +3893,11 @@ def books_search(q: str, user=Depends(current_user)):
     classic is a SEPARATE Hardcover book id, so 'The Odyssey' otherwise returns a
     wall of identical rows — collapse to the most-read edition per title+author,
     rank exact-title first then by readership."""
-    hits = hc_search_rows(q, 30)
+    with hc_scope() as hc:
+        hits = hc_search_rows(q, 30)
+    if not hits and hc["failed"]:
+        # say so, rather than an empty list that reads as "no such book"
+        return {"results": [], "unavailable": True}
     docs = [h["document"] for h in hits if h.get("document", {}).get("id")]
     # readership (users_count) cleanly separates real books from the long tail of
     # summaries, workbooks and micro-editions — a real book, even a niche one, has

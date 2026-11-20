@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120a";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120b";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2988,17 +2988,27 @@ function rsCalendar(days) {
     <div class="heat-legend"><span>less</span><i style="--a:.2"></i><i style="--a:.45"></i><i style="--a:.7"></i><i style="--a:1"></i><span>more time</span></div></div>`;
 }
 
+// printed pages when the book has a count, % when it doesn't, screens only as a fallback
+const BK_PACE = { pages: v => `${Math.round(v)} p/hr`, pct: v => `${v < 10 ? v.toFixed(1) : Math.round(v)}%/hr`,
+  screens: v => `${Math.round(v)} screens/hr` };
 function rsChapters(ch) {
   const max = Math.max(...ch.map(c => c.minutes), 1);
-  const paced = ch.filter(c => c.per_hour);
-  const avg = paced.length ? paced.reduce((a, c) => a + c.per_hour, 0) / paced.length : 0;
-  return `<div class="bk-chs">${ch.map(c => {
-    const rel = c.per_hour && avg ? c.per_hour / avg : 1;
-    return `<div class="bk-ch">
+  // "quicker / slower than usual" only compares like with like
+  const avg = {};
+  ch.filter(c => c.per_hour).forEach(c => { const u = c.pace_unit || "screens";
+    (avg[u] = avg[u] || []).push(c.per_hour); });
+  Object.keys(avg).forEach(u => { avg[u] = avg[u].reduce((a, b) => a + b, 0) / avg[u].length; });
+  // a long book (or a 400-chapter anthology) shouldn't turn the page into a phone book
+  const CAP = 12;
+  return `<div class="bk-chs${ch.length > CAP ? " capped" : ""}">${ch.map((c, i) => {
+    const u = c.pace_unit || "screens";
+    const rel = c.per_hour && avg[u] ? c.per_hour / avg[u] : 1;
+    return `<div class="bk-ch"${i >= CAP ? " data-more" : ""}>
       <span class="bk-ch-t">${esc(c.title)}</span>
       <span class="bk-ch-bar"><i style="width:${(100 * c.minutes / max).toFixed(1)}%"></i></span>
-      <span class="bk-ch-n">${rsDur(c.minutes)}${c.per_hour ? `<em class="${rel > 1.12 ? "fast" : rel < 0.88 ? "slow" : ""}">${Math.round(c.per_hour)}/hr</em>` : ""}</span>
-    </div>`; }).join("")}</div>`;
+      <span class="bk-ch-n">${rsDur(c.minutes)}${c.per_hour ? `<em class="${rel > 1.12 ? "fast" : rel < 0.88 ? "slow" : ""}">${(BK_PACE[u] || BK_PACE.screens)(c.per_hour)}</em>` : ""}</span>
+    </div>`; }).join("")}</div>
+    ${ch.length > CAP ? `<button class="btn ghost bk-chmore">Show all ${ch.length} chapters</button>` : ""}`;
 }
 
 function rsTimeline(d) {
@@ -3083,8 +3093,8 @@ function renderBookStats(d) {
           <span class="cnt">${T.days} day${T.days === 1 ? "" : "s"}</span></div>
           ${rsCalendar(d.days)}</section>
         ${d.chapters.length ? `<section class="bk-block"><div class="section"><h2>Chapter by chapter</h2><span class="rule"></span></div>
-          <p class="bk-note">Time in each chapter, from Folio. Pace is pages turned on the reader per hour —
-            <em class="fast">quicker</em> and <em class="slow">slower</em> than your usual for this book.</p>
+          <p class="bk-note">Time in each chapter, from Folio, and how fast it went —
+            <em class="fast">quicker</em> or <em class="slow">slower</em> than your usual for this book.</p>
           ${rsChapters(d.chapters)}</section>` : ""}
       </div>
       <div class="bk-facing">
@@ -3094,6 +3104,8 @@ function renderBookStats(d) {
       </div>
     </div>`}`;
   const rerun = () => routes.bookStats(b.id);
+  const more = $(".bk-chmore", view);
+  if (more) more.onclick = () => { $(".bk-chs", view).classList.remove("capped"); more.remove(); };
   $$(".bk-tl", view).forEach(row => row.onclick = () => {
     const s = d.sessions.find(x => x.id === +row.dataset.sid);
     if (s) rdSessionSheet({ ...s, date: s.started_at }, { unit: "pages", mode: st.mode || "pages",
@@ -6444,7 +6456,7 @@ function folioPanelHTML(f) {
     </div>
     <div class="fo-body" ${f.enabled ? "" : "hidden"}>
       <label class="toggle-row fo-row"><span>Record sittings automatically
-          <span class="hint">Folio starts timing when you open a book and stops when you put it down. Off, you start each one on the reader.</span></span>
+          <span class="hint">This controls recording on the reader. On, Folio times a sitting from opening a book to putting it down. Off, it records only the sittings you start on the reader. Folio picks up a change the next time it syncs.</span></span>
         <button class="switch-btn ${f.auto_capture ? "on" : ""}" id="fo-auto" role="switch" aria-checked="${f.auto_capture}"><span></span></button></label>
       <div class="fo-devs">${devs.length ? devs.map(dv => `
         <div class="fo-dev${dv.signed_in ? "" : " off"}">
@@ -6457,7 +6469,98 @@ function folioPanelHTML(f) {
           <button class="btn ghost fo-unpair" data-dev="${dv.id}">Unpair</button>
         </div>`).join("") : `<p class="fo-none">No reader paired yet.</p>`}</div>
       <div id="fo-pair"><button class="btn" id="fo-pairbtn">${I.plus} Pair a reader</button></div>
+      ${foWaitingHTML(f.waiting || [])}
     </div>`;
+}
+/* Sittings Folio sent for a file Marquee can't place yet. They're stored, so nothing
+   is lost; Marquee keeps looking on its own, and Match / Ignore settle it by hand. */
+const FO_TIME = iso => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+function foWaitingWhy(w) {
+  const when = w.next_attempt_at ? new Date(w.next_attempt_at) : null;
+  const next = !when ? "" : when - Date.now() < 864e5 && when.getDate() === new Date().getDate()
+    ? ` Looking again at ${FO_TIME(w.next_attempt_at)}.`
+    : ` Looking again ${when.toLocaleDateString(undefined, { weekday: "long" })}.`;
+  if (w.reason === "unavailable") return `Hardcover isn’t answering right now.${next}`;
+  if (w.reason === "no match") return `Hardcover doesn’t know this file’s book.${next}`;
+  return "Looking it up…";
+}
+function foWaitingHTML(list) {
+  if (!list.length) return "";
+  return `<section class="fo-wait" aria-labelledby="fo-wait-h">
+    <div class="fo-wait-head"><h4 id="fo-wait-h">Waiting for a book</h4><span class="fo-wait-n">${list.length}</span></div>
+    <p class="hint">Folio sent these sittings, but Marquee can’t tell which book they belong to yet.
+      They’re kept safe. Match one to put its sittings on your shelf, or ignore personal documents.</p>
+    ${list.map((w, i) => `
+    <div class="fo-wrow">
+      <span class="fo-wcover" aria-hidden="true">${esc((w.title || "?").trim().charAt(0).toUpperCase())}</span>
+      <div class="fo-wmid">
+        <b>${esc(w.title)}</b>
+        <span class="fo-wby">${esc((w.authors || []).join(", ") || (w.isbn ? `ISBN ${w.isbn}` : "No author in the file"))}</span>
+        <span class="fo-wmeta">${w.sittings} sitting${w.sittings === 1 ? "" : "s"}${w.minutes ? ` · ${rsDur(w.minutes)}` : ""} · since ${esc(fmtDate(w.first_at.slice(0, 10)).replace(/, \d{4}$/, ""))}</span>
+        <span class="fo-wwhy">${esc(foWaitingWhy(w))}${w.reason ? ` <button class="fo-wagain" data-wi="${i}">Look now</button>` : ""}</span>
+      </div>
+      <div class="fo-wact">
+        <button class="btn pri fo-wmatch" data-wi="${i}">Match</button>
+        <button class="btn ghost fo-wignore" data-wi="${i}">Ignore</button>
+      </div>
+    </div>`).join("")}
+  </section>`;
+}
+/* Which book is it? Your own shelf first (it works even while Hardcover is down),
+   then Hardcover — the same picker rows as "Wrong book?". */
+async function foMatchSheet(w, onDone) {
+  const s = sheet(`<div class="rd-menu fo-msheet"><div class="sh-t">Which book is this?</div>
+    <div class="hint fo-mfile">Folio’s file: <b>${esc(w.title)}</b>${(w.authors || []).length ? ` by ${esc(w.authors.join(", "))}` : ""}${w.isbn ? ` · ISBN ${esc(w.isbn)}` : ""}
+      · ${w.sittings} sitting${w.sittings === 1 ? "" : "s"} waiting</div>
+    <div class="searchbar fo-msearch"><input id="fomq" type="search" autocomplete="off" aria-label="Search for the book"
+      value="${esc([w.title, (w.authors || [])[0]].filter(Boolean).join(" "))}"></div>
+    <div id="fomlist" class="fix-list"></div></div>`);
+  const list = $("#fomlist", s.el), input = $("#fomq", s.el);
+  let shelf = null, seq = 0;
+  const STOP = new Set(["the", "and", "for", "with", "from", "into", "book", "novel"]);
+  const words = q => (q || "").toLowerCase().split(/\W+/).filter(x => x.length > 2 && !STOP.has(x));
+  const row = (x, i, src) => `<button class="list-opt fix-opt" data-src="${src}" data-i="${i}">
+      <img class="fix-cover" src="${POSTER(x.cover)}" alt="">
+      <span class="lo-name"><b>${esc(x.title)}</b>
+        <i>${esc(x.author || "")}${x.year ? ` · ${x.year}` : ""}${x.pages ? ` · ${x.pages}p` : ""}</i></span></button>`;
+  const run = async () => {
+    const q = input.value.trim(), mine = ++seq;
+    if (!shelf) {
+      const r = await api("/reading").catch(() => null);
+      shelf = r ? Object.values(r.books || {}).flat() : [];
+    }
+    const ws = words(q);
+    const local = ws.length ? shelf.filter(b => { const t = `${b.title} ${b.author || ""}`.toLowerCase();
+      return ws.filter(x => t.includes(x)).length >= Math.max(1, Math.ceil(ws.length / 2)); }).slice(0, 6) : [];
+    const paint = (hc, hcState) => {
+      if (mine !== seq || !list.isConnected) return;
+      list.innerHTML = `${local.length ? `<div class="fo-mgroup">On your shelf</div>${local.map((x, i) => row(x, i, "shelf")).join("")}` : ""}
+        <div class="fo-mgroup">From Hardcover</div>
+        ${hcState === "busy" ? `<div class="hint fo-mhint">Searching…</div>`
+          : hcState === "down" ? `<div class="hint fo-mhint">Hardcover isn’t answering. Pick from your shelf, or try again later. The sittings stay safe either way.</div>`
+          : hc.length ? hc.map((x, i) => row(x, i, "hc")).join("") : `<div class="hint fo-mhint">Nothing found. Try fewer words.</div>`}`;
+      $$(".fix-opt", list).forEach(b => b.onclick = async () => {
+        const x = b.dataset.src === "shelf" ? local[+b.dataset.i] : hc[+b.dataset.i];
+        $$(".fix-opt", list).forEach(o => o.disabled = true);
+        const body = b.dataset.src === "shelf" ? { key: w.key, book_id: x.id }
+          : { key: w.key, hc_id: x.hc_id, title: x.title, author: x.author, year: x.year, pages: x.pages,
+              cover: x.cover, series: x.series, rating: x.community_rating, genres: x.genres, slug: x.slug, desc: x.desc };
+        const r = await api("/integrations/folio/waiting/match", { body }).catch(() => null);
+        s.close();
+        if (!r) { toast("Couldn’t match that — try again"); return; }
+        toast(`${r.imported} sitting${r.imported === 1 ? "" : "s"} added to ${r.title || "your shelf"}`);
+        delete CACHE["/reading"]; delete CACHE["/reading/stats"];
+        onDone(r);
+      });
+    };
+    paint([], "busy");
+    if (!q) return paint([], "");
+    const r = await api(`/books/search?q=${encodeURIComponent(q)}`).catch(() => null);
+    paint((r && r.results) || [], r && !r.unavailable ? "" : "down");
+  };
+  let t = null;
+  input.oninput = () => { clearTimeout(t); t = setTimeout(run, 350); };
+  run();
 }
 function wireFolio(f, onDevicesChanged) {
   const box = $("#foliopanel"); if (!box) return;
@@ -6478,6 +6581,22 @@ function wireFolio(f, onDevicesChanged) {
       if (!confirm(`Unpair ${dv ? dv.name : "this reader"}? It stops syncing until you pair it again. Sittings already here stay.`)) return;
       const r = await api(`/integrations/folio/devices/${b.dataset.dev}`, { method: "DELETE" }).catch(() => null);
       if (r) { toast(`${dv ? dv.name : "Reader"} unpaired`); paint(r); onDevicesChanged && onDevicesChanged(); }
+    });
+    const waiting = f.waiting || [];
+    $$(".fo-wmatch", box).forEach(b => b.onclick = () => foMatchSheet(waiting[+b.dataset.wi], r => paint(r)));
+    $$(".fo-wignore", box).forEach(b => b.onclick = async () => {
+      const w = waiting[+b.dataset.wi];
+      if (!confirm(`Ignore “${w.title}”? Its ${w.sittings} sitting${w.sittings === 1 ? " is" : "s are"} dropped, and Folio’s sittings in this file won’t be kept from now on. Use this for personal documents, not books.`)) return;
+      const r = await api("/integrations/folio/waiting/ignore", { body: { key: w.key } }).catch(() => null);
+      if (r) { toast(`Ignoring ${w.title}`); paint(r); }
+    });
+    $$(".fo-wagain", box).forEach(b => b.onclick = async () => {
+      const w = waiting[+b.dataset.wi];
+      b.disabled = true; b.textContent = "Looking…";
+      const r = await api("/integrations/folio/waiting/retry", { body: { key: w.key } }).catch(() => null);
+      if (!r) { b.disabled = false; b.textContent = "Look now"; return; }
+      toast(r.imported ? `Found it — ${r.imported} sitting${r.imported === 1 ? "" : "s"} added` : "Still no match — Marquee will keep looking");
+      paint(r);
     });
     const pb = $("#fo-pairbtn", box);
     if (pb) pb.onclick = async () => {
