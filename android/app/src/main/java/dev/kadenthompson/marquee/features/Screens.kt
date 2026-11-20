@@ -36,9 +36,9 @@ object Screens {
     @Composable fun Watched(username: String?, kind: String) = dev.kadenthompson.marquee.features.you.WatchedGridScreen(username, kind)
     @Composable fun History() = dev.kadenthompson.marquee.features.you.HistoryScreen()
     @Composable fun Notifications() = dev.kadenthompson.marquee.features.you.NotificationsScreen()
-    @Composable fun Settings() = Todo("Settings", true)
-    @Composable fun Folio() = Todo("Folio", true)
-    @Composable fun Devices() = Todo("Devices", true)
+    @Composable fun Settings() = dev.kadenthompson.marquee.features.you.SettingsScreen()
+    @Composable fun Folio() = dev.kadenthompson.marquee.features.you.FolioScreen()
+    @Composable fun Devices() = dev.kadenthompson.marquee.features.you.SettingsScreen()
     @Composable fun ShowsWatchlist() = dev.kadenthompson.marquee.features.library.ShowsWatchlistScreen()
     @Composable fun RequestStates() = Todo("Request states", true)
 
