@@ -58,12 +58,8 @@ struct MovieScreen: View {
     @ViewBuilder
     private func heroBackdrop(_ movie: MovieDetail) -> some View {
         if let backdrop = movie.info?.backdrop {
-            FilledArt(url: backdrop, height: 250 + 120)
-                .opacity(colorScheme == .light ? 0.15 : 0.28)
-                .blur(radius: 3)
-                .mask(LinearGradient(colors: [.black, .black, .clear],
-                                     startPoint: .top, endPoint: .bottom))
-                .accessibilityHidden(true)
+            BackdropWash(url: backdrop, height: 250 + 120,
+                         opacity: colorScheme == .light ? 0.15 : 0.28, blur: 3)
         }
     }
 

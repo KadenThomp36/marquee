@@ -110,6 +110,125 @@ public struct RequestResult: Codable, Sendable, Equatable {
     public var status: String?
 }
 
+/// `GET /api/request/detail/{movie|show}/{tmdb_id}`: everything behind a request
+/// pill. Who asked and when, what's downloading, and what's on Plex now. Every
+/// field is optional so an older server, or one without Overseerr, decodes cleanly.
+public struct RequestDetail: Codable, Sendable, Equatable {
+    public var enabled: Bool?
+    /// Overseerr is configured but didn't answer.
+    public var unavailable: Bool?
+    public var status: String?
+    public var requests: [OverseerrRequest]?
+    public var downloads: [RequestDownload]?
+    public var file: PlexFile?
+
+    public init(enabled: Bool? = true, unavailable: Bool? = nil, status: String? = nil,
+                requests: [OverseerrRequest]? = nil, downloads: [RequestDownload]? = nil,
+                file: PlexFile? = nil) {
+        self.enabled = enabled
+        self.unavailable = unavailable
+        self.status = status
+        self.requests = requests
+        self.downloads = downloads
+        self.file = file
+    }
+
+    public var isEmpty: Bool {
+        (requests ?? []).isEmpty && (downloads ?? []).isEmpty && file == nil
+    }
+}
+
+/// One request in Overseerr.
+public struct OverseerrRequest: Codable, Sendable, Hashable, Identifiable {
+    public var id: Int
+    /// Already in words: "Waiting for approval", "Approved", "Declined".
+    public var status: String?
+    public var requestedBy: String?
+    /// ISO 8601 in UTC, the way Overseerr writes it. Not a Marquee stamp.
+    public var createdAt: String?
+    public var is4k: Bool?
+    public var seasons: [Int]?
+    public var mine: Bool?
+    public var canDelete: Bool?
+
+    public init(id: Int, status: String?, requestedBy: String?, createdAt: String?,
+                is4k: Bool? = false, seasons: [Int]? = nil, mine: Bool? = false, canDelete: Bool? = false) {
+        self.id = id
+        self.status = status
+        self.requestedBy = requestedBy
+        self.createdAt = createdAt
+        self.is4k = is4k
+        self.seasons = seasons
+        self.mine = mine
+        self.canDelete = canDelete
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, status, seasons, mine
+        case is4k
+        case requestedBy = "requested_by"
+        case createdAt = "created_at"
+        case canDelete = "can_delete"
+    }
+}
+
+/// One grab in Sonarr or Radarr.
+public struct RequestDownload: Codable, Sendable, Hashable {
+    /// The release name, which is where the quality shows: "…1080p.WEB-DL…".
+    public var title: String?
+    public var status: String?
+    /// Already formatted: "4.2 GB".
+    public var size: String?
+    /// 0–100, or nil when it can't be measured yet.
+    public var progress: Int?
+    /// Sonarr/Radarr's `HH:MM:SS`.
+    public var eta: String?
+    public var season: Int?
+    public var episode: Int?
+
+    public init(title: String?, status: String?, size: String?, progress: Int?, eta: String?,
+                season: Int? = nil, episode: Int? = nil) {
+        self.title = title
+        self.status = status
+        self.size = size
+        self.progress = progress
+        self.eta = eta
+        self.season = season
+        self.episode = episode
+    }
+}
+
+/// What's on Plex. A film reports its best copy. A show reports the most common
+/// resolution across its episodes and the total size.
+public struct PlexFile: Codable, Sendable, Hashable {
+    public var resolution: String?
+    public var video: String?
+    public var audio: String?
+    public var hdr: String?
+    public var container: String?
+    public var size: String?
+    public var bitrate: String?
+    public var copies: Int?
+    /// Shows: the episodes aren't all the same resolution.
+    public var mixed: Bool?
+    public var episodes: Int?
+
+    public init(resolution: String? = nil, video: String? = nil, audio: String? = nil,
+                hdr: String? = nil, container: String? = nil, size: String? = nil,
+                bitrate: String? = nil, copies: Int? = nil, mixed: Bool? = nil, episodes: Int? = nil) {
+        self.resolution = resolution
+        self.video = video
+        self.audio = audio
+        self.hdr = hdr
+        self.container = container
+        self.size = size
+        self.bitrate = bitrate
+        self.copies = copies
+        self.mixed = mixed
+        self.episodes = episodes
+    }
+}
+
 // MARK: - Plex
 
 /// `GET /api/plex/status`

@@ -244,6 +244,8 @@ struct BookRequestCard: View {
 struct BookRequestControl: View {
     let bookID: Int
     let title: String
+    /// The book's own cover, for the details sheet when the request has none.
+    var cover: String?
 
     @Environment(Session.self) private var session
     @State private var request: BookRequest?
@@ -254,12 +256,11 @@ struct BookRequestControl: View {
     @State private var notFound = false
     @State private var notice: String?
 
-    @State private var picking = false
-    @State private var managing = false
+    /// The sheet behind the pill: the copy, who asked, Calibre, and the actions.
+    @State private var showingDetails = false
     /// Calibre already has it (it came in some other way); "Request another copy" overrides.
     @State private var inCalibre: CalibreCopy?
     @State private var anyway = false
-    @State private var showingCalibre = false
 
     private var enabled: Bool { session.bookRequestConfig?.isEnabled == true }
     private var isActive: Bool { request?.phase.isActive == true }
@@ -273,14 +274,14 @@ struct BookRequestControl: View {
                     if let request, request.phase != .cancelled, !(request.phase == .failed && inCalibre != nil && !anyway) {
                         status(request)
                     } else if inCalibre != nil, !anyway {
-                        Button { showingCalibre = true } label: {
+                        Button { showingDetails = true } label: {
                             HStack(spacing: 5) {
                                 RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready)
                             }
                             .contentShape(.rect)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("In Calibre. Opens options.")
+                        .accessibilityLabel("In Calibre. Opens the details.")
                     } else {
                         Button { confirming = true } label: {
                             if busy {
@@ -338,30 +339,21 @@ struct BookRequestControl: View {
         } message: {
             Text("Marquee finds an ebook copy and adds it to Calibre. Everyone in the house can see the request.")
         }
-        .confirmationDialog(request.map(manageTitle) ?? "", isPresented: $managing, titleVisibility: .visible) {
-            if let request {
-                if request.phase == .pick || request.phase == .downloading {
-                    Button("Choose a copy") { picking = true }
-                }
-                if request.phase == .failed { Button("Try again") { Task { await act("retry") } } }
-                if request.phase.isActive, request.isMine || session.me?.isAdmin == true {
-                    Button("Cancel request", role: .destructive) { Task { await act("cancel") } }
-                }
-            }
-            Button("Close", role: .cancel) {}
-        } message: {
-            if let request { Text(request.message ?? "") }
-        }
-        .confirmationDialog("In Calibre", isPresented: $showingCalibre, titleVisibility: .visible) {
-            Button("Request another copy") {
-                if let request, request.phase == .done { Task { await act("retry") } } else { anyway = true }
-            }
-            Button("Close", role: .cancel) {}
-        } message: {
-            Text("\(inCalibre?.title ?? request?.title ?? title) is already in the library.")
-        }
-        .sheet(isPresented: $picking) {
-            if let request { CopyPickerSheet(request: request) { self.request = $0 } }
+        .sheet(isPresented: $showingDetails) {
+            BookRequestDetailSheet(
+                title: title,
+                cover: cover,
+                request: request.flatMap { $0.phase == .cancelled ? nil : $0 },
+                inCalibre: inCalibre,
+                onUpdate: { request = $0 },
+                onDeleted: {
+                    request = nil
+                    await load()
+                },
+                onRequestAnother: {
+                    anyway = true
+                    if let request, request.phase == .done { await act("retry") } else { await create() }
+                })
         }
     }
 
@@ -377,9 +369,7 @@ struct BookRequestControl: View {
         default: ("Requested", "clock", .waiting)
         }
         Button {
-            if request.phase == .pick { picking = true }
-            else if request.phase == .done { showingCalibre = true }
-            else { managing = true }
+            showingDetails = true
         } label: {
             HStack(spacing: 5) {
                 RequestStatusPill(label: label, symbol: symbol, tone: tone)
@@ -399,10 +389,6 @@ struct BookRequestControl: View {
             Text(message).font(.mqCaption).foregroundStyle(Color.mqInkSoft)
                 .fixedSize(horizontal: false, vertical: true)
         }
-    }
-
-    private func manageTitle(_ r: BookRequest) -> String {
-        r.isMine ? "Your request" : "Requested by \(r.requestedBy ?? "someone")"
     }
 
     private func act(_ verb: String) async {
@@ -876,6 +862,321 @@ struct CopyPickerSheet: View {
             dismiss()
         } catch {
             self.error = (error as? APIError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+}
+
+// MARK: - What's behind a book's pill
+
+/// Everything behind a book's request pill, in the same shape as a film's or show's:
+/// the book and where it stands, who asked and when, the copy (title, size, format,
+/// seeders), what Calibre holds, and what you can do about it. That's choose another
+/// copy, cancel, delete the request, or ask for another copy of a book already in
+/// Calibre.
+///
+/// `sample` (debug gallery only) shows the request as given, fetches nothing and
+/// changes nothing.
+struct BookRequestDetailSheet: View {
+    let title: String
+    /// The book's cover, when the request doesn't carry one.
+    var cover: String?
+    var request: BookRequest?
+    var inCalibre: CalibreCopy?
+    var sample = false
+    /// The server sent back a changed request.
+    var onUpdate: (BookRequest) -> Void = { _ in }
+    /// The request is gone.
+    var onDeleted: () async -> Void = {}
+    /// "Request another copy", already confirmed.
+    var onRequestAnother: () async -> Void = {}
+
+    @Environment(Session.self) private var session
+    @Environment(\.dismiss) private var dismiss
+    @State private var current: BookRequest?
+    @State private var detail: BookRequest?
+    @State private var picking = false
+    @State private var confirmingDelete = false
+    @State private var confirmingCancel = false
+    @State private var confirmingAnother = false
+    @State private var busy = false
+    @State private var failure: String?
+
+    private var shown: BookRequest? { current ?? request }
+    private var phase: BookRequestPhase? { shown?.phase }
+    private var canManage: Bool { shown?.isMine == true || session.me?.isAdmin == true }
+    private var copy: BookRequestCopy? { detail?.copy ?? shown?.copy }
+    private var choices: [BookRequestChoice] { detail?.choices ?? [] }
+    /// The book sits in Calibre, either because this request put it there or because
+    /// it came in some other way.
+    private var isInCalibre: Bool { inCalibre != nil || phase == .done }
+
+    var body: some View {
+        NavigationStack {
+            MarqueeScreen {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        header
+                        progress
+                        if isInCalibre { calibreSection }
+                        if let shown { copySection(shown) }
+                        if let shown { askedSection(shown) }
+                        if let failure {
+                            Label(failure, systemImage: "exclamationmark.triangle")
+                                .font(.mqCaption)
+                                .foregroundStyle(Color.mqVelvet)
+                        }
+                        actions
+                    }
+                    .padding(MQ.gutter)
+                    .padding(.top, 4)
+                }
+            }
+            .navigationTitle(shown == nil ? "In Calibre" : "Book request")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+            }
+            .sheet(isPresented: $picking) {
+                if let shown {
+                    CopyPickerSheet(request: shown) { picked in
+                        current = picked
+                        onUpdate(picked)
+                    }
+                }
+            }
+            .confirmationDialog(deleteTitle, isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("Delete request", role: .destructive) { Task { await delete() } }
+                Button("Keep it", role: .cancel) {}
+            } message: {
+                Text(deleteMessage)
+            }
+            .confirmationDialog("Cancel the request for \(shown?.displayTitle ?? title)?",
+                                isPresented: $confirmingCancel, titleVisibility: .visible) {
+                Button("Cancel request", role: .destructive) { Task { await act("cancel") } }
+                Button("Keep it", role: .cancel) {}
+            } message: {
+                Text(phase == .downloading ? "The download stops and nothing goes into Calibre." : "Nothing goes into Calibre.")
+            }
+            .confirmationDialog("Request another copy?", isPresented: $confirmingAnother,
+                                titleVisibility: .visible) {
+                Button("Request another copy") {
+                    Task {
+                        await onRequestAnother()
+                        dismiss()
+                    }
+                }
+                Button("Not now", role: .cancel) {}
+            } message: {
+                Text("Marquee finds a fresh ebook copy and adds it to Calibre. The copy that\u{2019}s there now stays.")
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationBackground(Color.mqGround)
+        .task { await load() }
+    }
+
+    // MARK: Pieces
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 13) {
+            CoverArt(url: shown?.cover ?? cover, radius: 8)
+                .frame(width: 58)
+            VStack(alignment: .leading, spacing: 5) {
+                // The book's own title; Calibre's (often with a subtitle) is in its row.
+                Text(shown?.displayTitle ?? title)
+                    .font(MarqueeFont.body(17, .bold, relativeTo: .headline))
+                    .foregroundStyle(Color.mqInk)
+                    .lineLimit(3)
+                if let byline {
+                    Text(byline)
+                        .font(.mqCaption)
+                        .foregroundStyle(Color.mqInkSoft)
+                        .lineLimit(1)
+                }
+                pill.padding(.top, 2)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The same words as the pill that opened the sheet.
+    private var pill: RequestStatusPill {
+        guard let phase, !(phase == .failed && inCalibre != nil) else {
+            return RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready)
+        }
+        let (label, symbol, tone): (String, String, RequestTone) = switch phase {
+        case .finding: ("Finding a copy", "magnifyingglass", .working)
+        case .downloading: ("Downloading", "arrow.down.circle", .working)
+        case .importing: ("Adding to Calibre", "books.vertical", .working)
+        case .done: ("In Calibre", "checkmark.circle.fill", .ready)
+        case .pick: ("Choose a copy", "hand.point.up.left", .attention)
+        case .failed: ("No copy yet", "exclamationmark.circle", .failed)
+        case .cancelled: ("Cancelled", "xmark.circle", .muted)
+        case .unknown: ("Requested", "clock", .waiting)
+        }
+        return RequestStatusPill(label: label, symbol: symbol, tone: tone)
+    }
+
+    private var byline: String? {
+        let author = shown?.author ?? inCalibre?.authors?.joined(separator: ", ")
+        let parts = [author, shown?.year?.text].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    @ViewBuilder
+    private var progress: some View {
+        if let shown, shown.phase.isActive {
+            RequestProgressTrack(fraction: shown.phase == .importing ? 1 : shown.fraction,
+                                 percent: shown.phase == .downloading ? shown.percent : nil,
+                                 note: shown.phase == .finding ? "Searching every indexer, about a minute"
+                                     : shown.message,
+                                 tone: .working, indeterminate: shown.phase == .finding)
+        } else if let shown, shown.phase == .pick || shown.phase == .failed,
+                  let message = shown.message, !message.isEmpty {
+            Text(message)
+                .font(.mqSub)
+                .foregroundStyle(Color.mqInkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var calibreSection: some View {
+        RequestDetailSection("In Calibre") {
+            if let inCalibre {
+                RequestFactRow(symbol: "books.vertical.fill", tone: .ready,
+                               headline: inCalibre.title ?? shown?.displayTitle ?? title,
+                               detail: [inCalibre.authors?.joined(separator: ", ") ?? "", inCalibre.summary]
+                                .filter { !$0.isEmpty }.joined(separator: " · "))
+            } else {
+                RequestFactRow(symbol: "books.vertical.fill", tone: .ready,
+                               headline: "Filed into the library",
+                               detail: [copy?.format?.uppercased() ?? "",
+                                        RequestWhen.relative(shown?.finishedAt ?? shown?.updatedAt)]
+                                .filter { !$0.isEmpty }.joined(separator: " · "))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func copySection(_ request: BookRequest) -> some View {
+        let others = choices.filter { $0.title != copy?.title }.count
+        RequestDetailSection("The copy") {
+            if let copy {
+                RequestFactRow(symbol: "doc.richtext.fill",
+                               tone: request.phase == .done ? .ready : (request.phase.isActive ? .working : .muted),
+                               headline: copy.title ?? "Untitled copy",
+                               detail: copy.summary, dense: true)
+            } else {
+                RequestFactRow(symbol: "doc.badge.ellipsis", tone: .muted,
+                               headline: request.phase == .finding ? "Still looking" : "No copy chosen yet",
+                               detail: request.phase == .finding
+                                ? "The indexers are being searched."
+                                : (choices.isEmpty ? nil : "\(choices.count) cop\(choices.count == 1 ? "y" : "ies") found to choose from"))
+            }
+            if copy != nil, others > 0 {
+                RequestDetailDivider()
+                RequestFactRow(symbol: "square.stack.3d.up", tone: .muted,
+                               headline: "\(others) other cop\(others == 1 ? "y" : "ies") found",
+                               detail: (request.attempts ?? 0) > 1 ? "\(request.attempts ?? 0) tried so far" : nil)
+            }
+        }
+    }
+
+    private func askedSection(_ request: BookRequest) -> some View {
+        RequestDetailSection("Request") {
+            RequesterRow(name: request.requestedBy, isMine: request.isMine, when: request.createdAt,
+                         canDelete: canManage, deleting: busy) {
+                confirmingDelete = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        let showChoose = canManage && phase.map { $0 == .pick || (($0 == .downloading || $0 == .failed) && !choices.isEmpty) } == true
+        let showRetry = canManage && phase == .failed && inCalibre == nil
+        let showCancel = canManage && phase?.isActive == true
+        let showAnother = isInCalibre && !(phase?.isActive ?? false)
+        if showChoose || showRetry || showCancel || showAnother {
+            ChipRow {
+                if showChoose {
+                    Button { picking = true } label: {
+                        Label(phase == .pick ? "Choose a copy" : "Choose another copy",
+                              systemImage: "list.bullet.rectangle")
+                    }
+                    .buttonStyle(.mqChip(on: phase == .pick))
+                }
+                if showRetry {
+                    Button { Task { await act("retry") } } label: {
+                        Label("Try again", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.mqChip(on: true))
+                }
+                if showAnother {
+                    Button { confirmingAnother = true } label: {
+                        Label("Request another copy", systemImage: "arrow.down.to.line.circle")
+                    }
+                    .buttonStyle(.mqChip)
+                }
+                if showCancel {
+                    Button { confirmingCancel = true } label: {
+                        Label("Cancel", systemImage: "xmark")
+                    }
+                    .buttonStyle(.mqChip(on: false, destructive: true))
+                }
+            }
+            .disabled(busy || sample)
+        }
+    }
+
+    private var deleteTitle: String {
+        guard let shown else { return "Delete this request?" }
+        return shown.isMine ? "Delete your request?" : "Delete \(shown.requestedBy ?? "their")\u{2019}s request?"
+    }
+
+    private var deleteMessage: String {
+        var lines = ["The request comes off the list for everyone"]
+        if phase?.isActive == true { lines[0] += " and its download stops" }
+        lines[0] += "."
+        lines.append(isInCalibre ? "The copy in Calibre stays." : "Nothing in Calibre changes.")
+        return lines.joined(separator: " ")
+    }
+
+    // MARK: Data
+
+    private func load() async {
+        guard !sample, let id = shown?.id, let client = session.client else { return }
+        if let fetched = try? await client.get("book-requests/\(id)", as: BookRequest.self) {
+            detail = fetched
+        }
+    }
+
+    private func act(_ verb: String) async {
+        guard !sample, let id = shown?.id, let client = session.client else { return }
+        busy = true
+        failure = nil
+        defer { busy = false }
+        do {
+            let updated = try await client.post("book-requests/\(id)/\(verb)", as: BookRequest.self)
+            current = updated
+            onUpdate(updated)
+        } catch {
+            failure = (error as? APIError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func delete() async {
+        if sample { dismiss(); return }
+        guard let id = shown?.id, let client = session.client else { return }
+        busy = true
+        failure = nil
+        defer { busy = false }
+        do {
+            _ = try await client.post("book-requests/\(id)/delete", as: RequestResult.self)
+            await onDeleted()
+            dismiss()
+        } catch {
+            failure = (error as? APIError)?.errorDescription ?? error.localizedDescription
         }
     }
 }

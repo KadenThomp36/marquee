@@ -293,8 +293,9 @@ extension SeasonRequestState {
 
 /// The Overseerr control in a detail hero. Shows where the title actually stands
 /// rather than always offering "Request" — asking for something that's already on
-/// Plex is the mistake this prevents. Anything already asked for is a tappable pill
-/// that opens the sheet with the details.
+/// Plex is the mistake this prevents. Anything asked for or already on Plex is a
+/// tappable pill that opens the sheet with the details: the file on Plex, what's
+/// downloading, and who asked.
 struct RequestButton: View {
     let status: RequestStatus
     let action: () -> Void
@@ -302,8 +303,13 @@ struct RequestButton: View {
     var body: some View {
         switch status.state {
         case .available where !(status.seasons ?? []).contains(where: \.isSelectable):
-            RequestStatusPill(label: status.state.pillLabel, symbol: status.state.symbol,
-                              tone: .ready)
+            Button(action: action) {
+                RequestStatusPill(label: status.state.pillLabel, symbol: status.state.symbol,
+                                  tone: .ready)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("On Plex. Opens the details.")
         case .none:
             Button(action: action) {
                 Label("Request", systemImage: "arrow.down.to.line.circle")
@@ -390,6 +396,8 @@ private struct SeasonStrip: View {
 struct SeasonRequestSheet: View {
     let showID: Int
     let status: RequestStatus
+    /// Debug gallery only: details to show instead of fetching them.
+    var sampleDetail: RequestDetail?
     let onDone: () async -> Void
 
     @Environment(Session.self) private var session
@@ -409,6 +417,16 @@ struct SeasonRequestSheet: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         overview
+
+                        // What's on Plex, what's downloading and who asked: above the
+                        // season controls, which are for asking for more.
+                        RequestDetailsPanel(itemType: "show", itemID: showID,
+                                            sample: sampleDetail, onChanged: onDone)
+
+                        if !seasons.isEmpty {
+                            Text(selectable.isEmpty ? "Seasons" : "Request more").mqEyebrowStyle()
+                                .padding(.bottom, -8)
+                        }
 
                         if !selectable.isEmpty { selectAll }
 
@@ -445,7 +463,7 @@ struct SeasonRequestSheet: View {
                 }
             }
             .animation(.easeOut(duration: 0.2), value: confirmed)
-            .navigationTitle(selectable.isEmpty ? "Request" : "Request seasons")
+            .navigationTitle(status.state == .none ? "Request seasons" : "Request details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -635,6 +653,8 @@ struct SeasonRequestSheet: View {
 struct MovieRequestSheet: View {
     let movieID: Int
     let status: RequestStatus
+    /// Debug gallery only: details to show instead of fetching them.
+    var sampleDetail: RequestDetail?
     let onDone: () async -> Void
 
     @Environment(Session.self) private var session
@@ -646,34 +666,39 @@ struct MovieRequestSheet: View {
     var body: some View {
         NavigationStack {
             MarqueeScreen {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Text(headline)
-                            .font(MarqueeFont.body(19, .bold, relativeTo: .title3))
-                            .foregroundStyle(Color.mqInk)
-                        Spacer(minLength: 8)
-                        let shown: RequestState = status.download != nil ? .downloading : status.state
-                        RequestStatusPill(label: shown.pillLabel, symbol: shown.symbol, tone: shown.tone)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Text(headline)
+                                .font(MarqueeFont.body(19, .bold, relativeTo: .title3))
+                                .foregroundStyle(Color.mqInk)
+                            Spacer(minLength: 8)
+                            RequestStatusPill(label: shown.pillLabel, symbol: shown.symbol, tone: shown.tone)
+                        }
+
+                        if let download = status.download {
+                            RequestProgressTrack(fraction: download.fraction, percent: download.progress,
+                                                 eta: download.eta)
+                        }
+
+                        Text(explainer)
+                            .font(.mqSub)
+                            .foregroundStyle(Color.mqInkSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        RequestDetailsPanel(itemType: "movie", itemID: movieID,
+                                            sample: sampleDetail, onChanged: onDone)
+
+                        if let failure {
+                            Label(failure, systemImage: "exclamationmark.triangle")
+                                .font(.mqCaption)
+                                .foregroundStyle(Color.mqVelvet)
+                        }
                     }
-
-                    if let download = status.download {
-                        RequestProgressTrack(fraction: download.fraction, percent: download.progress,
-                                             eta: download.eta)
-                    }
-
-                    Text(explainer)
-                        .font(.mqSub)
-                        .foregroundStyle(Color.mqInkSoft)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if let failure {
-                        Label(failure, systemImage: "exclamationmark.triangle")
-                            .font(.mqCaption)
-                            .foregroundStyle(Color.mqVelvet)
-                    }
-
-                    Spacer(minLength: 0)
-
+                    .padding(MQ.gutter)
+                    .padding(.top, 8)
+                }
+                .safeAreaInset(edge: .bottom) {
                     if status.state == .none {
                         Button {
                             Task { await request() }
@@ -682,10 +707,12 @@ struct MovieRequestSheet: View {
                         }
                         .buttonStyle(.mqPrimary)
                         .disabled(busy)
+                        .padding(.horizontal, MQ.gutter)
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
+                        .background(Color.mqGround.opacity(0.96))
                     }
                 }
-                .padding(MQ.gutter)
-                .padding(.top, 8)
             }
             .overlay {
                 if sent {
@@ -695,13 +722,13 @@ struct MovieRequestSheet: View {
                 }
             }
             .animation(.easeOut(duration: 0.2), value: sent)
-            .navigationTitle("Request")
+            .navigationTitle(status.state == .none ? "Request" : "Request details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
             }
         }
-        .presentationDetents([.height(330), .medium])
+        .presentationDetents(status.state == .none ? [.medium, .large] : [.large])
         .presentationBackground(Color.mqGround)
     }
 

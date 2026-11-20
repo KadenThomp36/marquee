@@ -1,5 +1,41 @@
 # iOS changelog
 
+## Unreleased — under the rail, request details
+
+Needs web build `20261120i` (`/api/request/detail`, the two delete endpoints, and
+`in_calibre` formats and size).
+
+- **Under the rail.** On the iPhone Duo the tab bar is a rail down the trailing edge
+  on both displays. Art and scrolling rows now run under it to the screen edge
+  instead of stopping at its column: the film, show and episode backdrops, the
+  profile banner, and Home's Up Next rail (its fade mask was clipping it). Every
+  horizontal row still ends with a margin as wide as the rail, so the last card
+  scrolls fully clear of it. The rail is detected by measuring the trailing
+  safe-area inset, not by size class, so it works on the narrow outer display too.
+- **Settings in the rail.** On the Duo, Profile's gear is a toolbar item that lives
+  in the rail with the back buttons. Other phones keep the floating gear.
+- **A better fade.** Banner and backdrop art fades into the page along an eased,
+  many-stop curve instead of a straight two-stop ramp, so there's no line where the
+  fade starts or stops. The profile banner's progressive blur now stacks its levels
+  so the page never shows through between them, with opaque blurs (no see-through
+  sides), a separate legibility scrim, and a dissolve into the page by opacity
+  rather than through grey. In light and dark.
+- **Request details.** Tapping a film's or show's request pill, **On Plex**
+  included, opens a sheet with what's on Plex ("4K · Dolby Vision · HEVC · EAC3
+  5.1 · 58.2 GB"), each download with its release name, size, progress and time
+  left, and each request with who asked and when. Season controls sit below. A
+  request you may delete has **Delete request**, with a confirmation that what's on
+  Plex stays.
+- **Book request details.** Every pill on a book's page (Finding, Downloading,
+  Adding to Calibre, In Calibre, No copy yet, Choose a copy) opens the same kind of
+  sheet: the book, who asked and when, the copy (title, format, size, seeders, and
+  how many others were found), and what Calibre holds (formats and size). The
+  actions are Choose another copy, Try again, Cancel, **Delete request** (a book
+  already in Calibre stays) and **Request another copy**, which moved here from the
+  old dialog. The pills themselves are unchanged.
+- Debug gallery (`marquee://debug/requests`): sample detail payloads for films,
+  shows and books, and the gallery's pills open their sheets.
+
 ## Unreleased — book requests, series and authors
 
 Needs web build `20261120h`.

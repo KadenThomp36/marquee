@@ -146,7 +146,7 @@ struct ReadingDetailScreen: View {
                     }
                     // the Request button lives in the hero, like a film's or a show's
                     if kind == .book, let id = item.id, !isHardcoverPreview {
-                        BookRequestControl(bookID: id, title: item.displayTitle)
+                        BookRequestControl(bookID: id, title: item.displayTitle, cover: item.cover)
                             .padding(.top, 4)
                     }
                 }

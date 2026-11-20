@@ -23,9 +23,11 @@ struct ProfileScreen: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.mqTopInset) private var topInset
     @Environment(\.colorScheme) private var colorScheme
-    /// Regular on the Duo opened out (and iPad), where the tab bar becomes a rail and
-    /// bar buttons live in it — so Settings goes there instead of floating on the art.
-    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The tab rail's width, when the tab bar is a rail down the trailing edge (the
+    /// Duo, on both displays). Bar buttons live in the rail there, so Settings goes in
+    /// with them instead of floating on the art. Measured, not inferred from the size
+    /// class: the outer display has the rail but a compact size class.
+    @State private var railWidth: CGFloat = 0
     @State private var profile: ProfilePayload?
     @State private var stats: Stats?
     @State private var advanced: AdvancedStats?
@@ -45,7 +47,7 @@ struct ProfileScreen: View {
     }
     private var who: String { isMe ? "me" : (username ?? "me") }
     private var hasBanner: Bool { profile?.banner?.isEmpty == false }
-    private var railLayout: Bool { sizeClass == .regular }
+    private var railLayout: Bool { railWidth > 0 }
 
     var body: some View {
         MarqueeScreen {
@@ -98,6 +100,7 @@ struct ProfileScreen: View {
             }
 
         }
+        .readsTabRail(into: $railWidth)
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(railLayout ? .visible : .hidden, for: .navigationBar)
@@ -156,7 +159,7 @@ struct ProfileScreen: View {
     private func identity(_ profile: ProfilePayload) -> some View {
         ZStack(alignment: .top) {
             if let banner = profile.banner, !banner.isEmpty {
-                ProfileBanner(url: resolved(banner), height: 510 + topInset)
+                ProfileBanner(url: resolved(banner), height: 530 + topInset)
             }
 
             VStack(spacing: 10) {

@@ -94,6 +94,9 @@ struct MarqueeScreen<Content: View>: View {
             // left that still describes it is how far down the window this screen starts.
             .environment(\.mqTopInset, max(proxy.safeAreaInsets.top,
                                            proxy.frame(in: .global).minY))
+            // On the Duo the tab bar is a rail down the trailing edge, and it arrives
+            // here as a trailing inset. See TabRail.
+            .environment(\.mqRailWidth, TabRail.width(trailingInset: proxy.safeAreaInsets.trailing))
         }
     }
 }

@@ -66,11 +66,7 @@ struct EpisodeScreen: View {
         let art = [episode.still, episode.seasonPoster, episode.showBackdrop, episode.showPoster]
             .compactMap { $0 }.first { !$0.isEmpty }
         // Tall enough to cover the bar it now reaches up under as well as the hero.
-        FilledArt(url: art, height: 214 + 120)
-            .mask(LinearGradient(stops: [.init(color: .black, location: 0.55),
-                                         .init(color: .clear, location: 1)],
-                                 startPoint: .top, endPoint: .bottom))
-            .accessibilityHidden(true)
+        BackdropWash(url: art, height: 214 + 120, fadeFrom: 0.5)
     }
 
     @ViewBuilder

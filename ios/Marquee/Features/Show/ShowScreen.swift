@@ -180,13 +180,8 @@ struct ShowScreen: View {
     @ViewBuilder
     private func backdrop(_ detail: ShowDetail) -> some View {
         if let backdrop = detail.backdrop {
-            FilledArt(url: backdrop, height: 260 + 120)
-                .opacity(colorScheme == .light ? 0.15 : 0.28)
-                .blur(radius: 3)
-                .mask(LinearGradient(colors: [.black, .black, .clear],
-                                     startPoint: .top, endPoint: .bottom))
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+            BackdropWash(url: backdrop, height: 260 + 120,
+                         opacity: colorScheme == .light ? 0.15 : 0.28, blur: 3)
         }
     }
 

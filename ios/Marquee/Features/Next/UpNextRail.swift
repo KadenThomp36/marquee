@@ -14,6 +14,7 @@ struct UpNextRail: View {
     /// Handed up to the screen, which flies the ticket above everything.
     let onLift: (PunchFlight) -> Void
 
+    @Environment(\.mqRailWidth) private var rail
     @State private var anchor: RailEntry.ID?
     @State private var hasParked = false
     /// Bumped each time the rail comes to rest on a date barrier.
@@ -58,11 +59,17 @@ struct UpNextRail: View {
         // History scrolls up into the leading margin, which left a card sliced off
         // square against the screen edge. Fading it there reads as "there's more
         // behind you" instead of as a clipping bug.
+        //
+        // A mask clips to the rail's own frame, which ends at the content column. On
+        // the Duo that's the tab rail's edge, so the mask runs on under the tab rail
+        // too. Otherwise the cards would stop in a hard line there instead of
+        // scrolling under it like every other rail.
         .mask {
             LinearGradient(stops: [.init(color: .clear, location: 0),
                                    .init(color: .black, location: 0.05),
                                    .init(color: .black, location: 1)],
                            startPoint: .leading, endPoint: .trailing)
+                .underTabRail(rail)
         }
         .padding(.vertical, -MQ.railShadowRoom)
         .scrollPosition(id: $anchor, anchor: .leading)

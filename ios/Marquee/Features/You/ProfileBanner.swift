@@ -1,23 +1,40 @@
 import SwiftUI
 
-/// The profile banner: a *progressive* blur, sharp along the top and dissolving into
-/// the page by the bottom.
+/// The profile banner: sharp along the top, dissolving into the page by the bottom.
 ///
-/// One `.blur()` can only do a single uniform radius, so this is five copies of the
-/// same art at stepped radii, each revealed through a feathered band so neighbouring
-/// levels crossfade into one continuous ramp. The radii and the bands are the same
-/// numbers the web client uses in `.pb-l0`…`.pb-l4`.
+/// Three layers, each eased rather than linear. Linear ramps were what made the old
+/// fade look cheap: every band had a visible start and end, and the colour washed
+/// through a muddy grey on its way to the page.
 ///
-/// Getting the direction wrong is not subtle: run the ramp the other way and the
+/// 1. **A progressive blur.** One `.blur()` can only do a single uniform radius, so
+///    this is the same art at stepped radii. Each level is solid from where it
+///    fades in all the way to the bottom, and each sits on top of the one before.
+///    So every point down the banner is fully covered. (Crossfading neighbouring
+///    bands, as before, left the page showing through between them.) The blurs are
+///    opaque, so the art doesn't go see-through at the sides.
+/// 2. **A legibility scrim** behind the name, numbers and buttons, which stay light
+///    over the art in both appearances.
+/// 3. **A dissolve** of the whole stack into the page, by opacity and not by
+///    blending to the page colour, so it never passes through grey.
+///
+/// The art also runs under the Duo's tab rail to the screen edge.
+///
+/// Getting the blur direction wrong is not subtle: run it the other way and the
 /// heaviest blur covers the whole banner, which flattens the art into a single wash
 /// of its average colour.
 struct ProfileBanner: View {
     let url: String
     let height: CGFloat
 
-    private struct Layer {
+    @Environment(\.mqRailWidth) private var rail
+    @Environment(\.colorScheme) private var colorScheme
+
+    private struct Level {
         let blur: CGFloat
-        let stops: [Gradient.Stop]
+        /// Fades in over this span (unit positions down the visible height), then
+        /// stays solid.
+        let from: Double
+        let to: Double
     }
 
     /// Extra art drawn above the visible frame. The refresh spinner holds the page
@@ -28,42 +45,18 @@ struct ProfileBanner: View {
     /// the content somewhere layout can't see.
     private static let bleed: CGFloat = 120
 
-    /// The ramp holds off far longer than it used to. Blurring from a quarter of the
-    /// way down meant the picture was gone before you'd taken it in; the art now stays
-    /// sharp through the top half and only dissolves as it reaches the page.
-    private static let layers: [Layer] = [
-        Layer(blur: 0, stops: [
-            .init(color: .black, location: 0),
-            .init(color: .black, location: 0.46),
-            .init(color: .clear, location: 0.60)]),
-        Layer(blur: 4, stops: [
-            .init(color: .clear, location: 0.44),
-            .init(color: .black, location: 0.57),
-            .init(color: .black, location: 0.63),
-            .init(color: .clear, location: 0.74)]),
-        Layer(blur: 10, stops: [
-            .init(color: .clear, location: 0.60),
-            .init(color: .black, location: 0.71),
-            .init(color: .black, location: 0.77),
-            .init(color: .clear, location: 0.87)]),
-        Layer(blur: 20, stops: [
-            .init(color: .clear, location: 0.74),
-            .init(color: .black, location: 0.84),
-            .init(color: .black, location: 0.90),
-            .init(color: .clear, location: 0.96)]),
-        Layer(blur: 34, stops: [
-            .init(color: .clear, location: 0.87),
-            .init(color: .black, location: 0.95),
-            .init(color: .clear, location: 1)]),
+    /// The art stays sharp through the top half and only softens as it nears the
+    /// page. The overlapping spans make the radius climb smoothly instead of in steps.
+    private static let levels: [Level] = [
+        Level(blur: 3, from: 0.40, to: 0.58),
+        Level(blur: 8, from: 0.50, to: 0.70),
+        Level(blur: 16, from: 0.62, to: 0.82),
+        Level(blur: 28, from: 0.74, to: 0.94),
     ]
 
-    private static let tintStops: [Gradient.Stop] = [
-        .init(color: .clear, location: 0),
-        .init(color: .clear, location: 0.44),
-        .init(color: Color.mqScrim.opacity(0.16), location: 0.64),
-        .init(color: Color.mqScrim.opacity(0.44), location: 0.84),
-        .init(color: Color.mqGround, location: 1),
-    ]
+    /// Where the banner gives way to the page. The name, numbers and buttons end
+    /// just above where this starts, so they never sit on art that's half gone.
+    private static let dissolve = (start: 0.80, end: 1.0)
 
     /// The stop positions are tuned against the visible height, but the art is drawn
     /// `bleed` taller — re-express each position in the taller run so the visible
@@ -75,20 +68,30 @@ struct ProfileBanner: View {
         }
     }
 
+    private func ramp(_ stops: [Gradient.Stop], over full: CGFloat) -> LinearGradient {
+        LinearGradient(stops: Self.stretched(stops, over: full), startPoint: .top, endPoint: .bottom)
+    }
+
     var body: some View {
         let full = height
         let tall = full + Self.bleed
 
         ZStack {
-            ForEach(Array(Self.layers.enumerated()), id: \.offset) { _, layer in
+            FilledArt(url: url, height: tall)
+            ForEach(Array(Self.levels.enumerated()), id: \.offset) { _, level in
                 FilledArt(url: url, height: tall)
-                    .blur(radius: layer.blur)
-                    .mask(LinearGradient(stops: Self.stretched(layer.stops, over: full),
-                                         startPoint: .top, endPoint: .bottom))
+                    .blur(radius: level.blur, opaque: true)
+                    .mask(ramp(Scrim.stops(from: 0, to: 1, start: level.from, end: level.to), over: full))
             }
-            LinearGradient(stops: Self.stretched(Self.tintStops, over: full),
-                           startPoint: .top, endPoint: .bottom)
+            // Holds off over the sharp top, then deepens behind the identity block.
+            // A touch stronger in light mode, where the page it dissolves into is pale
+            // and gives the light type less to stand on.
+            ramp(Scrim.stops(.mqScrim, from: 0, to: colorScheme == .light ? 0.78 : 0.68,
+                             start: 0.30, end: 0.86), over: full)
         }
+        // The whole stack dissolves into the page together.
+        .mask(ramp(Scrim.stops(from: 1, to: 0, start: Self.dissolve.start, end: Self.dissolve.end),
+                   over: full))
         .frame(height: tall)
         // Bottom-aligned in the visible frame, so the extra `bleed` hangs out the
         // top. Frames don't clip; the mask below re-clips the sides and bottom the
@@ -97,6 +100,9 @@ struct ProfileBanner: View {
         .mask {
             Color.black.padding(.top, -Self.bleed)
         }
+        // Out under the tab rail to the screen edge. Layout still ends at the
+        // content column, so the identity block stays centred on the page.
+        .underTabRail(rail)
         // Pull down and the banner grows to keep filling the space rather than
         // leaving the page colour behind it. Driven by the scroll geometry during
         // layout, so it tracks the finger exactly and costs no state.

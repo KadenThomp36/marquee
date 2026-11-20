@@ -170,6 +170,19 @@ public struct BookRequestList: Codable, Sendable, Equatable {
 public struct CalibreCopy: Codable, Sendable, Hashable {
     public var id: Int?
     public var title: String?
+    public var authors: [String]?
+    /// "EPUB", "MOBI"…
+    public var formats: [String]?
+    /// Already formatted: "1 MB". Older servers send nothing.
+    public var size: ReleaseSize?
+
+    /// "EPUB, MOBI · 1 MB"
+    public var summary: String {
+        var parts: [String] = []
+        if let formats, !formats.isEmpty { parts.append(formats.map { $0.uppercased() }.joined(separator: ", ")) }
+        if let size = size?.text { parts.append(size) }
+        return parts.joined(separator: " · ")
+    }
 }
 
 /// The request a search result already has, if any.
