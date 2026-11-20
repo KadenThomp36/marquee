@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120g";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120h";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -6329,7 +6329,7 @@ const BRQ_STATE = {
   finding: ["find", "Looking for copies", "Searching every indexer. This takes a minute or two."],
   downloading: ["dl", "Downloading", ""],
   importing: ["dl", "Adding to Calibre", "The file's in. Calibre picks it up within a few minutes."],
-  done: ["ok", "In Calibre", "Ready to Get from the Palma's Calibre tab."],
+  done: ["ok", "In Calibre", ""],
   pick: ["warn", "Choose a copy", ""],
   failed: ["bad", "Couldn't get it", ""],
   cancelled: ["off", "Cancelled", ""],
@@ -6408,6 +6408,19 @@ async function brqPickSheet(rid, after) {
   });
 }
 
+// tapping the green "In Calibre" pill: what Calibre has, and a way to ask for another copy
+function brqInCalibreSheet(copy, onAnother) {
+  const sh = sheet(`<div class="sh-t">In Calibre</div>
+    <p class="hint">${esc(copy.title || "This book")}${copy.authors && copy.authors.length ? ` by ${esc(copy.authors.join(", "))}` : ""} is already in the library.</p>
+    <button class="btn" data-a="another">${BRQ_ICO} Request another copy</button>
+    <button class="btn ghost" data-a="close">Close</button>`, { cls: "editor" });
+  sh.el.addEventListener("click", e => {
+    const a = e.target.closest("[data-a]"); if (!a) return;
+    sh.close();
+    if (a.dataset.a === "another") onAnother();
+  });
+}
+
 // on a book's own page: a Request chip in the action row, right where films and shows
 // keep theirs, and the same live line under it once something's happening
 const BRQ_SHORT = { finding: "Finding a copy", downloading: "Downloading", importing: "Adding to Calibre",
@@ -6421,10 +6434,8 @@ async function mountBookRequest(slot, bookId) {
   const r = (d.requests || [])[0];
   if ((!r || ["cancelled", "failed"].includes(r.state)) && d.in_calibre && !slot.dataset.anyway) {
     // already in the library (it came in some other way): nothing to request
-    slot.innerHTML = `<span class="chip-btn brq-btn on ok" title="${esc(d.in_calibre.title || "")}">${I.check}<span>In Calibre</span></span>
-      <span class="rq-live ok"><span class="rq-live-t"><span class="brq-dot"></span><span class="rq-live-msg">Already in the library. Get it from the Palma's Calibre tab.</span></span>
-        <span class="rq-live-acts"><button id="brqanyway">Request another copy</button></span></span>`;
-    $("#brqanyway", slot).onclick = () => { slot.dataset.anyway = "1"; mountBookRequest(slot, bookId); };
+    slot.innerHTML = `<button class="chip-btn brq-btn on ok" id="brqcal">${I.check}<span>In Calibre</span></button>`;
+    $("#brqcal", slot).onclick = () => brqInCalibreSheet(d.in_calibre, () => { slot.dataset.anyway = "1"; mountBookRequest(slot, bookId); });
     return;
   }
   if (!r || r.state === "cancelled") {
@@ -6450,7 +6461,7 @@ async function mountBookRequest(slot, bookId) {
     finding: "Searching every indexer, about a minute",
     downloading: r.message || "",
     importing: "The file's in. Calibre picks it up in a few minutes.",
-    done: "Get it from the Palma's Calibre tab.",
+    done: "",
     pick: r.message || "None of the copies matched well enough.",
     failed: r.message || "No copies found.",
   }[r.state] || "";
@@ -6461,16 +6472,21 @@ async function mountBookRequest(slot, bookId) {
   const chipIco = r.state === "done" ? I.check : BRQ_ICO;
   const chip = r.state === "pick"
     ? `<button class="chip-btn brq-btn on ${tone}" data-brq="pick">${chipIco}<span>Choose a copy</span></button>`
+    : r.state === "done" ? `<button class="chip-btn brq-btn on ok" id="brqcal">${chipIco}<span>In Calibre</span></button>`
     : `<span class="chip-btn brq-btn on ${tone}">${chipIco}<span>${BRQ_SHORT[r.state] || "Requested"}</span></span>`;
-  slot.innerHTML = `${chip}
+  const quiet = !line && !acts.length && !["finding", "downloading", "importing"].includes(r.state) && (r.mine || !r.requested_by);
+  slot.innerHTML = `${chip}${quiet ? "" : `
     <span class="rq-live ${tone}" data-rid="${r.id}">
       <span class="rq-live-t"><span class="brq-dot"></span>${r.state === "downloading" ? `<em>${Math.round(pct)}%</em>` : ""}<span class="rq-live-msg">${esc(line)}</span></span>
       ${r.state === "finding" ? `<span class="brq-bar find"><i></i></span>` : ["downloading", "importing"].includes(r.state) ? `<span class="rq-live-bar"><i style="width:${Math.max(3, pct)}%"></i></span>` : ""}
       ${acts.length || (!r.mine && r.requested_by) ? `<span class="rq-live-acts">${acts.join("")}${!r.mine && r.requested_by ? `<small>asked for by ${esc(r.requested_by)}</small>` : ""}</span>` : ""}
-    </span>`;
+    </span>`}`;
+  if ($("#brqcal", slot)) $("#brqcal", slot).onclick = () =>
+    brqInCalibreSheet({ title: r.title, authors: r.author ? [r.author] : [] },
+      () => brqAct(r.id, "retry", () => mountBookRequest(slot, bookId)));
   // the chip is the pick button too
   slot.onclick = e => { const b = e.target.closest("[data-brq]"); if (b && b.dataset.brq === "pick" && !b.closest("[data-rid]")) brqPickSheet(r.id, () => mountBookRequest(slot, bookId)); };
-  wireBrq($(".rq-live", slot), () => mountBookRequest(slot, bookId));
+  if ($(".rq-live", slot)) wireBrq($(".rq-live", slot), () => mountBookRequest(slot, bookId));
   if (brqActive(r)) _brqTimer = setTimeout(() => { if (slot.isConnected && !document.hidden) mountBookRequest(slot, bookId); else if (slot.isConnected) _brqTimer = setTimeout(() => mountBookRequest(slot, bookId), 4000); }, 4000);
 }
 

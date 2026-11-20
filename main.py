@@ -42,7 +42,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120g"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120h"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")

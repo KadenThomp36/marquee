@@ -168,7 +168,7 @@ struct BookRequestCard: View {
                                  note: "Adding to Calibre")
         case .done:
             Label {
-                Text("In Calibre. The Palma\u{2019}s Calibre tab can Get it now.")
+                Text("In Calibre")
             } icon: {
                 Image(systemName: "books.vertical.fill").foregroundStyle(RequestTone.ready.color)
             }
@@ -259,6 +259,7 @@ struct BookRequestControl: View {
     /// Calibre already has it (it came in some other way); "Request another copy" overrides.
     @State private var inCalibre: CalibreCopy?
     @State private var anyway = false
+    @State private var showingCalibre = false
 
     private var enabled: Bool { session.bookRequestConfig?.isEnabled == true }
     private var isActive: Bool { request?.phase.isActive == true }
@@ -272,15 +273,17 @@ struct BookRequestControl: View {
                     if let request, request.phase != .cancelled, !(request.phase == .failed && inCalibre != nil && !anyway) {
                         status(request)
                     } else if inCalibre != nil, !anyway {
-                        RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready)
-                            .accessibilityLabel("Already in Calibre")
-                        HStack(spacing: 12) {
-                            Text("Get it from the Palma's Calibre tab.")
-                                .font(.mqCaption).foregroundStyle(Color.mqInkMuted)
-                            Button("Request another copy") { anyway = true }
-                                .font(MarqueeFont.body(12, .bold, relativeTo: .caption))
-                                .foregroundStyle(Color.mqBrass)
+                        Button { showingCalibre = true } label: {
+                            HStack(spacing: 5) {
+                                RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(Color.mqInkMuted)
+                            }
+                            .contentShape(.rect)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("In Calibre. Opens options.")
                     } else {
                         Button { confirming = true } label: {
                             if busy {
@@ -352,6 +355,14 @@ struct BookRequestControl: View {
         } message: {
             if let request { Text(request.message ?? "") }
         }
+        .confirmationDialog("In Calibre", isPresented: $showingCalibre, titleVisibility: .visible) {
+            Button("Request another copy") {
+                if let request, request.phase == .done { Task { await act("retry") } } else { anyway = true }
+            }
+            Button("Close", role: .cancel) {}
+        } message: {
+            Text("\(inCalibre?.title ?? request?.title ?? title) is already in the library.")
+        }
         .sheet(isPresented: $picking) {
             if let request { CopyPickerSheet(request: request) { self.request = $0 } }
         }
@@ -368,7 +379,11 @@ struct BookRequestControl: View {
         case .failed: ("No copy yet", "exclamationmark.circle", .failed)
         default: ("Requested", "clock", .waiting)
         }
-        Button { if request.phase == .pick { picking = true } else { managing = true } } label: {
+        Button {
+            if request.phase == .pick { picking = true }
+            else if request.phase == .done { showingCalibre = true }
+            else { managing = true }
+        } label: {
             HStack(spacing: 5) {
                 RequestStatusPill(label: label, symbol: symbol, tone: tone)
                 Image(systemName: "chevron.right")
@@ -386,9 +401,6 @@ struct BookRequestControl: View {
                                      : request.message,
                                  tone: .working, indeterminate: request.phase == .finding)
                 .frame(maxWidth: 260)
-        } else if request.phase == .done {
-            Text("Get it from the Palma's Calibre tab.")
-                .font(.mqCaption).foregroundStyle(Color.mqInkMuted)
         } else if let message = request.message, !message.isEmpty {
             Text(message).font(.mqCaption).foregroundStyle(Color.mqInkSoft)
                 .fixedSize(horizontal: false, vertical: true)
