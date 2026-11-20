@@ -276,9 +276,6 @@ struct BookRequestControl: View {
                         Button { showingCalibre = true } label: {
                             HStack(spacing: 5) {
                                 RequestStatusPill(label: "In Calibre", symbol: "checkmark.circle.fill", tone: .ready)
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(Color.mqInkMuted)
                             }
                             .contentShape(.rect)
                         }
@@ -386,9 +383,6 @@ struct BookRequestControl: View {
         } label: {
             HStack(spacing: 5) {
                 RequestStatusPill(label: label, symbol: symbol, tone: tone)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.mqInkMuted)
             }
             .contentShape(.rect)
         }

@@ -317,9 +317,6 @@ struct RequestButton: View {
                 Button(action: action) {
                     HStack(spacing: 5) {
                         RequestStatusPill(label: label, symbol: shown.symbol, tone: shown.tone)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(Color.mqInkMuted)
                     }
                     .contentShape(.rect)
                 }
