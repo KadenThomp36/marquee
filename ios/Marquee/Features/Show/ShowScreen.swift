@@ -29,20 +29,15 @@ struct ShowScreen: View {
     var body: some View {
         MarqueeScreen {
             if let detail = model.detail {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        hero(detail)
-                        body(detail)
-                        if model.isStale { StaleFooter(cachedAt: model.cachedAt) }
-                    }
-                    // Pin the column to the viewport. Without this, one over-wide
-                    // child (a rail, a chart) widens the whole stack and SwiftUI
-                    // centres it — which reads as the entire page drifting left.
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 30)
+                // One column on a phone; on the Duo opened out, the show on one
+                // page and its episodes on the facing one.
+                FoldSpread(refresh: { await model.load(session: session, force: false) }) {
+                    hero(detail)
+                    about(detail)
+                } trailing: {
+                    episodes(detail)
+                    if model.isStale { StaleFooter(cachedAt: model.cachedAt) }
                 }
-                .scrollEdgeEffectStyle(.soft, for: .top)
-                .refreshable { await model.load(session: session, force: false) }
                 // Behind the page rather than inside the scrolling column: only out
                 // here does ignoring the safe area actually reach the top of the
                 // window, instead of being clipped at the scroll view's bounds.
@@ -69,7 +64,9 @@ struct ShowScreen: View {
             await model.loadRequestStatus(session: session)
             await model.pollRequestStatus(session: session)
         }
-        .onChange(of: model.detail?.rating) { _, new in rating = new }
+        // `initial`: a page that opens from the cache already has its rating, and a
+        // plain onChange never fires for it — the stars sat empty on every revisit.
+        .onChange(of: model.detail?.rating, initial: true) { _, new in rating = new }
         .fullScreenCover(isPresented: $showingGallery) {
             ArtworkGallery(itemType: "show", itemID: showID, title: model.title)
         }
@@ -353,8 +350,9 @@ struct ShowScreen: View {
 
     // MARK: - Body
 
+    /// The leading page: what the show is, where to see it, who's in it.
     @ViewBuilder
-    private func body(_ detail: ShowDetail) -> some View {
+    private func about(_ detail: ShowDetail) -> some View {
         if let overview = detail.info?.overview, !overview.isEmpty {
             ExpandableText(text: overview)
                 .padding(.horizontal, MQ.gutter)
@@ -372,7 +370,11 @@ struct ShowScreen: View {
         if let cast = detail.info?.cast, !cast.isEmpty {
             DetailSection(title: "Cast") { CastStrip(people: cast) }
         }
+    }
 
+    /// The trailing page: every episode, how they rated, what the house thought.
+    @ViewBuilder
+    private func episodes(_ detail: ShowDetail) -> some View {
         if let ratings = model.ratings, ratings.episodes.count >= 4 {
             RatingsPanel(ratings: ratings)
         }

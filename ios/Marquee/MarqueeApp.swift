@@ -1,8 +1,10 @@
 import BackgroundTasks
 import SwiftUI
+import UIKit
 
 @main
 struct MarqueeApp: App {
+    @UIApplicationDelegateAdaptor(OrientationDelegate.self) private var orientation
     @State private var session = Session()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -19,6 +21,7 @@ struct MarqueeApp: App {
         WindowGroup {
             RootView()
                 .environment(session)
+                .refreshesOrientationsWithSizeClass()
                 .tint(.mqBrass)
                 // Without a delegate installed, a notification raised while the app is
                 // open never appears and tapping one does nothing.
@@ -51,4 +54,42 @@ struct MarqueeApp: App {
             }
         }
     }
+}
+
+/// Portrait on a phone, as it always was — except on a phone-sized device with a
+/// tablet-sized screen, which is to say the Duo's inner display. There the app turns
+/// like an iPad app, and turning it is how the screening room goes from a book
+/// standing open to a laptop on the nightstand.
+final class OrientationDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return .all }
+        let traits = window?.traitCollection
+        if traits?.horizontalSizeClass == .regular, traits?.verticalSizeClass == .regular {
+            return .allButUpsideDown
+        }
+        return .portrait
+    }
+}
+
+/// The answer above changes when the window moves between the Duo's displays, so ask
+/// the system to ask again — otherwise the cover display could inherit the inner
+/// display's freedom to turn for as long as the old answer stands.
+private struct OrientationRefresh: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var horizontal
+    @Environment(\.verticalSizeClass) private var vertical
+
+    func body(content: Content) -> some View {
+        content.onChange(of: [horizontal, vertical]) {
+            for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+                for window in scene.windows {
+                    window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+                }
+            }
+        }
+    }
+}
+
+private extension View {
+    func refreshesOrientationsWithSizeClass() -> some View { modifier(OrientationRefresh()) }
 }

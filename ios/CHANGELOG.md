@@ -1,5 +1,71 @@
 # iOS changelog
 
+## Unreleased — iPhone Duo
+
+Built against the iOS 27.1 SDK and tried on the iPhone Duo simulator in every pose.
+Everything below is gated on iOS 27.1 and on the device actually having a hinge, so
+every other phone (and anything older) behaves exactly as before.
+
+### Two pages, either side of the crease
+- On the Duo's inner display the **show, film, book and manga pages become an open
+  book**: the hero, overview, where-to-watch and cast on the leading page; ratings,
+  seasons, chapters and reviews on the facing one. Each page scrolls on its own, and
+  the gutter sits exactly over the fold (from the system's division region, asked for
+  *including inactive* so the columns don't reflow as the hinge moves). An iPad gets
+  the same two columns either side of the middle. Phone-sized, it's the one column it
+  always was, in the same order.
+- Film and reading pages gained pull-to-refresh on the way.
+
+### The screening room
+- **Prop the Duo half-open and Up Next becomes a little cinema.** The standing half is
+  a marquee — the poster, the show in Limelight, the episode, bulbs chasing round the
+  sign in steps like a real one. The flat half is the box office: a **showtime clock**
+  that knows the episode's length ("of 48 min · ends 9:46 PM"), a brass **Mark
+  watched**, and arrows through the rest of the queue.
+- Laid on a table like a laptop, the sign sits above the controls; held like a book,
+  they face each other. Either way the crease is the line between them.
+- Marking an episode stamps **Watched** across the sign, advances to the next one,
+  raises any celebration, queues offline, refreshes the widget — and Home refetches
+  when you leave (`Session.watchRevision`).
+- **Reading lamp:** with a reading session running, the room opens on the book instead
+  — cover, "Page 244 of 331" (or "74% read"), and a ring of how far through you are
+  round the session's running time, with **End session** opening the usual progress
+  sheet. With both a show and a book to hand, a Watching / Reading switch.
+- Folding the phone further dims the **house lights** and the bulbs glow harder. The
+  clock keeps the screen awake only while it's running, survives a relaunch, and the
+  room keeps the house lights down for its own sheet.
+- **Leave the screening room** stays left until the phone stops being half-open. VoiceOver
+  can't reach the app underneath while it's up; two-finger scrub leaves.
+
+### Curtain up
+- **Opening the phone raises a velvet curtain** whose two halves meet exactly on the
+  crease and draw back from it. Keyed off the fold appearing (the outer display reports
+  none), so it lands with the new screen rather than whenever the hinge reports.
+  Skipped with Reduce Motion.
+
+### Rotation on the inner display
+- The app now turns on the Duo's inner display (it's iPad-sized — regular × regular),
+  which is what lets the screening room go from book to tabletop. Every other phone is
+  still portrait-only (`OrientationDelegate`).
+
+### Settings
+- **When it folds** — Screening room and Curtain up switches, shown only on a phone
+  with a hinge.
+
+### Fixes
+- Show page: your star rating was blank on every visit after the first. The page
+  opens from cache with the rating already set, and a plain `onChange` never fired for
+  it (`initial: true` now).
+- Upcoming: days more than a week out printed their date twice ("Oct 31, 2026
+  Oct 31, 2026"); they now read "Saturday  Oct 31, 2026".
+
+### Verify on the device
+- Tabletop pose: the simulator can't rotate the Duo, so the stacked layout was checked
+  by forcing it — confirm on hardware that rotating the half-open phone stacks the sign
+  over the box office, and that the app really does rotate on the inner display.
+- Hinge angle → house lights: the simulator reports only the three poses, so the dimming
+  hasn't been seen at in-between angles.
+
 ## Unreleased — watchlist, reading on Home, sessions that end
 
 Brings the web app's builds `20261011a`–`20261011d` to the native client, without

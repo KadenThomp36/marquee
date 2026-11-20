@@ -31,6 +31,9 @@ public final class Session {
     public private(set) var listMembership: [String: Int] = [:]
     /// Overseerr availability, fetched once per launch.
     public private(set) var requestConfig: RequestConfig?
+    /// Bumped whenever an episode is marked somewhere Watch Next can't see — the
+    /// screening room — so Home refetches instead of showing the old card.
+    public private(set) var watchRevision = 0
 
     public var client: MarqueeClient? { server.map { MarqueeClient(server: $0) } }
     public var isPaired: Bool { server != nil }
@@ -149,6 +152,10 @@ public final class Session {
         guard let client else { return }
         guard let response: CelebrationsResponse = try? await client.get("celebrations") else { return }
         enqueue(response.celebrations)
+    }
+
+    public func noteWatched() {
+        watchRevision &+= 1
     }
 
     public func enqueue(_ celebrations: [Celebration]) {

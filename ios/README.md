@@ -77,6 +77,10 @@ The point of a self-hosted tracker is that nothing leaves the house, so:
 - **Offline queue** — marks made without a connection are queued, superseded correctly if
   you mark the same thing twice, and replayed on reconnect.
 - Background refresh with local notifications for finished downloads.
+- **iPhone Duo** — detail pages open into two pages either side of the crease; prop
+  the phone half-open and Up Next becomes a screening room (a marquee sign, a showtime
+  clock, one button to mark it watched — or a reading lamp mid-session); opening the
+  phone raises a curtain from the fold. All of it iOS 27.1 and hinge-gated.
 
 ## Tests
 

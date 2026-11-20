@@ -25,6 +25,15 @@ struct UpcomingScreen: View {
         return byDate.values.sorted { $0.date < $1.date }
     }
 
+    /// "Tonight", "Tomorrow", "Thursday" — and past the coming week the weekday
+    /// too, since the full date already sits beside it. Using the date for both
+    /// printed "Oct 31, 2026  Oct 31, 2026".
+    private func dayTitle(_ stamp: String) -> String {
+        let label = MQTime.upcomingLabel(stamp)
+        guard label == MQTime.medium(stamp), let date = MQTime.date(from: stamp) else { return label }
+        return date.formatted(.dateTime.weekday(.wide))
+    }
+
     var body: some View {
         MarqueeScreen {
             ScrollView {
@@ -41,7 +50,7 @@ struct UpcomingScreen: View {
                     ForEach(days) { day in
                         VStack(alignment: .leading, spacing: 10) {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(MQTime.upcomingLabel(day.date))
+                                Text(dayTitle(day.date))
                                     .font(MarqueeFont.body(17, .bold, relativeTo: .title3))
                                     .foregroundStyle(Color.mqInk)
                                 Text(MQTime.medium(day.date))

@@ -22,15 +22,12 @@ struct MovieScreen: View {
     var body: some View {
         MarqueeScreen {
             if let movie {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        hero(movie)
-                        body(movie)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 30)
+                FoldSpread(refresh: { await load() }) {
+                    hero(movie)
+                    about(movie)
+                } trailing: {
+                    ReviewsSection(itemType: "movie", itemID: movieID, subject: "this film")
                 }
-                .scrollEdgeEffectStyle(.soft, for: .top)
                 // See ShowScreen: the wash belongs behind the page, not inside the
                 // scrolling column, or the safe area can't be reached.
                 .background(alignment: .top) {
@@ -173,7 +170,7 @@ struct MovieScreen: View {
     }
 
     @ViewBuilder
-    private func body(_ movie: MovieDetail) -> some View {
+    private func about(_ movie: MovieDetail) -> some View {
         if let overview = movie.info?.overview, !overview.isEmpty {
             ExpandableText(text: overview).padding(.horizontal, MQ.gutter)
         }
@@ -183,8 +180,6 @@ struct MovieScreen: View {
         if let cast = movie.info?.cast, !cast.isEmpty {
             DetailSection(title: "Cast") { CastStrip(people: cast) }
         }
-
-        ReviewsSection(itemType: "movie", itemID: movieID, subject: "this film")
     }
 
     private func facts(_ movie: MovieDetail) -> String {

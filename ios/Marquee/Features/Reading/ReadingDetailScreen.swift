@@ -41,16 +41,12 @@ struct ReadingDetailScreen: View {
     var body: some View {
         MarqueeScreen {
             if let detail, let item {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        hero(item)
-                        if detail.tracked { tracked(detail) } else { untracked() }
-                        extras(detail, item)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 30)
+                FoldSpread(spacing: 20, refresh: { await load() }) {
+                    hero(item)
+                    if detail.tracked { tracked(detail) } else { untracked() }
+                } trailing: {
+                    extras(detail, item)
                 }
-                .scrollEdgeEffectStyle(.soft, for: .top)
             } else if let error {
                 LoadFailure(message: error) { await load() }
             } else {

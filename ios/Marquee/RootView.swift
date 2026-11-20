@@ -21,6 +21,8 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.3), value: session.phase)
         .celebrationHost()
+        .observesHinge()
+        .curtainUpOnUnfold()
         .task { await session.start() }
         .task(id: session.phase) {
             guard session.phase == .ready else { return }

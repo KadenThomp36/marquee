@@ -19,6 +19,9 @@ struct SettingsScreen: View {
     @State private var revoking: DeviceSession?
     /// Set when iOS has already been told no — a toggle here can't undo that.
     @State private var notificationsBlocked = false
+    @State private var hinge = Hinge.shared
+    @AppStorage(DuoSettings.screeningRoomKey) private var screeningRoom = true
+    @AppStorage(DuoSettings.curtainKey) private var curtainUp = true
 
     var body: some View {
         MarqueeScreen {
@@ -31,6 +34,8 @@ struct SettingsScreen: View {
                     if let imdb { imdbPanel(imdb) }
                     notificationsPanel
                     trackingPanel
+                    // Only on a phone that folds.
+                    if hinge.posture != .none { foldPanel }
                     aboutPanel
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -334,6 +339,25 @@ struct SettingsScreen: View {
                     set: { value in Task { await setFeature(manga: value) } })) {
                     featureLabel("Manga · manhwa · manhua",
                                  "Chapter-by-chapter progress via AniList and MangaDex.")
+                }
+                .tint(Color.mqBrassFill)
+            }
+        }
+    }
+
+    private var foldPanel: some View {
+        Panel(title: "When it folds", symbol: "iphone.gen3",
+              note: "Just this phone. Nothing here changes what's saved on your server.") {
+            VStack(spacing: 0) {
+                Toggle(isOn: $screeningRoom) {
+                    featureLabel("Screening room",
+                                 "Prop the phone half-open and Up Next becomes a marquee, with a clock for the episode and a button to mark it watched.")
+                }
+                .tint(Color.mqBrassFill)
+                Divider().overlay(Color.mqHairline).padding(.vertical, 8)
+                Toggle(isOn: $curtainUp) {
+                    featureLabel("Curtain up",
+                                 "Opening the phone raises a curtain from the crease. Off when Reduce Motion is on.")
                 }
                 .tint(Color.mqBrassFill)
             }

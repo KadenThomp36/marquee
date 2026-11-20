@@ -88,6 +88,9 @@ struct WatchNextScreen: View {
         .mqBareNavigationBar()
         .task { await refresh() }
         .task { await loadDiscover() }
+        .onChange(of: session.watchRevision) {
+            Task { await refresh(force: true) }
+        }
         .sheet(item: $progressTarget) { target in
             ReadingProgressSheet(target: target) { outcome in
                 await applyReading(outcome, to: target)
