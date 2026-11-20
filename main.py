@@ -39,7 +39,7 @@ except ImportError:
     PUSH_OK = False
 VAPID_SUB = "mailto:kadenthomp36@gmail.com"
 
-BUILD = "20261120b"   # bump on every frontend deploy; clients auto-refresh when it changes
+BUILD = "20261120c"   # bump on every frontend deploy; clients auto-refresh when it changes
 DATA = os.environ.get("MARQUEE_DATA", "/opt/marquee/data")
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DB_PATH = os.path.join(DATA, "marquee.db")
@@ -3840,6 +3840,47 @@ def reading(user=Depends(current_user)):
 PACE_DAYS = 21
 
 
+def _is_checkin(r):
+    """A progress check-in ("I'm on page 381") rather than a sitting: logged in an instant
+    with no reading time behind it. Folio sessions are always real sittings, however short."""
+    keys = r.keys()
+    if "source" in keys and r["source"] == "folio":
+        return False
+    if "active_seconds" in keys and r["active_seconds"]:
+        return False
+    return _wall_seconds(r) < 60
+
+
+def _daily_progress(rows, started_at=None):
+    """Units read per day for one title, the way they were actually read. A sitting's units
+    land on its own day. A check-in only says where you'd got to by then, so its units are
+    levelled across the days since the previous entry (or since you started), the same rule
+    compute_reading_stats uses for catch-ups. Returns ({date: units}, {dates actually logged})."""
+    daily, logged = {}, set()
+    try:
+        prev = date.fromisoformat(started_at[:10]) if started_at else None
+    except ValueError:
+        prev = None
+    for r in sorted(rows, key=lambda r: r["started_at"] or ""):
+        if not r["ended_at"] or not r["started_at"]:
+            continue
+        try:
+            day = date.fromisoformat(r["started_at"][:10])
+        except ValueError:
+            continue
+        units = max(0, (r["end_pos"] or 0) - (r["start_pos"] or 0)) if r["end_pos"] is not None else 0
+        logged.add(day)
+        if units and _is_checkin(r) and prev and (day - prev).days > 1:
+            n = (day - prev).days
+            for i in range(1, n + 1):
+                d = prev + timedelta(days=i)
+                daily[d] = daily.get(d, 0.0) + units / n
+        elif units:
+            daily[day] = daily.get(day, 0.0) + units
+        prev = day if prev is None or day > prev else prev
+    return daily, logged
+
+
 def add_reading_pace(con, uid, items, kind):
     """Pace and a finish forecast for what you're reading: units (pages/chapters) per
     day over the last three weeks of sessions and checkpoints, counted from the first
@@ -3848,6 +3889,35 @@ def add_reading_pace(con, uid, items, kind):
     ids = [it["id"] for it in items]
     if not ids:
         return items
+    states_tbl, id_col = ("book_states", "book_id") if kind == "book" else ("manga_states", "manga_id")
+    rows_by = {}
+    for r in con.execute(f"""SELECT * FROM reading_sessions WHERE user_id=? AND kind=?
+            AND item_id IN ({_ph(ids)}) ORDER BY started_at""", (uid, kind, *ids)):
+        rows_by.setdefault(r["item_id"], []).append(r)
+    started = {r[id_col]: r["started_at"] for r in con.execute(
+        f"SELECT {id_col}, started_at FROM {states_tbl} WHERE user_id=? AND {id_col} IN ({_ph(ids)})",
+        (uid, *ids))}
+    today = date.today()
+    cut_day = today - timedelta(days=PACE_DAYS)
+    for it in items:
+        rows = rows_by.get(it["id"], [])
+        it["last_read_at"] = max((r["ended_at"] or r["started_at"] for r in rows), default=None)
+        if it["state"] != "reading" or not rows:
+            continue
+        # Check-ins are levelled across the days they cover, so "page 381 today" after
+        # weeks away reads as weeks of steady reading, not 97 pages in one day.
+        daily, _ = _daily_progress(rows, started.get(it["id"]))
+        window = {d: u for d, u in daily.items() if cut_day <= d <= today}
+        units = sum(window.values())
+        if units <= 0:
+            continue
+        span = max(1, (today - min(window)).days + 1)
+        per_day = units / span
+        total = it.get("pages") if kind == "book" else it.get("chapters")
+        it["pace"] = round(per_day, 1)
+        if total and per_day > 0 and (it["progress"] or 0) < total:
+            it["finish_days"] = max(1, round((total - (it["progress"] or 0)) / per_day))
+    return items
     cut = (datetime.now() - timedelta(days=PACE_DAYS)).isoformat()
     rows = {r["item_id"]: r for r in con.execute(f"""
         SELECT item_id, SUM(MAX(0, COALESCE(end_pos,0) - COALESCE(start_pos,0))) AS units,
@@ -6089,8 +6159,8 @@ def book_stats(book_id: int, user=Depends(current_user)):
         tot_s += secs
         units_all += units
         day = (r["started_at"] or "")[:10]
-        e = days.setdefault(day, {"date": day, "minutes": 0.0, "pages": 0, "sessions": 0})
-        e["minutes"] += secs / 60; e["pages"] += units; e["sessions"] += 1 if timed else 0
+        e = days.setdefault(day, {"date": day, "minutes": 0.0, "pages": 0.0, "sessions": 0})
+        e["minutes"] += secs / 60; e["sessions"] += 1 if timed else 0
         if timed:
             timed_s += secs; timed_units += units
             if fgain is not None:
@@ -6122,6 +6192,14 @@ def book_stats(book_id: int, user=Depends(current_user)):
             "pages_turned": r["pages_turned"], "source": src, "source_label": label,
             "checkpoint": not timed, "start_chapter": meta.get("start_chapter"),
             "end_chapter": meta.get("end_chapter"), "chapters": meta.get("chapters") or []})
+    # Pages per calendar day: sittings on their day, check-ins levelled across the days
+    # since the previous entry. Days that only carry levelled pages are marked estimated.
+    daily, logged = _daily_progress(rows, st["started_at"] if st else None)
+    for d, u in daily.items():
+        e = days.setdefault(d.isoformat(), {"date": d.isoformat(), "minutes": 0.0, "pages": 0.0, "sessions": 0})
+        e["pages"] += u
+    for e in days.values():
+        e["estimated"] = date.fromisoformat(e["date"]) not in logged
     sessions.reverse()                      # newest first, like the reading log
     progress = (st["progress"] or 0) if st else 0
     last_frac = next((s["end_fraction"] for s in sessions if s["end_fraction"] is not None), None)
@@ -6182,7 +6260,7 @@ def book_stats(book_id: int, user=Depends(current_user)):
                   "fraction": round(fraction, 4) if fraction is not None else None} if st else None,
         "totals": {"minutes": round(tot_s / 60), "sessions": len(timed_list),
                    "checkpoints": len(sessions) - len(timed_list),
-                   "days": len([d for d in days.values() if d["minutes"] >= 1 or d["pages"]]),
+                   "days": len(logged),
                    "pages": units_all,
                    "avg_minutes": round(timed_s / 60 / len(timed_list)) if timed_list else None,
                    "longest_minutes": max((s["minutes"] for s in timed_list), default=None),
@@ -6193,7 +6271,7 @@ def book_stats(book_id: int, user=Depends(current_user)):
                  "per_day": paced.get("pace")},
         "forecast": forecast,
         "sessions": sessions,
-        "days": sorted(({**d, "minutes": round(d["minutes"], 1)} for d in days.values()),
+        "days": sorted(({**d, "minutes": round(d["minutes"], 1), "pages": round(d["pages"])} for d in days.values()),
                        key=lambda d: d["date"]),
         "clock": [round(x) for x in clock],
         "chapters": ch_rows,

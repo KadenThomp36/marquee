@@ -5,7 +5,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const view = $("#view"), topbar = $("#topbar"), tabbar = $("#tabbar");
 let ME = null;
 const CACHE = {};
-const BUILD = "20261120b";   // must match main.py BUILD; a mismatch means this code is stale
+const BUILD = "20261120c";   // must match main.py BUILD; a mismatch means this code is stale
 
 /* ---------- icons (drawn, never emoji) ---------- */
 const I = {
@@ -2976,7 +2976,8 @@ function rsCalendar(days) {
       const k = iso(dt), e = byDay[k], future = dt > today;
       const a = e && e.minutes ? (0.18 + 0.82 * Math.sqrt(e.minutes / max)).toFixed(2) : e && e.pages ? ".12" : 0;
       cells += `<i class="${future ? "fut" : ""}${k === iso(today) ? " now" : ""}" style="--a:${a}"
-        ${e ? `title="${esc(fmtDate(k))} · ${e.minutes >= 1 ? rsDur(e.minutes) : "progress update"}${e.pages ? ` · ${e.pages} pages` : ""}"` : ""}></i>`;
+        ${e ? `title="${esc(fmtDate(k))} · ${e.estimated ? `about ${e.pages} page${e.pages === 1 ? "" : "s"}, spread from your next progress update`
+          : `${e.minutes >= 1 ? rsDur(e.minutes) : "progress update"}${e.pages ? ` · ${e.pages} pages` : ""}`}"` : ""}></i>`;
     }
   }
   // a partial first month would crowd the next label — keep a label only with room to breathe
